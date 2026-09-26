@@ -20,7 +20,7 @@ Hashfront (`~/development/hashfront`, a tactics game with combat randomness).
 | channel state machine (`referee::channel`) | built | `core` | Pure functions: create, join, receive a candidate, dispute, resolve, forced play, timeout, resume, resign |
 | `referee_dojo` (Cairo) | built | `core`, Dojo | `ChannelGame`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint. Games list the models in `build-external-contracts` |
 | `referee_testing` (Cairo) | built | `core` | Test-only STARK-curve signer and hash-chain helper |
-| adapter template (Cairo 2.18) | planned | `core` | SNIP-36 account contract that proves a replay in the virtual OS and relays it to the channel |
+| `referee_adapter` (Cairo 2.18) | built, tested with mocked proof facts | `core` | Generic logic for a SNIP-36 account contract that proves a replay in the virtual OS and relays it to the channel |
 | `sdk` (JS) | hashing and replay built | starknet.js | Signing, transcripts, randomness chains, fixtures; later transaction and proof builders |
 | relay, keeper | planned | `sdk` | Move transport and archive; prove, settle and answer disputes |
 
@@ -158,6 +158,33 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 - `allow_prover` lets namespace owners allowlist adapter classes.
 - Rewards read `binding::result(world, game_id)` once a game is SETTLED.
 
+## Proof adapter
+
+`adapter/referee_adapter` holds the logic, and a game's adapter is an
+immutable `#[starknet::contract(account)]` of about 40 lines
+(`adapter/examples/counter/src/lib.cairo`) that pins the virtual OS program in
+its constructor.
+
+- **`__execute__` (virtual).** A zero-fee INVOKE_V3 that is never broadcast. It:
+  - reads the channel's `snapshot`;
+  - checks the start state against the anchor hash;
+  - replays the signed steps with the game's rules;
+  - emits one L2→L1 message: adapter class, `TAG`, `'REFEREE_PROVED_V1'`,
+    chain, adapter, channel, game, context, epoch, start hash, end hash.
+
+  A prover proves this execution.
+- **`settle` (real).** A transaction with the proof attached. `settle` checks the
+  network-verified proof facts:
+  - PROOF1 or PROOF2;
+  - the virtual SNOS program pinned at deployment;
+  - a base block at or after the anchor and at most 4000 blocks old;
+  - exactly one message equal to the expected transition.
+
+  It then calls the channel's `accept_verified`.
+- **No typed interface per game.** The adapter reaches the channel through
+  raw syscalls (`snapshot`, `accept_verified`), so it works with any
+  referee_dojo game system.
+
 ## Proving strategy
 
 - **Whole game in one proof when it fits.** Final-signature authentication and
@@ -182,7 +209,9 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 1. ~~Channel state machine as pure functions.~~ Done.
 2. ~~`referee_dojo` binding and a counter Dojo system.~~ Done
    (`dojo/examples/counter`, tested in a Dojo test world).
-3. Adapter template, and an end-to-end native proof of a counter game.
+3. ~~Adapter logic (`adapter/referee_adapter`) and a counter adapter.~~ Done,
+   tested with snforge-mocked proof facts. Still to do: an end-to-end native
+   proof of a counter game against a real prover.
 4. Port Surround onto referee, keeping its test suites, and re-measure proofs.
 5. Hashfront rules crate and client integration.
 6. Relay, keeper, and SDK transaction and proof builders.

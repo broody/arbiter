@@ -1,0 +1,24 @@
+[package]
+name = "referee_counter_adapter"
+version = "0.1.0"
+edition = "2024_07"
+cairo-version = "=2.18.0"
+description = "Proof adapter for the counter game."
+
+[dependencies]
+referee = { path = "../../../core" }
+referee_adapter = { path = "../../referee_adapter" }
+referee_counter = { path = "../../../examples/counter" }
+starknet = "=2.18.0"
+
+[dev-dependencies]
+snforge_std = "=0.63.0"
+referee_testing = { path = "../../../testing" }
+
+[lib]
+
+[[target.starknet-contract]]
+casm = true
+
+[scripts]
+test = "snforge test"

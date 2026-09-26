@@ -111,6 +111,7 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 |---|---|---|
 | `referee` | `core/` | The protocol and the channel's dispute logic as pure functions: step hashing and signatures, transcript replay, forced steps, hash-chain randomness, checkpoint approvals. No Dojo. Builds on Cairo 2.13 and 2.18 |
 | `referee_dojo` | `dojo/referee_dojo/` | Dojo models (`ChannelGame`, `ProverAllowed`), the `ChannelUpdated` event, and one helper per entrypoint (create, join, submit, dispute, resolve, force, resume, timeout, resign, prover allowlist) |
+| `referee_adapter` | `adapter/referee_adapter/` | Proof adapter logic: the virtual replay that gets proved (`__execute__`) and `settle`, which checks the proof facts and relays the result. Cairo 2.18. A game's adapter contract is about 40 lines |
 | `referee_testing` | `testing/` | Test-only Cairo signer, so tests can sign messages that bind deployed addresses |
 | `@referee/sdk` | `sdk/` | JS copy of the protocol hashing and replay. Fixtures keep it byte-identical to the Cairo |
 
@@ -118,8 +119,8 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 
 | | |
 |---|---|
-| Built and tested | Protocol core, channel state machine, Dojo binding, JS hashing and replay, counter example (pure and as a Dojo world) |
-| Not yet | Proof adapter (settlement currently uses onchain replay), relay for moves, keeper, SDK transaction and proof builders, more than 2 seats |
+| Built and tested | Protocol core, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS hashing and replay, counter example (pure, as a Dojo world, and with an adapter) |
+| Not yet | An end-to-end native proof against a real prover, relay for moves, keeper, SDK transaction and proof builders, more than 2 seats |
 
 See [DESIGN.md](DESIGN.md) for the protocol details, the proving strategy and
 the roadmap.
@@ -133,7 +134,9 @@ scripts/check.sh
 
 `check.sh` regenerates the JS fixtures, then tests:
 - the pure crates on Scarb 2.13.1 and 2.18.0;
-- the Dojo workspace (`dojo/`) on 2.13.1.
+- the Dojo workspace (`dojo/`) on 2.13.1;
+- the adapter workspace (`adapter/`) on 2.18.0 with Starknet Foundry 0.63.0.
 
 Requirements: Scarb 2.13.1 and 2.18.0 (asdf switches with `ASDF_SCARB_VERSION`),
-Sozo 1.8.5 for the Dojo workspace, and Node 22 or later.
+Sozo 1.8.5 for the Dojo workspace, Starknet Foundry 0.63.0 for the adapter,
+and Node 22 or later.

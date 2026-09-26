@@ -1,0 +1,12 @@
+[package]
+name = "referee_adapter"
+version = "0.1.0"
+edition = "2024_07"
+cairo-version = "=2.18.0"
+description = "Generic SNIP-36 proof adapter logic for referee channels."
+
+[dependencies]
+referee = { path = "../../core" }
+starknet = "=2.18.0"
+
+[lib]
