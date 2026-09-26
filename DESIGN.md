@@ -65,11 +65,27 @@ Rules must be deterministic and must panic on illegal actions.
 **Envelope.** The library wraps the game state:
 `Envelope { seq, transcript, support_turn, last_seat, pending, rng_heads, outcome, game }`.
 
-**Moves.** `Move<A>` is `Play(A)`, `Reveal`, `Recommit` or `Resign`. Every game
-gets the last three for free. A `Step` is `{ seat, action, entropy }`.
+**Moves.** A step is a `Move<A>`:
+
+| Move | Payload | Seat |
+| --- | --- | --- |
+| `Play(A)` | the game action | the due seat |
+| `PlayRandom((A, entropy))` | an action whose `apply` requests randomness, and the actor's next chain value | the due seat |
+| `Reveal(value)` | the named seat's next chain value | the seat the pending request names |
+| `Recommit(tip)` | a new chain tip | the due seat |
+| `Resign(seat)` | the resigning seat | named, since either seat may resign at any time |
+
+Every game gets the last four for free. The seat is implied by the state
+(`actor`), so only `Resign` carries one, and only `PlayRandom` carries entropy.
+`Play` of an action that requests randomness fails with `'Randomness requested'`,
+and `PlayRandom` of one that doesn't fails with `'Unexpected entropy'`. A
+Surround Go stone is 3 felts of calldata; in v1 it was 10 (`{ seat, action,
+entropy }` with a fixed-width action, plus a signature per step).
 
 **Messages.** A step's message is
-`signing_hash(TAG, 'REFEREE_ACTION_V1', context, seq, transcript, step)`.
+`signing_hash(TAG, 'REFEREE_ACTION_V1', context, seq, transcript, move)`.
+`PROTOCOL_VERSION` 2 is in the context hash, so v1 signatures never verify
+under v2.
 - It binds the transcript, not the full state. State is determined by the
   anchor plus the transcript, and hashing a large state on every step is costly
   to prove.
@@ -82,11 +98,15 @@ gets the last three for free. A `Step` is `{ seat, action, entropy }`.
 prover, response window, and per-seat wallets, session keys and randomness-chain
 tips, plus the game config.
 
-**Final-signature authentication** (from Surround). `replay` verifies only each
-seat's last signature in a batch; that signature covers the seat's earlier steps
-through the transcript. Clients must verify every step they receive and never
-sign from an unverified state. The test
-`tampered_earlier_step_breaks_final_signature` covers this.
+**Final-signature authentication** (from Surround). `replay` takes a batch of
+moves and exactly one signature per seat: that seat's last signature in the
+batch, or a zero signature if the seat has no step in it. A seat's last
+signature covers all of its earlier steps through the transcript, so
+intermediate signatures never reach calldata or the proof. Clients still verify
+and keep every signature they receive (`Session` does) and never sign from an
+unverified state. The tests `tampered_earlier_step_breaks_final_signature`,
+`intermediate_signature_is_not_a_final_one` and
+`seat_without_steps_signs_nothing` cover this.
 
 **Signer changes.** `support_turn` counts changes of signer. It ranks dispute
 candidates, so consecutive self-signed steps never outrank a branch the opponent
@@ -94,8 +114,8 @@ acknowledged.
 
 **Randomness.**
 - Each seat commits the tip of a hash chain (`rng_next(v) = poseidon('REFEREE_RNG_V1', v)`).
-- When `apply` requests randomness, the actor must attach its next chain value
-  as `entropy`. The named seat then sends `Reveal`, and the game gets
+- When `apply` requests randomness, the actor sends `PlayRandom` with its next
+  chain value as `entropy`. The named seat then sends `Reveal`, and the game gets
   `seed = poseidon(TAG, 'REFEREE_SEED_V1', context, seq, requester, revealer)`.
 - Neither seat can predict the seed before the second reveal, and neither can
   bias it.
@@ -105,10 +125,13 @@ acknowledged.
   impossible while a reveal is pending.
 
 **Replay and force.**
-- `replay` applies signed steps from an anchor.
-- `force` applies unsigned steps for callers that authenticate the seat
-  themselves, such as a forced onchain turn checked against the wallet caller.
-- Both extend the transcript identically.
+- `replay` applies moves from an anchor against each seat's final signature.
+- `force` applies unsigned moves that must all belong to one seat, for callers
+  that authenticate that seat themselves, such as a forced onchain turn checked
+  against the wallet caller.
+- `apply_steps` applies unsigned moves from any seat, for clients and tests
+  that already verified every signature.
+- All three extend the transcript identically.
 
 ## Channel
 

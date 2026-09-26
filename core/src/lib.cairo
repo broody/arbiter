@@ -13,11 +13,11 @@ pub mod types;
 pub use channel::{Channel, StateRef, state_ref};
 
 pub use protocol::{
-    PROTOCOL_VERSION, action_hash, approve_all, checkpoint_hash, context_hash, due, force, open,
-    reopen_hash, replay, rng_next, seed, signing_hash, state_hash, verify,
+    PROTOCOL_VERSION, action_hash, actor, apply_steps, approve_all, checkpoint_hash, context_hash,
+    due, force, open, reopen_hash, replay, rng_next, seed, signing_hash, state_hash, verify,
 };
 pub use rules::GameRules;
 pub use types::{
     DRAW, Envelope, Move, NO_SEAT, Outcome, Pending, REASON_RESIGN, REASON_TIMEOUT, Signature,
-    SignedStep, Step, Terms,
+    Terms,
 };

@@ -2,11 +2,22 @@
 // Cairo byte for byte; the counter example's fixtures test that.
 import { ec, hash, shortString } from 'starknet';
 
-export const PROTOCOL_VERSION = 1n;
+export const PROTOCOL_VERSION = 2n;
 export const NO_SEAT = 255;
 export const REASON_RESIGN = 128;
 export const REASON_TIMEOUT = 129;
-export const MOVE_PLAY = 0, MOVE_REVEAL = 1, MOVE_RECOMMIT = 2, MOVE_RESIGN = 3;
+export const MOVE_PLAY = 0, MOVE_PLAY_RANDOM = 1, MOVE_REVEAL = 2, MOVE_RECOMMIT = 3, MOVE_RESIGN = 4;
+
+/**
+ * A step is a `Move`. Only `resign` names its seat; every other move belongs to
+ * the seat the state says is due (see `actorOf`).
+ */
+export const play = action => ({ kind: MOVE_PLAY, action });
+/** A game action that requests randomness, with the actor's next hash-chain value. */
+export const playRandom = (action, entropy) => ({ kind: MOVE_PLAY_RANDOM, action, entropy });
+export const reveal = value => ({ kind: MOVE_REVEAL, value });
+export const recommit = tip => ({ kind: MOVE_RECOMMIT, tip });
+export const resign = seat => ({ kind: MOVE_RESIGN, seat });
 
 const PRIME = (1n << 251n) + 17n * (1n << 192n) + 1n;
 const MASK250 = (1n << 250n) - 1n;
@@ -41,16 +52,16 @@ export const contextHash = (game, terms) =>
   poseidon([tag(game.tag), tag('REFEREE_CHANNEL_V1'), PROTOCOL_VERSION, BigInt(game.rulesVersion), ...encodeTerms(game, terms)]);
 
 /** Cairo `Move<A>` Serde: variant index, then payload. */
-export function encodeMove(game, move) {
-  switch (move.kind) {
-    case MOVE_PLAY: return [0n, ...game.encodeAction(move.action)];
-    case MOVE_REVEAL: return [1n, felt(move.value)];
-    case MOVE_RECOMMIT: return [2n, felt(move.tip)];
-    case MOVE_RESIGN: return [3n];
+export function encodeStep(game, step) {
+  switch (step.kind) {
+    case MOVE_PLAY: return [0n, ...game.encodeAction(step.action)];
+    case MOVE_PLAY_RANDOM: return [1n, ...game.encodeAction(step.action), felt(step.entropy)];
+    case MOVE_REVEAL: return [2n, felt(step.value)];
+    case MOVE_RECOMMIT: return [3n, felt(step.tip)];
+    case MOVE_RESIGN: return [4n, BigInt(step.seat)];
     default: throw Error('Unknown move');
   }
 }
-export const encodeStep = (game, step) => [BigInt(step.seat), ...encodeMove(game, step.move), felt(step.entropy ?? 0n)];
 
 export const actionHash = (game, context, seq, transcript, step) =>
   signingHash([tag(game.tag), tag('REFEREE_ACTION_V1'), felt(context), BigInt(seq), felt(transcript), ...encodeStep(game, step)]);
@@ -113,58 +124,61 @@ export function open(game, config, rngTips) {
 
 export const due = (game, env) => env.pending.active ? env.pending.seat : game.due(env.game);
 
+/** The seat a step belongs to (`actor` in protocol.cairo). */
+export function actorOf(game, env, step) {
+  if (step.kind === MOVE_RESIGN) return Number(step.seat);
+  if (step.kind === MOVE_REVEAL) { check(env.pending.active, 'No reveal due'); return env.pending.seat; }
+  check(!env.pending.active, 'Reveal pending');
+  return game.due(env.game);
+}
+
 /**
- * Apply one step, mirroring `transition` in protocol.cairo. `game` provides
+ * Apply one step, mirroring `advance` in protocol.cairo. `game` provides
  * init/apply/resolve/due/outcome over plain JS state, and optionally
  * load/witness for games whose replay needs a witness (see `load`).
  * `scratch` is the game's working memory; `apply`/`resolve` may mutate it, so
  * pass a copy (`cloneScratch`) when the step might be rejected.
- * Returns { env, message }.
+ * Returns { env, message, seat }.
  */
 export function applyStep(game, context, config, env, step, scratch = null) {
+  check(!env.outcome.finished, 'Game already finished');
+  const seat = actorOf(game, env, step);
+  check(seat === 0 || seat === 1, 'Invalid seat');
   const message = actionHash(game, context, env.seq, env.transcript, step);
   const next = structuredClone(env);
-  check(!next.outcome.finished, 'Game already finished');
-  const seat = step.seat;
-  check(seat < 2, 'Invalid seat');
-  const entropy = felt(step.entropy ?? 0n);
   const takeReveal = (s, value) => {
     check(value !== 0n && rngNext(value) === next.rng_heads[s], 'Invalid reveal');
     next.rng_heads[s] = value;
   };
-  switch (step.move.kind) {
+  switch (step.kind) {
     case MOVE_PLAY: {
-      check(!next.pending.active, 'Reveal pending');
-      check(game.due(next.game) === seat, 'Not your turn');
-      const [state, request] = game.apply(config, next.game, seat, step.move.action, scratch);
+      const [state, request] = game.apply(config, next.game, seat, step.action, scratch);
+      check(request === null, 'Randomness requested');
       next.game = state;
-      if (request !== null) {
-        check(request !== seat && request < 2, 'Invalid reveal seat');
-        takeReveal(seat, entropy);
-        next.pending = { active: true, seat: request, seq: next.seq, entropy };
-      } else {
-        check(entropy === 0n, 'Unexpected entropy');
-      }
+      break;
+    }
+    case MOVE_PLAY_RANDOM: {
+      const [state, request] = game.apply(config, next.game, seat, step.action, scratch);
+      check(request !== null, 'Unexpected entropy');
+      check(request !== seat && request < 2, 'Invalid reveal seat');
+      next.game = state;
+      const entropy = felt(step.entropy);
+      takeReveal(seat, entropy);
+      next.pending = { active: true, seat: request, seq: next.seq, entropy };
       break;
     }
     case MOVE_REVEAL: {
-      check(entropy === 0n, 'Unexpected entropy');
-      check(next.pending.active && next.pending.seat === seat, 'No reveal due');
-      takeReveal(seat, felt(step.move.value));
-      const s = seed(game, context, next.pending.seq, next.pending.entropy, step.move.value);
+      takeReveal(seat, felt(step.value));
+      const s = seed(game, context, next.pending.seq, next.pending.entropy, step.value);
       next.pending = { active: false, seat: 0, seq: 0, entropy: 0n };
       next.game = game.resolve(config, next.game, s, scratch);
       break;
     }
     case MOVE_RECOMMIT:
-      check(entropy === 0n, 'Unexpected entropy');
-      check(!next.pending.active, 'Reveal pending');
-      check(game.due(next.game) === seat, 'Not your turn');
-      check(felt(step.move.tip) !== 0n, 'Invalid tip');
-      next.rng_heads[seat] = felt(step.move.tip);
+      check(felt(step.tip) !== 0n, 'Invalid tip');
+      next.rng_heads[seat] = felt(step.tip);
       break;
     case MOVE_RESIGN:
-      check(entropy === 0n, 'Unexpected entropy');
       next.pending = { active: false, seat: 0, seq: 0, entropy: 0n };
       next.outcome = { finished: true, winner: 2 - seat, reason: REASON_RESIGN };
       break;
@@ -178,7 +192,15 @@ export function applyStep(game, context, config, env, step, scratch = null) {
   next.last_seat = seat;
   next.seq += 1;
   next.transcript = poseidon([next.transcript, message]);
-  return { env: next, message };
+  return { env: next, message, seat };
+}
+
+/** Apply unsigned steps from any seat (`apply_steps` in protocol.cairo). */
+export function applySteps(game, context, config, start, witness, steps) {
+  let env = start;
+  const scratch = load(game, config, start.game, witness);
+  for (const step of steps) env = applyStep(game, context, config, env, step, scratch).env;
+  return env;
 }
 
 /** Build a game's working memory from its replay witness (`GameRules::load`). */
@@ -199,8 +221,9 @@ export function replay(game, terms, start, witness, signed) {
   let env = start;
   const scratch = load(game, terms.config, start.game, witness);
   for (const { step, signature } of signed) {
+    const seat = actorOf(game, env, step);
     const message = actionHash(game, context, env.seq, env.transcript, step);
-    check(verify(message, signature, terms.keys[step.seat]), 'Invalid session signature');
+    check(verify(message, signature, terms.keys[seat]), 'Invalid session signature');
     env = applyStep(game, context, terms.config, env, step, scratch).env;
   }
   return { env, scratch };
@@ -225,7 +248,7 @@ export class Session {
   /** Verify and apply a step signed by the other seat (or ourselves). */
   receive(signed) {
     // Authenticate before running any game logic on the step.
-    const seat = signed.step.seat;
+    const seat = actorOf(this.game, this.env, signed.step);
     check(seat === 0 || seat === 1, 'Invalid seat');
     const message = actionHash(this.game, this.context, this.env.seq, this.env.transcript, signed.step);
     check(verify(message, signed.signature, this.terms.keys[seat]), 'Invalid session signature');
@@ -233,17 +256,20 @@ export class Session {
     const { env } = applyStep(this.game, this.context, this.terms.config, this.env, signed.step, scratch);
     this.env = env;
     this.scratch = scratch;
-    const record = { step: signed.step, signature: normSignature(signed.signature) };
+    const record = { step: signed.step, signature: normSignature(signed.signature), seat };
     this.steps.push(record);
     return record;
   }
 
   /** Sign and apply our own step. */
   move(step, privateKey) {
-    check(publicKey(privateKey) === felt(this.terms.keys[step.seat]), 'Wrong signing key');
+    check(publicKey(privateKey) === felt(this.terms.keys[actorOf(this.game, this.env, step)]), 'Wrong signing key');
     const message = actionHash(this.game, this.context, this.env.seq, this.env.transcript, step);
     return this.receive({ step, signature: sign(message, privateKey) });
   }
+
+  /** Steps and one final signature per seat, as replay calldata takes them. */
+  batch() { return { steps: this.steps.map(s => s.step), signatures: finalSignatures(this.steps) }; }
 
   /** Witness for the current state, e.g. when it becomes the next anchor. */
   witness() { return this.game.witness ? this.game.witness(this.scratch) : null; }
@@ -257,10 +283,11 @@ export class Session {
   }
 
   export() {
-    return { version: 1, terms: this.terms, start: this.start, witness: this.startWitness, steps: this.steps };
+    const steps = this.steps.map(({ step, signature }) => ({ step, signature }));
+    return { version: 2, terms: this.terms, start: this.start, witness: this.startWitness, steps };
   }
   static import(game, record) {
-    check(record.version === 1, 'Unsupported transcript version');
+    check(record.version === 2, 'Unsupported transcript version');
     const session = new Session(game, record.terms, { start: record.start, witness: record.witness });
     for (const signed of record.steps) session.receive(signed);
     return session;
@@ -271,9 +298,19 @@ export class Session {
 
 export const encodeSignature = sig => [felt(sig.r), felt(sig.s)];
 export const encodeSignatures = sigs => [BigInt(sigs.length), ...sigs.flatMap(encodeSignature)];
-export const encodeSignedStep = (game, signed) => [...encodeStep(game, signed.step), ...encodeSignature(signed.signature)];
-export const encodeSignedSteps = (game, list) => [BigInt(list.length), ...list.flatMap(s => encodeSignedStep(game, s))];
 export const encodeSteps = (game, list) => [BigInt(list.length), ...list.flatMap(s => encodeStep(game, s))];
+
+/**
+ * Each seat's last signature among signed step records (`{ seat, signature }`),
+ * or ZERO_SIGNATURE for a seat with no step: what replay verifies.
+ */
+export function finalSignatures(records, seats = 2) {
+  const finals = Array.from({ length: seats }, () => ZERO_SIGNATURE);
+  for (const r of records) finals[r.seat] = normSignature(r.signature);
+  return finals;
+}
+/** Replay calldata: the steps, then one final signature per seat. */
+export const encodeBatch = (game, { steps, signatures }) => [...encodeSteps(game, steps), ...encodeSignatures(signatures)];
 
 class Reader {
   constructor(values) { this.values = values.map(BigInt); this.at = 0; }

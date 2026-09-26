@@ -28,32 +28,22 @@ pub struct Terms<C> {
     pub config: C,
 }
 
-/// A step's payload. `Play` carries a game action; the rest are protocol moves
-/// every game gets for free.
+/// A step: one seat's signed move. Only `Resign` names its seat; every other
+/// move belongs to the seat the state says is due (the turn's seat, or the
+/// pending seat for `Reveal`), so the seat is never carried or signed twice.
 #[derive(Copy, Drop, Serde, PartialEq, Debug)]
 pub enum Move<A> {
+    /// The due seat's game action.
     Play: A,
+    /// The due seat's game action that requests randomness, with the actor's
+    /// next hash-chain value.
+    PlayRandom: (A, felt252),
     /// The pending seat's next hash-chain value.
     Reveal: felt252,
     /// The due seat replaces its hash-chain tip before the chain runs out.
     Recommit: felt252,
-    /// Either seat, at any time.
-    Resign,
-}
-
-/// One seat's step. `entropy` is the actor's next hash-chain value when the
-/// game action requests randomness, and zero otherwise.
-#[derive(Copy, Drop, Serde, PartialEq, Debug)]
-pub struct Step<A> {
-    pub seat: u8,
-    pub action: Move<A>,
-    pub entropy: felt252,
-}
-
-#[derive(Copy, Drop, Serde, PartialEq, Debug)]
-pub struct SignedStep<A> {
-    pub step: Step<A>,
-    pub signature: Signature,
+    /// This seat concedes, at any time.
+    Resign: u8,
 }
 
 /// A randomness request waiting for `seat` to reveal.

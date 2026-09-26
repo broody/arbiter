@@ -8,8 +8,8 @@ use dojo::event::EventStorage;
 use dojo::model::ModelStorage;
 use dojo::world::{IWorldDispatcherTrait, WorldStorage};
 use referee::{
-    Envelope, GameRules, Outcome, Signature, SignedStep, Step, Terms, approve_all,
-    channel as machine, checkpoint_hash, context_hash, open, reopen_hash, replay, state_ref,
+    Envelope, GameRules, Move, Outcome, Signature, Terms, approve_all, channel as machine,
+    checkpoint_hash, context_hash, open, reopen_hash, replay, state_ref,
 };
 use starknet::syscalls::get_class_hash_at_syscall;
 use starknet::{
@@ -115,7 +115,8 @@ pub fn accept_verified<impl R: GameRules, +Serde<R::State>, +Drop<R::State>>(
     receive::<R>(ref world, game, epoch, end, acks);
 }
 
-/// Replay signed steps onchain from the anchor, without a prover.
+/// Replay steps onchain from the anchor, without a prover, against each seat's
+/// final signature (zero for a seat with no step).
 pub fn submit_history<
     impl R: GameRules,
     +Serde<R::Config>,
@@ -134,13 +135,16 @@ pub fn submit_history<
     epoch: u32,
     start: Envelope<R::State>,
     witness: R::Witness,
-    steps: Span<SignedStep<R::Action>>,
+    steps: Span<Move<R::Action>>,
+    signatures: Span<Signature>,
     acks: Span<Signature>,
 ) {
     let game = read(@world, game_id);
     assert(state_ref::<R>(@start).hash == game.anchor.hash, 'Wrong anchor state');
     let terms = terms::<R>(@game);
-    let end = replay::<R>(game.context, terms.keys, @terms.config, start, witness, steps);
+    let end = replay::<
+        R,
+    >(game.context, terms.keys, @terms.config, start, witness, steps, signatures);
     receive::<R>(ref world, game, epoch, end, acks);
 }
 
@@ -179,16 +183,13 @@ pub fn force<
     epoch: u32,
     start: Envelope<R::State>,
     witness: R::Witness,
-    steps: Span<Step<R::Action>>,
+    steps: Span<Move<R::Action>>,
 ) {
     let game = read(@world, game_id);
     let seat = seat_of(@game, get_caller_address());
-    for step in steps {
-        assert(*step.seat == seat, 'Not your step');
-    }
     assert(state_ref::<R>(@start).hash == game.anchor.hash, 'Wrong anchor state');
     let config = config::<R>(@game);
-    let end = referee::force::<R>(game.context, @config, start, witness, steps);
+    let end = referee::force::<R>(game.context, @config, start, witness, seat, steps);
     let channel = machine::forced(
         channel_of(@game),
         epoch,

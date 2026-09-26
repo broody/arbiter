@@ -4,9 +4,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  MOVE_PLAY, MOVE_RESIGN, MOVE_REVEAL, REASON_RESIGN, Reader, Session, ZERO_SIGNATURE, contextHash,
-  decodeChannelGame, decodeSnapshot, decodeTerms, encodeSignatures, encodeSignedSteps, encodeTerms,
-  proofMessageHash, proofPayload, publicKey, replay, rngChain, tag,
+  REASON_RESIGN, Reader, Session, ZERO_SIGNATURE, contextHash, decodeChannelGame, decodeSnapshot,
+  decodeTerms, encodeBatch, encodeSignatures, encodeTerms, finalSignatures, play, playRandom,
+  proofMessageHash, proofPayload, publicKey, replay, resign, reveal, rngChain, tag,
 } from '../src/index.mjs';
 import { ADD, GAMBLE, counter } from '../examples/counter.mjs';
 
@@ -16,13 +16,13 @@ const terms = {
   chain_id: tag('SN_TEST'), channel: 0xc4a11e1n, game_id: 1n, prover: 0xad0b7e5n, response_seconds: 3600,
   players: [0xa11cen, 0xb0bn], keys: keys.map(publicKey), rng_tips: chains.map(c => c[8]), config: { target: 20 },
 };
-const add = (seat, amount) => ({ seat, move: { kind: MOVE_PLAY, action: { kind: ADD, amount } } });
+const add = amount => play({ kind: ADD, amount });
 
 function played() {
   const session = new Session(counter, terms);
-  session.move(add(0, 3), keys[0]);
-  session.move({ seat: 1, move: { kind: MOVE_PLAY, action: { kind: GAMBLE, amount: 0 } }, entropy: chains[1][7] }, keys[1]);
-  session.move({ seat: 0, move: { kind: MOVE_REVEAL, value: chains[0][7] } }, keys[0]);
+  session.move(add(3), keys[0]);
+  session.move(playRandom({ kind: GAMBLE, amount: 0 }, chains[1][7]), keys[1]);
+  session.move(reveal(chains[0][7]), keys[0]);
   return session;
 }
 
@@ -48,9 +48,11 @@ test('a rejected step leaves the session unchanged', () => {
   const session = played();
   const before = session.stateHash();
   assert.equal(session.due(), 0);
-  assert.throws(() => session.move(add(0, 4), keys[0]), /Invalid amount/);
-  assert.throws(() => session.move(add(0, 1), keys[1]), /Wrong signing key/);
-  assert.throws(() => session.move(add(1, 1), keys[1]), /Not your turn/);
+  assert.throws(() => session.move(add(4), keys[0]), /Invalid amount/);
+  assert.throws(() => session.move(add(1), keys[1]), /Wrong signing key/);
+  assert.throws(() => session.move(play({ kind: GAMBLE, amount: 0 }), keys[0]), /Randomness requested/);
+  assert.throws(() => session.move(playRandom({ kind: ADD, amount: 1 }, chains[0][6]), keys[0]), /Unexpected entropy/);
+  assert.throws(() => session.move(reveal(chains[0][6]), keys[0]), /No reveal due/);
   assert.equal(session.stateHash(), before);
   assert.equal(session.steps.length, 3);
 });
@@ -63,9 +65,21 @@ test('export and import round-trip through full verification', () => {
   assert.equal(env.transcript, session.env.transcript);
 });
 
+test('replay calldata carries one final signature per seat', () => {
+  const session = played();
+  assert.deepEqual(session.steps.map(s => s.seat), [0, 1, 0]);
+  const { steps, signatures } = session.batch();
+  assert.deepEqual(signatures, [session.steps[2].signature, session.steps[1].signature]);
+  assert.deepEqual(finalSignatures(session.steps.slice(0, 1)), [session.steps[0].signature, ZERO_SIGNATURE]);
+  const calldata = encodeBatch(counter, { steps, signatures });
+  // 3 steps: Play(ADD 3) = 3 felts, PlayRandom(GAMBLE, entropy) = 4, Reveal(value) = 2; then 2 signatures.
+  assert.deepEqual(calldata.slice(0, 4), [3n, 0n, BigInt(ADD), 3n]);
+  assert.equal(calldata.length, 1 + 3 + 4 + 2 + 1 + 4);
+});
+
 test('resignation ends the game for the other seat', () => {
   const session = played();
-  session.move({ seat: 1, move: { kind: MOVE_RESIGN } }, keys[1]);
+  session.move(resign(1), keys[1]);
   assert.deepEqual(session.env.outcome, { finished: true, winner: 1, reason: REASON_RESIGN });
 });
 
@@ -88,10 +102,7 @@ test('terms, snapshots and channels decode from Cairo serialization', () => {
   assert.throws(() => new Reader([]).next(), /Truncated encoding/);
 });
 
-test('calldata encodes spans of signed steps and approvals', () => {
-  const session = played();
-  const steps = encodeSignedSteps(counter, session.steps);
-  assert.equal(steps[0], 3n);
+test('approvals encode as a span of signatures', () => {
   assert.deepEqual(encodeSignatures([ZERO_SIGNATURE, ZERO_SIGNATURE]), [2n, 0n, 0n, 0n, 0n]);
 });
 

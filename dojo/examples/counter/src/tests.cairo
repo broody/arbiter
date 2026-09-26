@@ -6,8 +6,8 @@ use dojo_cairo_test::{
 };
 use referee::channel::{ACTIVE, DISPUTE, FORCED, SETTLED};
 use referee::{
-    Envelope, Move, REASON_TIMEOUT, Signature, SignedStep, Step, Terms, action_hash,
-    checkpoint_hash, context_hash, force, open, reopen_hash, state_hash,
+    Envelope, Move, REASON_TIMEOUT, Signature, Terms, action_hash, actor, apply_steps,
+    checkpoint_hash, context_hash, open, reopen_hash, state_hash,
 };
 use referee_counter::{ADD, Action, Config, Counter, CounterRules, GAMBLE};
 use referee_dojo::models::{ChannelGame, e_ChannelUpdated, m_ChannelGame, m_ProverAllowed};
@@ -87,34 +87,35 @@ fn opening(terms: @Terms<Config>) -> Envelope<Counter> {
     open::<CounterRules>(terms.config, *terms.rng_tips)
 }
 
-fn add(seat: u8, amount: u8) -> Step<Action> {
-    Step { seat, action: Move::Play(Action { kind: ADD, amount }), entropy: 0 }
+fn add(amount: u8) -> Move<Action> {
+    Move::Play(Action { kind: ADD, amount })
 }
 
-/// Sign each step with its seat's key, as a client would, and return the end state.
+/// Sign each step with its seat's key, as a client would. Returns each seat's
+/// final signature, as replay takes them, and the end state.
 fn sign_steps(
-    terms: @Terms<Config>, start: Envelope<Counter>, steps: Span<Step<Action>>,
-) -> (Span<SignedStep<Action>>, Envelope<Counter>) {
+    terms: @Terms<Config>, start: Envelope<Counter>, steps: Span<Move<Action>>,
+) -> (Span<Signature>, Envelope<Counter>) {
     let context = context_hash::<CounterRules>(terms);
     let mut env = start;
-    let mut signed = array![];
+    let mut finals = no_approvals();
     for step in steps {
-        let step = *step;
-        let message = action_hash::<CounterRules>(context, env.seq, env.transcript, @step);
-        let key = if step.seat == 0 {
-            PK_A
-        } else {
-            PK_B
-        };
-        signed.append(SignedStep { step, signature: sign(message, key) });
-        env = force::<CounterRules>(context, terms.config, env, (), array![step].span());
+        let seat = actor::<CounterRules>(@env, step);
+        let message = action_hash::<CounterRules>(context, env.seq, env.transcript, step);
+        finals =
+            if seat == 0 {
+                array![sign(message, PK_A), *finals.at(1)].span()
+            } else {
+                array![*finals.at(0), sign(message, PK_B)].span()
+            };
+        env = apply_steps::<CounterRules>(context, terms.config, env, (), array![*step].span());
     }
-    (signed.span(), env)
+    (finals, env)
 }
 
 /// Alice reaches 20 first: 3, 3, 3, 3, 3, 3, then 2.
-fn full_game() -> Span<Step<Action>> {
-    array![add(0, 3), add(1, 3), add(0, 3), add(1, 3), add(0, 3), add(1, 3), add(0, 2)].span()
+fn full_game() -> Span<Move<Action>> {
+    array![add(3), add(3), add(3), add(3), add(3), add(3), add(2)].span()
 }
 
 fn approvals(message: felt252) -> Span<Signature> {
@@ -155,14 +156,14 @@ fn cosigned_game_settles_in_one_transaction() {
     let (game, world, id) = started();
     let terms = game.terms(id);
     let start = opening(@terms);
-    let (signed, end) = sign_steps(@terms, start, full_game());
+    let (signatures, end) = sign_steps(@terms, start, full_game());
     let context = context_hash::<CounterRules>(@terms);
     let acks = approvals(
         checkpoint_hash::<CounterRules>(context, 0, state_hash::<CounterRules>(@end)),
     );
     // Anyone may submit, e.g. a keeper.
     caller(CAROL());
-    game.submit_history(id, 0, start, signed, acks);
+    game.submit_history(id, 0, start, full_game(), signatures, acks);
     let channel = stored(@world, id);
     assert_eq!(channel.status, SETTLED);
     assert_eq!(channel.result.winner, 1); // Alice, seat 0
@@ -174,9 +175,9 @@ fn unapproved_result_settles_after_the_window() {
     let (game, world, id) = started();
     let terms = game.terms(id);
     let start = opening(@terms);
-    let (signed, _) = sign_steps(@terms, start, full_game());
+    let (signatures, _) = sign_steps(@terms, start, full_game());
     caller(ALICE());
-    game.submit_history(id, 0, start, signed, no_approvals());
+    game.submit_history(id, 0, start, full_game(), signatures, no_approvals());
     assert_eq!(stored(@world, id).status, DISPUTE);
     set_block_timestamp(WINDOW.into());
     game.resolve(id, 0);
@@ -192,7 +193,7 @@ fn forced_play_then_timeout() {
     assert_eq!(stored(@world, id).status, FORCED);
     // Alice plays her turn onchain; Bob never answers.
     caller(ALICE());
-    game.force(id, 1, opening(@terms), array![add(0, 3)].span());
+    game.force(id, 1, opening(@terms), array![add(3)].span());
     let channel = stored(@world, id);
     assert_eq!(channel.anchor.due, 1);
     set_block_timestamp(channel.deadline);
@@ -208,24 +209,20 @@ fn forced_gamble_is_revealed_onchain() {
     let (game, world, id) = forced_play();
     let terms = game.terms(id);
     let context = context_hash::<CounterRules>(@terms);
-    let gamble = Step {
-        seat: 0,
-        action: Move::Play(Action { kind: GAMBLE, amount: 0 }),
-        entropy: chain_value(SEED_A, RNG_LEN - 1),
-    };
+    let gamble = Move::PlayRandom(
+        (Action { kind: GAMBLE, amount: 0 }, chain_value(SEED_A, RNG_LEN - 1)),
+    );
     caller(ALICE());
     game.force(id, 1, opening(@terms), array![gamble].span());
     // Bob now owes the reveal.
     assert_eq!(stored(@world, id).anchor.due, 1);
-    let after_gamble = force::<
+    let after_gamble = apply_steps::<
         CounterRules,
     >(context, @terms.config, opening(@terms), (), array![gamble].span());
-    let reveal = Step {
-        seat: 1, action: Move::Reveal(chain_value(SEED_B, RNG_LEN - 1)), entropy: 0,
-    };
+    let reveal = Move::Reveal(chain_value(SEED_B, RNG_LEN - 1));
     caller(BOB());
     game.force(id, 2, after_gamble, array![reveal].span());
-    let end = force::<
+    let end = apply_steps::<
         CounterRules,
     >(context, @terms.config, after_gamble, (), array![reveal].span());
     let channel = stored(@world, id);
@@ -273,8 +270,8 @@ fn only_the_owner_allows_provers() {
 fn replay_must_start_from_the_anchor() {
     let (game, _, id) = started();
     let terms = game.terms(id);
-    let (signed, end) = sign_steps(@terms, opening(@terms), full_game());
-    game.submit_history(id, 0, end, signed, no_approvals());
+    let (signatures, end) = sign_steps(@terms, opening(@terms), full_game());
+    game.submit_history(id, 0, end, full_game(), signatures, no_approvals());
 }
 
 #[test]
@@ -291,5 +288,5 @@ fn forced_steps_must_be_the_callers() {
     let (game, _, id) = forced_play();
     let terms = game.terms(id);
     caller(BOB());
-    game.force(id, 1, opening(@terms), array![add(0, 3)].span());
+    game.force(id, 1, opening(@terms), array![add(3)].span());
 }

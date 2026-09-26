@@ -1,6 +1,6 @@
 //! The counter game as a Dojo world. The whole channel system is one line per
 //! entrypoint on top of `referee_dojo::channel`.
-use referee::{Envelope, Signature, SignedStep, Step, Terms};
+use referee::{Envelope, Move, Signature, Terms};
 use referee_counter::{Action, Config, Counter};
 use starknet::ContractAddress;
 
@@ -30,7 +30,8 @@ pub trait ICounterChannel<T> {
         game_id: felt252,
         epoch: u32,
         start: Envelope<Counter>,
-        steps: Span<SignedStep<Action>>,
+        steps: Span<Move<Action>>,
+        signatures: Span<Signature>,
         acks: Span<Signature>,
     );
     fn open_dispute(ref self: T, game_id: felt252, epoch: u32);
@@ -40,7 +41,7 @@ pub trait ICounterChannel<T> {
         game_id: felt252,
         epoch: u32,
         start: Envelope<Counter>,
-        steps: Span<Step<Action>>,
+        steps: Span<Move<Action>>,
     );
     fn resume(ref self: T, game_id: felt252, epoch: u32, acks: Span<Signature>);
     fn claim_timeout(ref self: T, game_id: felt252, epoch: u32);
@@ -53,7 +54,7 @@ pub trait ICounterChannel<T> {
 #[dojo::contract]
 pub mod channel {
     use dojo::world::WorldStorage;
-    use referee::{Envelope, Signature, SignedStep, Step, Terms};
+    use referee::{Envelope, Move, Signature, Terms};
     use referee_counter::{Action, Config, Counter, CounterRules};
     use referee_dojo::channel as binding;
     use starknet::ContractAddress;
@@ -104,13 +105,14 @@ pub mod channel {
             game_id: felt252,
             epoch: u32,
             start: Envelope<Counter>,
-            steps: Span<SignedStep<Action>>,
+            steps: Span<Move<Action>>,
+            signatures: Span<Signature>,
             acks: Span<Signature>,
         ) {
             let mut world = self.world_default();
             binding::submit_history::<
                 CounterRules,
-            >(ref world, game_id, epoch, start, (), steps, acks);
+            >(ref world, game_id, epoch, start, (), steps, signatures, acks);
         }
 
         fn open_dispute(ref self: ContractState, game_id: felt252, epoch: u32) {
@@ -128,7 +130,7 @@ pub mod channel {
             game_id: felt252,
             epoch: u32,
             start: Envelope<Counter>,
-            steps: Span<Step<Action>>,
+            steps: Span<Move<Action>>,
         ) {
             let mut world = self.world_default();
             binding::force::<CounterRules>(ref world, game_id, epoch, start, (), steps);

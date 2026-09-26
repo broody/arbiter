@@ -1,9 +1,10 @@
 use referee::{
-    Envelope, Move, REASON_RESIGN, SignedStep, Step, approve_all, checkpoint_hash, context_hash,
-    force, open, replay, rng_next, state_hash,
+    Envelope, Move, REASON_RESIGN, Signature, apply_steps, approve_all, checkpoint_hash,
+    context_hash, force, open, replay, rng_next, state_hash,
 };
 use crate::fixtures::{
-    CHECKPOINT, CONTEXT, RNG_LEN, SEED_0, SEED_1, STATE_HASH, acks, expected, steps, terms,
+    CHECKPOINT, CONTEXT, RNG_LEN, SEED_0, SEED_1, STATE_HASH, acks, expected, finals, signatures,
+    steps, terms,
 };
 use crate::{ADD, Action, Counter, CounterRules, GAMBLE};
 
@@ -23,13 +24,22 @@ fn chain(seed: felt252, index: u32) -> felt252 {
     value
 }
 
-fn play(seat: u8, kind: u8, amount: u8, entropy: felt252) -> Step<Action> {
-    Step { seat, action: Move::Play(Action { kind, amount }), entropy }
+fn add(amount: u8) -> Move<Action> {
+    Move::Play(Action { kind: ADD, amount })
 }
 
-fn run_forced(steps: Array<Step<Action>>) -> Envelope<Counter> {
+fn gamble(entropy: felt252) -> Move<Action> {
+    Move::PlayRandom((Action { kind: GAMBLE, amount: 0 }, entropy))
+}
+
+fn run(steps: Array<Move<Action>>) -> Envelope<Counter> {
     let t = terms();
-    force::<CounterRules>(CONTEXT, @t.config, start(), (), steps.span())
+    apply_steps::<CounterRules>(CONTEXT, @t.config, start(), (), steps.span())
+}
+
+fn replay_all(steps: Span<Move<Action>>, signatures: Array<Signature>) -> Envelope<Counter> {
+    let t = terms();
+    replay::<CounterRules>(CONTEXT, t.keys, @t.config, start(), (), steps, signatures.span())
 }
 
 #[test]
@@ -39,8 +49,7 @@ fn context_hash_matches_sdk() {
 
 #[test]
 fn replay_matches_sdk() {
-    let t = terms();
-    let end = replay::<CounterRules>(CONTEXT, t.keys, @t.config, start(), (), steps().span());
+    let end = replay_all(steps().span(), finals(0, steps().len()));
     assert_eq!(end, expected());
     assert_eq!(state_hash::<CounterRules>(@end), STATE_HASH);
 }
@@ -57,87 +66,140 @@ fn replay_splits_at_any_point() {
     // replay: checkpoints do not change the result.
     let t = terms();
     let all = steps().span();
-    let mid = replay::<CounterRules>(CONTEXT, t.keys, @t.config, start(), (), all.slice(0, 4));
+    let mid = replay_all(all.slice(0, 4), finals(0, 4));
     let end = replay::<
         CounterRules,
-    >(CONTEXT, t.keys, @t.config, mid, (), all.slice(4, all.len() - 4));
+    >(
+        CONTEXT,
+        t.keys,
+        @t.config,
+        mid,
+        (),
+        all.slice(4, all.len() - 4),
+        finals(4, all.len()).span(),
+    );
     assert_eq!(end, expected());
 }
 
 #[test]
 #[should_panic(expected: 'Invalid session signature')]
+fn intermediate_signature_is_not_a_final_one() {
+    // Seat 0's first signature, not its last, for the whole game.
+    let all = finals(0, steps().len());
+    replay_all(steps().span(), array![*signatures().at(0), *all.at(1)]);
+}
+
+#[test]
+#[should_panic(expected: 'Unexpected signature')]
+fn seat_without_steps_signs_nothing() {
+    // Step 0 is seat 0's alone; a signature for seat 1 is rejected.
+    replay_all(steps().span().slice(0, 1), array![*signatures().at(0), *signatures().at(1)]);
+}
+
+#[test]
+#[should_panic(expected: 'Wrong signature count')]
+fn one_signature_per_seat() {
+    replay_all(steps().span(), signatures());
+}
+
+#[test]
+#[should_panic(expected: 'Invalid session signature')]
 fn tampered_earlier_step_breaks_final_signature() {
-    let t = terms();
-    let mut tampered: Array<SignedStep<Action>> = array![];
+    let mut tampered: Array<Move<Action>> = array![];
     let mut first = true;
-    for signed in steps() {
+    for step in steps() {
         if first {
-            // Seat 0's opening ADD 3 becomes ADD 1, keeping the original signature.
-            let step = play(0, ADD, 1, 0);
-            tampered.append(SignedStep { step, signature: signed.signature });
+            // Seat 0's opening ADD 3 becomes ADD 1 under the original final signatures.
+            tampered.append(add(1));
             first = false;
         } else {
-            tampered.append(signed);
+            tampered.append(step);
         }
     }
-    replay::<CounterRules>(CONTEXT, t.keys, @t.config, start(), (), tampered.span());
+    replay_all(tampered.span(), finals(0, steps().len()));
 }
 
 #[test]
 fn resign_awards_the_other_seat() {
-    let end = run_forced(array![Step { seat: 1, action: Move::Resign, entropy: 0 }]);
+    let end = run(array![Move::Resign(1)]);
     assert!(end.outcome.finished);
     assert_eq!(end.outcome.winner, 1); // seat 0 + 1
     assert_eq!(end.outcome.reason, REASON_RESIGN);
 }
 
 #[test]
-#[should_panic(expected: 'Not your turn')]
-fn out_of_turn_play_rejected() {
-    run_forced(array![play(1, ADD, 1, 0)]);
+#[should_panic(expected: 'Not your step')]
+fn forced_steps_belong_to_the_caller() {
+    let t = terms();
+    force::<CounterRules>(CONTEXT, @t.config, start(), (), 1, array![add(1)].span());
+}
+
+#[test]
+fn forced_resignation_names_its_seat() {
+    let t = terms();
+    let end = force::<
+        CounterRules,
+    >(CONTEXT, @t.config, start(), (), 1, array![Move::Resign(1)].span());
+    assert_eq!(end.outcome.winner, 1);
+}
+
+#[test]
+#[should_panic(expected: 'Randomness requested')]
+fn randomness_needs_entropy() {
+    run(array![Move::Play(Action { kind: GAMBLE, amount: 0 })]);
+}
+
+#[test]
+#[should_panic(expected: 'Unexpected entropy')]
+fn entropy_needs_a_request() {
+    run(array![Move::PlayRandom((Action { kind: ADD, amount: 1 }, chain(SEED_0, RNG_LEN - 1)))]);
 }
 
 #[test]
 #[should_panic(expected: 'Invalid reveal')]
 fn gamble_requires_the_actors_chain_value() {
-    run_forced(array![play(0, GAMBLE, 0, 0x1234)]);
+    run(array![gamble(0x1234)]);
 }
 
 #[test]
 #[should_panic(expected: 'Invalid reveal')]
 fn reveal_must_come_from_the_committed_chain() {
-    run_forced(
-        array![
-            play(0, GAMBLE, 0, chain(SEED_0, RNG_LEN - 1)),
-            Step { seat: 1, action: Move::Reveal(0xbad), entropy: 0 },
-        ],
+    run(array![gamble(chain(SEED_0, RNG_LEN - 1)), Move::Reveal(0xbad)]);
+}
+
+#[test]
+#[should_panic(expected: 'Not your step')]
+fn requester_cannot_reveal_for_the_opponent() {
+    // The reveal belongs to seat 1: even its valid value is not seat 0's step.
+    let t = terms();
+    force::<
+        CounterRules,
+    >(
+        CONTEXT,
+        @t.config,
+        start(),
+        (),
+        0,
+        array![gamble(chain(SEED_0, RNG_LEN - 1)), Move::Reveal(chain(SEED_1, RNG_LEN - 1))].span(),
     );
 }
 
 #[test]
 #[should_panic(expected: 'No reveal due')]
-fn requester_cannot_reveal_for_the_opponent() {
-    run_forced(
-        array![
-            play(0, GAMBLE, 0, chain(SEED_0, RNG_LEN - 1)),
-            Step { seat: 0, action: Move::Reveal(chain(SEED_0, RNG_LEN - 2)), entropy: 0 },
-        ],
-    );
+fn reveal_needs_a_request() {
+    run(array![Move::Reveal(chain(SEED_0, RNG_LEN - 1))]);
 }
 
 #[test]
 #[should_panic(expected: 'Reveal pending')]
 fn play_blocks_until_reveal() {
-    run_forced(array![play(0, GAMBLE, 0, chain(SEED_0, RNG_LEN - 1)), play(0, ADD, 1, 0)]);
+    run(array![gamble(chain(SEED_0, RNG_LEN - 1)), add(1)]);
 }
 
 #[test]
 fn reveal_resolves_the_gamble() {
-    let end = run_forced(
-        array![
-            play(0, GAMBLE, 0, chain(SEED_0, RNG_LEN - 1)),
-            Step { seat: 1, action: Move::Reveal(chain(SEED_1, RNG_LEN - 1)), entropy: 0 },
-        ],
+    let end = run(
+        array![gamble(chain(SEED_0, RNG_LEN - 1)), Move::Reveal(chain(SEED_1, RNG_LEN - 1))],
     );
     assert!(!end.pending.active);
     assert!(end.game.total >= 1 && end.game.total <= 6);
@@ -148,5 +210,5 @@ fn reveal_resolves_the_gamble() {
 #[test]
 #[should_panic(expected: 'Game already finished')]
 fn no_steps_after_the_end() {
-    run_forced(array![Step { seat: 0, action: Move::Resign, entropy: 0 }, play(0, ADD, 1, 0)]);
+    run(array![Move::Resign(0), add(1)]);
 }

@@ -3,7 +3,7 @@
 //! exactly that message as proof facts and relays the end state. Proof facts
 //! are cheated here; a real run attaches a native Stwo proof instead.
 use referee::{
-    Envelope, Move, Signature, SignedStep, Step, Terms, action_hash, context_hash, force, open,
+    Envelope, Move, Signature, Terms, action_hash, actor, apply_steps, context_hash, open,
     state_hash,
 };
 use referee_adapter::{ProofFacts, check_facts, message_hash, payload};
@@ -123,27 +123,29 @@ fn setup() -> (ICounterProverDispatcher, IMockChannelDispatcher) {
     (ICounterProverDispatcher { contract_address: prover }, mock)
 }
 
-fn add(seat: u8, amount: u8) -> Step<Action> {
-    Step { seat, action: Move::Play(Action { kind: ADD, amount }), entropy: 0 }
+fn add(amount: u8) -> Move<Action> {
+    Move::Play(Action { kind: ADD, amount })
 }
 
-/// Alice reaches 20 first, every step signed by its seat.
-fn signed_game(terms: @Terms<Config>) -> (Span<SignedStep<Action>>, Envelope<Counter>) {
-    let steps = array![add(0, 3), add(1, 3), add(0, 3), add(1, 3), add(0, 3), add(1, 3), add(0, 2)];
+/// Alice reaches 20 first. Returns the steps, each seat's final signature and
+/// the end state.
+fn signed_game(terms: @Terms<Config>) -> (Span<Move<Action>>, Span<Signature>, Envelope<Counter>) {
+    let steps = array![add(3), add(3), add(3), add(3), add(3), add(3), add(2)].span();
     let context = context_hash::<CounterRules>(terms);
     let mut env = opening(terms);
-    let mut signed = array![];
+    let mut finals = no_acks();
     for step in steps {
-        let message = action_hash::<CounterRules>(context, env.seq, env.transcript, @step);
-        let key = if step.seat == 0 {
-            PK_A
-        } else {
-            PK_B
-        };
-        signed.append(SignedStep { step, signature: sign(message, key) });
-        env = force::<CounterRules>(context, terms.config, env, (), array![step].span());
+        let seat = actor::<CounterRules>(@env, step);
+        let message = action_hash::<CounterRules>(context, env.seq, env.transcript, step);
+        finals =
+            if seat == 0 {
+                array![sign(message, PK_A), *finals.at(1)].span()
+            } else {
+                array![*finals.at(0), sign(message, PK_B)].span()
+            };
+        env = apply_steps::<CounterRules>(context, terms.config, env, (), array![*step].span());
     }
-    (signed.span(), env)
+    (steps, finals, env)
 }
 
 fn transition(
@@ -189,7 +191,7 @@ fn no_acks() -> Span<Signature> {
 }
 
 fn end_state(prover: ContractAddress, channel: ContractAddress) -> Envelope<Counter> {
-    let (_, end) = signed_game(@terms(channel, GAME, prover));
+    let (_, _, end) = signed_game(@terms(channel, GAME, prover));
     end
 }
 
@@ -197,7 +199,7 @@ fn end_state(prover: ContractAddress, channel: ContractAddress) -> Envelope<Coun
 fn virtual_replay_emits_the_message_settle_accepts() {
     let (prover, mock) = setup();
     let terms = terms(mock.contract_address, GAME, prover.contract_address);
-    let (signed, end) = signed_game(@terms);
+    let (steps, signatures, end) = signed_game(@terms);
 
     // Proving path: the OS runs __execute__ as a zero-fee virtual invoke.
     let mut spy = spy_messages_to_l1();
@@ -210,7 +212,7 @@ fn virtual_replay_emits_the_message_settle_accepts() {
     ];
     cheat_resource_bounds(prover.contract_address, free.span(), CheatSpan::TargetCalls(1));
     let virtual = IVirtualCounterDispatcher { contract_address: prover.contract_address };
-    virtual.__execute__(mock.contract_address, GAME, 0, opening(@terms), signed);
+    virtual.__execute__(mock.contract_address, GAME, 0, opening(@terms), steps, signatures);
     let expected = transition(prover.contract_address, mock.contract_address, @end);
     spy
         .assert_sent(
@@ -236,9 +238,9 @@ fn virtual_replay_emits_the_message_settle_accepts() {
 fn execute_is_only_for_virtual_invokes() {
     let (prover, mock) = setup();
     let terms = terms(mock.contract_address, GAME, prover.contract_address);
-    let (signed, _) = signed_game(@terms);
+    let (steps, signatures, _) = signed_game(@terms);
     let virtual = IVirtualCounterDispatcher { contract_address: prover.contract_address };
-    virtual.__execute__(mock.contract_address, GAME, 0, opening(@terms), signed);
+    virtual.__execute__(mock.contract_address, GAME, 0, opening(@terms), steps, signatures);
 }
 
 #[test]

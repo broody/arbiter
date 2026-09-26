@@ -2,11 +2,11 @@ use core::dict::{Felt252Dict, Felt252DictTrait};
 use core::ecdsa::check_ecdsa_signature;
 use core::poseidon::poseidon_hash_span;
 use crate::rules::GameRules;
-use crate::types::{
-    Envelope, Move, NO_SEAT, Outcome, Pending, REASON_RESIGN, Signature, SignedStep, Step, Terms,
-};
+use crate::types::{Envelope, Move, NO_SEAT, Outcome, Pending, REASON_RESIGN, Signature, Terms};
 
-pub const PROTOCOL_VERSION: felt252 = 1;
+/// Version 2: steps are seat-implicit `Move`s, and replays take one final
+/// signature per seat instead of a signature per step.
+pub const PROTOCOL_VERSION: felt252 = 2;
 
 // Stark signatures require a message below 2^251. Use an explicit 250-bit mask
 // in every language; never reinterpret a field hash as an unrestricted message.
@@ -38,8 +38,9 @@ pub fn state_hash<impl R: GameRules, +Serde<R::State>, +Drop<R::State>>(
 /// Message a seat signs for a step. It binds the transcript rather than the
 /// full state: state is a deterministic function of the anchor and the
 /// transcript, and hashing large game states per step is expensive to prove.
+/// The seat is not included: the state determines it (see `actor`).
 pub fn action_hash<impl R: GameRules, +Serde<R::Action>, +Drop<R::Action>>(
-    context: felt252, seq: u32, transcript: felt252, step: @Step<R::Action>,
+    context: felt252, seq: u32, transcript: felt252, step: @Move<R::Action>,
 ) -> felt252 {
     let mut fields = array![R::TAG, 'REFEREE_ACTION_V1', context, seq.into(), transcript];
     step.serialize(ref fields);
@@ -135,10 +136,27 @@ pub fn due<impl R: GameRules>(env: @Envelope<R::State>) -> u8 {
     }
 }
 
-/// Replay signed steps from `start`. Only each seat's final signature in the
-/// batch is verified: its message commits through the transcript to every
-/// earlier step, and honest clients only sign states they derived from
-/// verified steps.
+/// The seat a step belongs to: `Resign` names it; `Reveal` belongs to the
+/// pending seat; every other move to the seat whose turn it is.
+pub fn actor<impl R: GameRules>(env: @Envelope<R::State>, step: @Move<R::Action>) -> u8 {
+    match step {
+        Move::Resign(seat) => *seat,
+        Move::Reveal(_) => {
+            assert(*env.pending.active, 'No reveal due');
+            *env.pending.seat
+        },
+        _ => {
+            assert(!*env.pending.active, 'Reveal pending');
+            R::due(env.game)
+        },
+    }
+}
+
+/// Replay steps from `start` against one final signature per seat (a zero
+/// signature for a seat with no step in the batch). Each seat's final
+/// signature commits through the transcript to every earlier step, and honest
+/// clients only sign states they derived from verified steps, so intermediate
+/// signatures never need to reach the chain or the proof.
 pub fn replay<
     impl R: GameRules,
     +Copy<R::State>,
@@ -154,37 +172,63 @@ pub fn replay<
     config: @R::Config,
     start: Envelope<R::State>,
     witness: R::Witness,
-    steps: Span<SignedStep<R::Action>>,
+    steps: Span<Move<R::Action>>,
+    signatures: Span<Signature>,
 ) -> Envelope<R::State> {
     assert(keys.len() == R::SEATS.into(), 'Wrong key count');
+    assert(signatures.len() == R::SEATS.into(), 'Wrong signature count');
     let mut scratch = R::load(config, @start.game, witness);
     let mut env = start;
-    let mut messages: Felt252Dict<felt252> = Default::default();
-    let mut sig_r: Felt252Dict<felt252> = Default::default();
-    let mut sig_s: Felt252Dict<felt252> = Default::default();
-    for signed in steps {
-        let signed = *signed;
-        let message = action_hash::<R>(context, env.seq, env.transcript, @signed.step);
-        env = transition::<R>(context, config, ref scratch, env, signed.step, message);
-        let seat: felt252 = signed.step.seat.into();
-        messages.insert(seat, message);
-        sig_r.insert(seat, signed.signature.r);
-        sig_s.insert(seat, signed.signature.s);
+    let mut finals: Felt252Dict<felt252> = Default::default();
+    for step in steps {
+        let (next, seat, message) = advance::<R>(context, config, ref scratch, env, *step);
+        env = next;
+        finals.insert(seat.into(), message);
     }
+    let empty = Signature { r: 0, s: 0 };
     let mut seat: u8 = 0;
     while seat < R::SEATS {
-        let message = messages.get(seat.into());
+        let message = finals.get(seat.into());
+        let signature = *signatures.at(seat.into());
         if message != 0 {
-            let signature = Signature { r: sig_r.get(seat.into()), s: sig_s.get(seat.into()) };
             verify(*keys.at(seat.into()), message, signature);
+        } else {
+            assert(signature == empty, 'Unexpected signature');
         }
         seat += 1;
     }
     env
 }
 
-/// Apply unsigned steps. Only for callers that authenticate every step's seat
-/// themselves, e.g. a forced onchain turn checked against the wallet caller.
+/// Apply unsigned steps, from any seat. For clients and tools that already
+/// verified every signature offchain, and for tests.
+pub fn apply_steps<
+    impl R: GameRules,
+    +Copy<R::State>,
+    +Drop<R::State>,
+    +Copy<R::Action>,
+    +Drop<R::Action>,
+    +Serde<R::Action>,
+    +Drop<R::Witness>,
+    +Destruct<R::Scratch>,
+>(
+    context: felt252,
+    config: @R::Config,
+    start: Envelope<R::State>,
+    witness: R::Witness,
+    steps: Span<Move<R::Action>>,
+) -> Envelope<R::State> {
+    let mut scratch = R::load(config, @start.game, witness);
+    let mut env = start;
+    for step in steps {
+        let (next, _, _) = advance::<R>(context, config, ref scratch, env, *step);
+        env = next;
+    }
+    env
+}
+
+/// Apply unsigned steps that must all belong to `seat`, e.g. a forced onchain
+/// turn whose seat the wallet caller authenticates.
 pub fn force<
     impl R: GameRules,
     +Copy<R::State>,
@@ -199,72 +243,66 @@ pub fn force<
     config: @R::Config,
     start: Envelope<R::State>,
     witness: R::Witness,
-    steps: Span<Step<R::Action>>,
+    seat: u8,
+    steps: Span<Move<R::Action>>,
 ) -> Envelope<R::State> {
     let mut scratch = R::load(config, @start.game, witness);
     let mut env = start;
     for step in steps {
-        let step = *step;
-        let message = action_hash::<R>(context, env.seq, env.transcript, @step);
-        env = transition::<R>(context, config, ref scratch, env, step, message);
+        let (next, actor, _) = advance::<R>(context, config, ref scratch, env, *step);
+        assert(actor == seat, 'Not your step');
+        env = next;
     }
     env
 }
 
-fn transition<
+/// One step: its seat, its signed message, and the next envelope.
+fn advance<
     impl R: GameRules,
     +Copy<R::State>,
     +Drop<R::State>,
     +Copy<R::Action>,
     +Drop<R::Action>,
+    +Serde<R::Action>,
     +Destruct<R::Scratch>,
 >(
     context: felt252,
     config: @R::Config,
     ref scratch: R::Scratch,
     mut env: Envelope<R::State>,
-    step: Step<R::Action>,
-    message: felt252,
-) -> Envelope<R::State> {
+    step: Move<R::Action>,
+) -> (Envelope<R::State>, u8, felt252) {
     assert(!env.outcome.finished, 'Game already finished');
-    let seat = step.seat;
+    let seat = actor::<R>(@env, @step);
     assert(seat < R::SEATS, 'Invalid seat');
-    match step.action {
+    let message = action_hash::<R>(context, env.seq, env.transcript, @step);
+    match step {
         Move::Play(action) => {
-            assert(!env.pending.active, 'Reveal pending');
-            assert(R::due(@env.game) == seat, 'Not your turn');
+            let (game, request) = R::apply(config, ref scratch, env.game, seat, action);
+            assert(request.is_none(), 'Randomness requested');
+            env.game = game;
+        },
+        Move::PlayRandom((
+            action, entropy,
+        )) => {
             let (game, request) = R::apply(config, ref scratch, env.game, seat, action);
             env.game = game;
-            match request {
-                Option::Some(from) => {
-                    assert(from != seat && from < R::SEATS, 'Invalid reveal seat');
-                    env.rng_heads = take_reveal(env.rng_heads, seat, step.entropy);
-                    env
-                        .pending =
-                            Pending {
-                                active: true, seat: from, seq: env.seq, entropy: step.entropy,
-                            };
-                },
-                Option::None => assert(step.entropy == 0, 'Unexpected entropy'),
-            }
+            let from = request.expect('Unexpected entropy');
+            assert(from != seat && from < R::SEATS, 'Invalid reveal seat');
+            env.rng_heads = take_reveal(env.rng_heads, seat, entropy);
+            env.pending = Pending { active: true, seat: from, seq: env.seq, entropy };
         },
         Move::Reveal(value) => {
-            assert(step.entropy == 0, 'Unexpected entropy');
-            assert(env.pending.active && env.pending.seat == seat, 'No reveal due');
             env.rng_heads = take_reveal(env.rng_heads, seat, value);
             let seed = seed::<R>(context, env.pending.seq, env.pending.entropy, value);
             env.pending = idle();
             env.game = R::resolve(config, ref scratch, env.game, seed);
         },
         Move::Recommit(tip) => {
-            assert(step.entropy == 0, 'Unexpected entropy');
-            assert(!env.pending.active, 'Reveal pending');
-            assert(R::due(@env.game) == seat, 'Not your turn');
             assert(tip != 0, 'Invalid tip');
             env.rng_heads = set_head(env.rng_heads, seat, tip);
         },
-        Move::Resign => {
-            assert(step.entropy == 0, 'Unexpected entropy');
+        Move::Resign(_) => {
             env.pending = idle();
             // Two seats: the other seat (index 1 - seat) wins; winner is seat + 1.
             env.outcome = Outcome { finished: true, winner: 2 - seat, reason: REASON_RESIGN };
@@ -283,7 +321,7 @@ fn transition<
     env.last_seat = seat;
     env.seq += 1;
     env.transcript = poseidon_hash_span(array![env.transcript, message].span());
-    env
+    (env, seat, message)
 }
 
 fn idle() -> Pending {
