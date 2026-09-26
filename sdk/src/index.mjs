@@ -199,9 +199,9 @@ export function replay(game, terms, start, witness, signed) {
   let env = start;
   const scratch = load(game, terms.config, start.game, witness);
   for (const { step, signature } of signed) {
-    const result = applyStep(game, context, terms.config, env, step, scratch);
-    check(verify(result.message, signature, terms.keys[step.seat]), 'Invalid session signature');
-    env = result.env;
+    const message = actionHash(game, context, env.seq, env.transcript, step);
+    check(verify(message, signature, terms.keys[step.seat]), 'Invalid session signature');
+    env = applyStep(game, context, terms.config, env, step, scratch).env;
   }
   return { env, scratch };
 }
@@ -224,9 +224,13 @@ export class Session {
 
   /** Verify and apply a step signed by the other seat (or ourselves). */
   receive(signed) {
+    // Authenticate before running any game logic on the step.
+    const seat = signed.step.seat;
+    check(seat === 0 || seat === 1, 'Invalid seat');
+    const message = actionHash(this.game, this.context, this.env.seq, this.env.transcript, signed.step);
+    check(verify(message, signed.signature, this.terms.keys[seat]), 'Invalid session signature');
     const scratch = cloneScratch(this.game, this.scratch);
-    const { env, message } = applyStep(this.game, this.context, this.terms.config, this.env, signed.step, scratch);
-    check(verify(message, signed.signature, this.terms.keys[signed.step.seat]), 'Invalid session signature');
+    const { env } = applyStep(this.game, this.context, this.terms.config, this.env, signed.step, scratch);
     this.env = env;
     this.scratch = scratch;
     const record = { step: signed.step, signature: normSignature(signed.signature) };
