@@ -91,6 +91,8 @@ fn advance(state: Counter, seat: u8, amount: u8) -> Counter {
 }
 
 #[cfg(test)]
+mod channel_tests;
+#[cfg(test)]
 mod fixtures;
 #[cfg(test)]
 mod tests;

@@ -6,9 +6,11 @@
 //! It has no Dojo or Starknet storage dependency so the same source builds for
 //! the Dojo channel (Cairo 2.13) and the native proof adapter (Cairo 2.18).
 
+pub mod channel;
 pub mod protocol;
 pub mod rules;
 pub mod types;
+pub use channel::{Channel, StateRef, state_ref};
 
 pub use protocol::{
     PROTOCOL_VERSION, action_hash, approve_all, checkpoint_hash, context_hash, due, force, open,
