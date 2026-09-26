@@ -1,0 +1,14 @@
+{
+  "name": "@referee/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Signing, transcripts and fixtures for the referee protocol.",
+  "main": "src/index.mjs",
+  "scripts": {
+    "fixtures": "node scripts/gen-counter-fixtures.mjs"
+  },
+  "dependencies": {
+    "starknet": "10.5.0"
+  }
+}

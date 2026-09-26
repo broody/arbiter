@@ -1,0 +1,12 @@
+[package]
+name = "referee"
+version = "0.1.0"
+edition = "2024_07"
+# Must build on Dojo's Cairo (2.13) and on the proof adapter's Cairo (2.18).
+cairo-version = "2.13.1"
+description = "Offchain turn-based play with onchain settlement: game-agnostic protocol core."
+
+[dependencies]
+
+[dev-dependencies]
+cairo_test = "2.13.1"
