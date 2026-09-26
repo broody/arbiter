@@ -68,7 +68,7 @@ allow PROOF1 and PROOF2, and a second virtual OS program
 
 Requirements: Rust via rustup (the build installs `nightly-2026-01-15`),
 cairo-lang 0.14.3a3 for `cairo-compile` (the virtual OS compiles at build time),
-clang, cmake and about 40 GB of disk for the build. The first build takes
+clang, cmake and about 5 GB of disk for the build. The first build takes
 about 15 minutes on 36 cores.
 
 ```bash
