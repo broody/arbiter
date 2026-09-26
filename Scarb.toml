@@ -1,2 +1,2 @@
 [workspace]
-members = ["core", "examples/counter"]
+members = ["core", "testing", "examples/counter"]

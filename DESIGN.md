@@ -1,7 +1,8 @@
 # Referee design
 
-Status: **draft, 2026-09-26**. The core crate, the JS SDK mirror and the counter
-example are built and tested. Everything marked *planned* is not.
+Status: **draft, 2026-09-26**. Built and tested: the core crate (protocol and
+channel state machine), the Dojo binding, the JS SDK mirror, and the counter
+example as both a pure game and a Dojo world. Everything marked *planned* is not.
 
 Referee lets two players play a turn-based game offchain with signed moves and
 settle the result on Starknet. There is no transaction per move. A game supplies
@@ -16,8 +17,9 @@ Hashfront (`~/development/hashfront`, a tactics game with combat randomness).
 | Layer | Status | Depends on | Purpose |
 |---|---|---|---|
 | `core` (Cairo) | built | nothing | `GameRules`, protocol envelope, hashing, signatures, replay, forced steps, randomness |
-| channel state machine (Cairo) | planned | `core` | Pure functions: open, join, receive a candidate, dispute, resolve, force, timeout, resume, resign |
-| `referee_dojo` (Cairo) | planned | `core`, Dojo | Models, events and `WorldStorage` helpers. Games list its models in `build-external-contracts` |
+| channel state machine (`referee::channel`) | built | `core` | Pure functions: create, join, receive a candidate, dispute, resolve, forced play, timeout, resume, resign |
+| `referee_dojo` (Cairo) | built | `core`, Dojo | `ChannelGame`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint. Games list the models in `build-external-contracts` |
+| `referee_testing` (Cairo) | built | `core` | Test-only STARK-curve signer and hash-chain helper |
 | adapter template (Cairo 2.18) | planned | `core` | SNIP-36 account contract that proves a replay in the virtual OS and relays it to the channel |
 | `sdk` (JS) | hashing and replay built | starknet.js | Signing, transcripts, randomness chains, fixtures; later transaction and proof builders |
 | relay, keeper | planned | `sdk` | Move transport and archive; prove, settle and answer disputes |
@@ -108,9 +110,10 @@ acknowledged.
   themselves, such as a forced onchain turn checked against the wallet caller.
 - Both extend the transcript identically.
 
-## Channel (planned)
+## Channel
 
-This is Surround's state machine, generalized.
+This is Surround's state machine, generalized, as pure functions in
+`referee::channel` (`examples/counter/src/channel_tests.cairo`).
 - **Statuses:** WAITING, ACTIVE, DISPUTE, FORCED, SETTLED, CANCELLED. `epoch`
   increments on every commit.
 - **Committing:** a state commits only when proved (adapter) or replayed onchain
@@ -133,6 +136,28 @@ This is Surround's state machine, generalized.
   owner-set allowlist of adapter class hashes, and settlement and rewards in the
   same game system.
 
+## Dojo binding
+
+A game's whole channel system is one line per entrypoint
+(`dojo/examples/counter/src/lib.cairo`):
+
+```cairo
+fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip: felt252) {
+    let mut world = self.world_default();
+    binding::join::<CounterRules>(ref world, game_id, session_key, rng_tip);
+}
+```
+
+- The game adds `referee_dojo::models::{m_ChannelGame, m_ProverAllowed, e_ChannelUpdated}`
+  to `build-external-contracts`, and `sozo` registers them in the game's namespace.
+- `ChannelGame` stores 2 seats (wallet, session key, randomness tip), the prover,
+  the serialized game `Config`, the `Channel` fields and the result.
+- Callers are authenticated by wallet for create, join, cancel, dispute, forced
+  play, timeout and resign. `submit_history` and `resolve` are open to anyone, for
+  example a keeper. `accept_verified` accepts only the game's prover.
+- `allow_prover` lets namespace owners allowlist adapter classes.
+- Rewards read `binding::result(world, game_id)` once a game is SETTLED.
+
 ## Proving strategy
 
 - **Whole game in one proof when it fits.** Final-signature authentication and
@@ -154,9 +179,9 @@ This is Surround's state machine, generalized.
 
 ## Roadmap
 
-1. Channel state machine as pure functions, ported from Surround's
-   `src/systems/channel.cairo`, with tests on the counter game.
-2. `referee_dojo` binding, plus a counter Dojo system on Katana.
+1. ~~Channel state machine as pure functions.~~ Done.
+2. ~~`referee_dojo` binding and a counter Dojo system.~~ Done
+   (`dojo/examples/counter`, tested in a Dojo test world).
 3. Adapter template, and an end-to-end native proof of a counter game.
 4. Port Surround onto referee, keeping its test suites, and re-measure proofs.
 5. Hashfront rules crate and client integration.

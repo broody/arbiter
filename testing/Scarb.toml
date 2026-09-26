@@ -1,0 +1,12 @@
+[package]
+name = "referee_testing"
+version = "0.1.0"
+edition = "2024_07"
+cairo-version = "2.13.1"
+description = "Test-only helpers for referee games. Never use in contracts: it signs with private keys."
+
+[dependencies]
+referee = { path = "../core" }
+
+[dev-dependencies]
+cairo_test = "2.13.1"

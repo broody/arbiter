@@ -11,3 +11,10 @@ version = "0.1.0"
 dependencies = [
  "referee",
 ]
+
+[[package]]
+name = "referee_testing"
+version = "0.1.0"
+dependencies = [
+ "referee",
+]
