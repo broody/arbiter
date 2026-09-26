@@ -21,7 +21,7 @@ Hashfront (`~/development/hashfront`, a tactics game with combat randomness).
 | `referee_dojo` (Cairo) | built | `core`, Dojo | `ChannelGame`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint. Games list the models in `build-external-contracts` |
 | `referee_testing` (Cairo) | built | `core` | Test-only STARK-curve signer and hash-chain helper |
 | `referee_adapter` (Cairo 2.18) | built, tested with mocked proof facts | `core` | Generic logic for a SNIP-36 account contract that proves a replay in the virtual OS and relays it to the channel |
-| `sdk` (JS) | hashing and replay built | starknet.js | Signing, transcripts, randomness chains, fixtures; later transaction and proof builders |
+| `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, fixtures; native proving client (`@referee/sdk/proving`) |
 | relay, keeper | planned | `sdk` | Move transport and archive; prove, settle and answer disputes |
 
 `core` has no Dojo or storage dependency and builds on both Cairo 2.13 (Dojo)
@@ -207,6 +207,23 @@ its constructor.
 - **No typed interface per game.** The adapter reaches the channel through
   raw syscalls (`snapshot`, `accept_verified`), so it works with any
   referee_dojo game system.
+- **Calldata convention.** A game's adapter declares
+  `__execute__(channel, game_id, epoch, start, witness, steps, signatures)`
+  (no `witness` argument when the game's witness is `()`) and
+  `settle(channel, game_id, epoch, end, acks)`, which is what the JS proving
+  client builds.
+
+**JS proving client** (`@referee/sdk/proving`), for any game:
+- `proveSession({ rpcUrl | provider, proverUrl, session, epoch, expectedClassHash })`
+  waits until the channel anchor is 10 blocks deep, checks that the session
+  starts at the anchor under the current epoch and that the prover is the
+  expected class, replays the session with every signature verified, sends the
+  adapter's virtual transaction to a `starknet_proveTransaction` prover, and
+  checks the response (`validateNativeProof`). It returns the transaction
+  options with the proof and a `call(acks)` builder for `settle`.
+- `provingTransaction`, `provingCalldata`, `settlementCall`, `getSnapshot` and
+  `nativeProofBlock` are exported for callers that drive the steps themselves.
+- A game with a replay witness adds `encodeWitness(witness)` to its codec.
 
 ## Proving strategy
 
@@ -237,7 +254,8 @@ its constructor.
    proof of a counter game against a real prover.
 4. Port Surround onto referee, keeping its test suites, and re-measure proofs.
 5. Hashfront rules crate and client integration.
-6. Relay, keeper, and SDK transaction and proof builders.
+6. ~~SDK proof builders.~~ Done (`@referee/sdk/proving`).
+7. Self-hosted prover server (PROOF1 and PROOF2), relay and keeper.
 
 ## Development
 

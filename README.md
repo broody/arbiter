@@ -113,7 +113,7 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 | `referee_dojo` | `dojo/referee_dojo/` | Dojo models (`ChannelGame`, `ProverAllowed`), the `ChannelUpdated` event, and one helper per entrypoint (create, join, submit, dispute, resolve, force, resume, timeout, resign, prover allowlist) |
 | `referee_adapter` | `adapter/referee_adapter/` | Proof adapter logic: the virtual replay that gets proved (`__execute__`) and `settle`, which checks the proof facts and relays the result. Cairo 2.18. A game's adapter contract is about 40 lines |
 | `referee_testing` | `testing/` | Test-only Cairo signer, so tests can sign messages that bind deployed addresses |
-| `@referee/sdk` | `sdk/` | JS copy of the protocol: hashing, signing, replay, a `Session` per client, channel calldata codecs and proof payloads. Fixtures keep it byte-identical to the Cairo. Install from git: `npm install github:broody/referee#<rev>` |
+| `@referee/sdk` | `sdk/` | JS copy of the protocol: hashing, signing, replay, a `Session` per client, channel calldata codecs and proof payloads. Fixtures keep it byte-identical to the Cairo. `@referee/sdk/proving` requests a native proof of a session and builds the `settle` call. Install from git: `npm install github:broody/referee#<rev>` |
 
 ### Status
 
@@ -121,7 +121,7 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 |---|---|
 | Built and tested | Protocol core, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS hashing and replay, counter example (pure, as a Dojo world, and with an adapter) |
 | Proven on Sepolia | Surround (Go) settles full games with one native SNIP-36 proof through `referee_adapter`; see [Surround's results](https://github.com/broody/surround/blob/feat/referee/offchain/RESULTS.md) |
-| Not yet | Relay for moves, keeper, generic SDK transaction and proof builders, more than 2 seats |
+| Not yet | Self-hosted prover server, relay for moves, keeper, more than 2 seats |
 
 See [DESIGN.md](DESIGN.md) for the protocol details, the proving strategy and
 the roadmap.

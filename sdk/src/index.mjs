@@ -39,7 +39,8 @@ export const span = values => [BigInt(values.length), ...values.map(felt)];
 
 /**
  * A game codec provides the Cairo Serde encodings of its types:
- * { tag, rulesVersion, encodeConfig(config), encodeAction(action), encodeState(state) }.
+ * { tag, rulesVersion, encodeConfig(config), encodeAction(action), encodeState(state) },
+ * plus `encodeWitness(witness)` if its replay takes a witness (see `load`).
  */
 export function encodeTerms(game, t) {
   return [
@@ -269,7 +270,7 @@ export class Session {
   }
 
   /** Steps and one final signature per seat, as replay calldata takes them. */
-  batch() { return { steps: this.steps.map(s => s.step), signatures: finalSignatures(this.steps) }; }
+  batch() { return batchOf(this.steps); }
 
   /** Witness for the current state, e.g. when it becomes the next anchor. */
   witness() { return this.game.witness ? this.game.witness(this.scratch) : null; }
@@ -306,8 +307,22 @@ export const encodeSteps = (game, list) => [BigInt(list.length), ...list.flatMap
  */
 export function finalSignatures(records, seats = 2) {
   const finals = Array.from({ length: seats }, () => ZERO_SIGNATURE);
-  for (const r of records) finals[r.seat] = normSignature(r.signature);
+  for (const r of records) {
+    check(Number.isInteger(r.seat) && r.seat >= 0 && r.seat < seats, 'Step records need their seat; use session.steps');
+    finals[r.seat] = normSignature(r.signature);
+  }
   return finals;
+}
+/** A batch (`{ steps, signatures }`) from session step records (`session.steps`). */
+export const batchOf = (records, seats = 2) => ({ steps: records.map(r => r.step), signatures: finalSignatures(records, seats) });
+/**
+ * A replay witness's Cairo Serde encoding. A game without `load` has the unit
+ * witness `()`, which encodes to nothing.
+ */
+export function encodeWitness(game, witness) {
+  if (game.encodeWitness) return game.encodeWitness(witness);
+  check(!game.load, 'Game codec needs encodeWitness');
+  return [];
 }
 /** Replay calldata: the steps, then one final signature per seat. */
 export const encodeBatch = (game, { steps, signatures }) => [...encodeSteps(game, steps), ...encodeSignatures(signatures)];
