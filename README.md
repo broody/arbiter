@@ -113,7 +113,7 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 | `referee_dojo` | `dojo/referee_dojo/` | Dojo models (`ChannelGame`, `ProverAllowed`), the `ChannelUpdated` event, and one helper per entrypoint (create, join, submit, dispute, resolve, force, resume, timeout, resign, prover allowlist) |
 | `referee_adapter` | `adapter/referee_adapter/` | Proof adapter logic: the virtual replay that gets proved (`__execute__`) and `settle`, which checks the proof facts and relays the result. Cairo 2.18. A game's adapter contract is about 40 lines |
 | `referee_testing` | `testing/` | Test-only Cairo signer, so tests can sign messages that bind deployed addresses |
-| `@referee/sdk` | `sdk/` | JS copy of the protocol hashing and replay. Fixtures keep it byte-identical to the Cairo |
+| `@referee/sdk` | `sdk/` | JS copy of the protocol: hashing, signing, replay, a `Session` per client, channel calldata codecs and proof payloads. Fixtures keep it byte-identical to the Cairo. Install from git: `npm install github:broody/referee#<rev>` |
 
 ### Status
 
@@ -128,11 +128,11 @@ the roadmap.
 ## Development
 
 ```bash
-cd sdk && npm install && cd ..
+npm install
 scripts/check.sh
 ```
 
-`check.sh` regenerates the JS fixtures, then tests:
+`check.sh` regenerates the JS fixtures and runs the SDK tests, then tests:
 - the pure crates on Scarb 2.13.1 and 2.18.0;
 - the Dojo workspace (`dojo/`) on 2.13.1;
 - the adapter workspace (`adapter/`) on 2.18.0 with Starknet Foundry 0.63.0.

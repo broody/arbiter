@@ -1,0 +1,15 @@
+{
+  "name": "@referee/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Signing, transcripts, sessions and channel codecs for referee games.",
+  "exports": { ".": "./sdk/src/index.mjs" },
+  "files": ["sdk/src"],
+  "scripts": {
+    "fixtures": "node sdk/scripts/gen-counter-fixtures.mjs",
+    "test": "node --test sdk/test/*.test.mjs"
+  },
+  "dependencies": { "starknet": "10.5.0" },
+  "engines": { "node": ">=22" }
+}

@@ -114,11 +114,14 @@ export function open(game, config, rngTips) {
 export const due = (game, env) => env.pending.active ? env.pending.seat : game.due(env.game);
 
 /**
- * Apply one step, mirroring `transition` in protocol.cairo. `game` also
- * provides init/apply/resolve/due/outcome over plain JS state.
+ * Apply one step, mirroring `transition` in protocol.cairo. `game` provides
+ * init/apply/resolve/due/outcome over plain JS state, and optionally
+ * load/witness for games whose replay needs a witness (see `load`).
+ * `scratch` is the game's working memory; `apply`/`resolve` may mutate it, so
+ * pass a copy (`cloneScratch`) when the step might be rejected.
  * Returns { env, message }.
  */
-export function applyStep(game, context, config, env, step) {
+export function applyStep(game, context, config, env, step, scratch = null) {
   const message = actionHash(game, context, env.seq, env.transcript, step);
   const next = structuredClone(env);
   check(!next.outcome.finished, 'Game already finished');
@@ -133,7 +136,7 @@ export function applyStep(game, context, config, env, step) {
     case MOVE_PLAY: {
       check(!next.pending.active, 'Reveal pending');
       check(game.due(next.game) === seat, 'Not your turn');
-      const [state, request] = game.apply(config, next.game, seat, step.move.action);
+      const [state, request] = game.apply(config, next.game, seat, step.move.action, scratch);
       next.game = state;
       if (request !== null) {
         check(request !== seat && request < 2, 'Invalid reveal seat');
@@ -150,7 +153,7 @@ export function applyStep(game, context, config, env, step) {
       takeReveal(seat, felt(step.move.value));
       const s = seed(game, context, next.pending.seq, next.pending.entropy, step.move.value);
       next.pending = { active: false, seat: 0, seq: 0, entropy: 0n };
-      next.game = game.resolve(config, next.game, s);
+      next.game = game.resolve(config, next.game, s, scratch);
       break;
     }
     case MOVE_RECOMMIT:
@@ -177,3 +180,150 @@ export function applyStep(game, context, config, env, step) {
   next.transcript = poseidon([next.transcript, message]);
   return { env: next, message };
 }
+
+/** Build a game's working memory from its replay witness (`GameRules::load`). */
+export const load = (game, config, state, witness) => (game.load ? game.load(config, state, witness) : null);
+export const cloneScratch = (game, scratch) =>
+  scratch === null ? null : game.cloneScratch ? game.cloneScratch(scratch) : structuredClone(scratch);
+
+const normSignature = s => ({ r: felt(s.r), s: felt(s.s) });
+export const ZERO_SIGNATURE = Object.freeze({ r: 0n, s: 0n });
+
+/**
+ * Replay signed steps from `start`, verifying every signature. Stricter than
+ * the Cairo replay, which checks only each seat's final signature: clients
+ * must never sign from a state they have not fully verified.
+ */
+export function replay(game, terms, start, witness, signed) {
+  const context = contextHash(game, terms);
+  let env = start;
+  const scratch = load(game, terms.config, start.game, witness);
+  for (const { step, signature } of signed) {
+    const result = applyStep(game, context, terms.config, env, step, scratch);
+    check(verify(result.message, signature, terms.keys[step.seat]), 'Invalid session signature');
+    env = result.env;
+  }
+  return { env, scratch };
+}
+
+/**
+ * One client's view of a channel: the verified transcript from an anchor.
+ * Holds public data only; private keys stay with the caller.
+ */
+export class Session {
+  constructor(game, terms, { start, witness } = {}) {
+    this.game = game;
+    this.terms = terms;
+    this.context = contextHash(game, terms);
+    this.start = start ?? open(game, terms.config, terms.rng_tips);
+    this.startWitness = witness ?? (game.openingWitness ? game.openingWitness(terms.config) : null);
+    this.env = structuredClone(this.start);
+    this.scratch = load(game, terms.config, this.start.game, this.startWitness);
+    this.steps = [];
+  }
+
+  /** Verify and apply a step signed by the other seat (or ourselves). */
+  receive(signed) {
+    const scratch = cloneScratch(this.game, this.scratch);
+    const { env, message } = applyStep(this.game, this.context, this.terms.config, this.env, signed.step, scratch);
+    check(verify(message, signed.signature, this.terms.keys[signed.step.seat]), 'Invalid session signature');
+    this.env = env;
+    this.scratch = scratch;
+    const record = { step: signed.step, signature: normSignature(signed.signature) };
+    this.steps.push(record);
+    return record;
+  }
+
+  /** Sign and apply our own step. */
+  move(step, privateKey) {
+    check(publicKey(privateKey) === felt(this.terms.keys[step.seat]), 'Wrong signing key');
+    const message = actionHash(this.game, this.context, this.env.seq, this.env.transcript, step);
+    return this.receive({ step, signature: sign(message, privateKey) });
+  }
+
+  /** Witness for the current state, e.g. when it becomes the next anchor. */
+  witness() { return this.game.witness ? this.game.witness(this.scratch) : null; }
+  stateHash() { return stateHash(this.game, this.env); }
+  due() { return due(this.game, this.env); }
+  checkpointSignature(epoch, privateKey) {
+    return sign(checkpointHash(this.game, this.context, epoch, this.stateHash()), privateKey);
+  }
+  reopenSignature(epoch, anchorHash, privateKey) {
+    return sign(reopenHash(this.game, this.context, epoch, anchorHash), privateKey);
+  }
+
+  export() {
+    return { version: 1, terms: this.terms, start: this.start, witness: this.startWitness, steps: this.steps };
+  }
+  static import(game, record) {
+    check(record.version === 1, 'Unsupported transcript version');
+    const session = new Session(game, record.terms, { start: record.start, witness: record.witness });
+    for (const signed of record.steps) session.receive(signed);
+    return session;
+  }
+}
+
+// ---- Cairo Serde encoders and decoders for channel calldata ----
+
+export const encodeSignature = sig => [felt(sig.r), felt(sig.s)];
+export const encodeSignatures = sigs => [BigInt(sigs.length), ...sigs.flatMap(encodeSignature)];
+export const encodeSignedStep = (game, signed) => [...encodeStep(game, signed.step), ...encodeSignature(signed.signature)];
+export const encodeSignedSteps = (game, list) => [BigInt(list.length), ...list.flatMap(s => encodeSignedStep(game, s))];
+export const encodeSteps = (game, list) => [BigInt(list.length), ...list.flatMap(s => encodeStep(game, s))];
+
+class Reader {
+  constructor(values) { this.values = values.map(BigInt); this.at = 0; }
+  next() { check(this.at < this.values.length, 'Truncated encoding'); return this.values[this.at++]; }
+  num() { return Number(this.next()); }
+  bool() { return this.next() === 1n; }
+  span() { const n = this.num(); return Array.from({ length: n }, () => this.next()); }
+  done() { check(this.at === this.values.length, 'Trailing encoding'); }
+}
+
+/** A game's `decodeConfig(reader)` reads its `Config` from a Reader. */
+export function readTerms(game, r) {
+  return {
+    chain_id: r.next(), channel: r.next(), game_id: r.next(), prover: r.next(), response_seconds: r.num(),
+    players: r.span(), keys: r.span(), rng_tips: r.span(), config: game.decodeConfig(r),
+  };
+}
+export const decodeTerms = (game, values) => { const r = new Reader(values); const t = readTerms(game, r); r.done(); return t; };
+
+/** The channel's `snapshot(game_id)`: terms, epoch, anchor hash, anchor block. */
+export function decodeSnapshot(game, values) {
+  const r = new Reader(values);
+  const result = { terms: readTerms(game, r), epoch: r.num(), anchor_hash: r.next(), anchor_block: r.num() };
+  r.done();
+  return result;
+}
+
+const readOutcome = r => ({ finished: r.bool(), winner: r.num(), reason: r.num() });
+const readRef = r => ({ hash: r.next(), seq: r.num(), support_turn: r.num(), due: r.num(), outcome: readOutcome(r) });
+
+/** referee_dojo's `ChannelGame` model, as returned by a game's `get_channel`. */
+export function decodeChannelGame(game, values) {
+  const r = new Reader(values);
+  const result = {
+    id: r.next(), player_0: r.next(), player_1: r.next(), key_0: r.next(), key_1: r.next(),
+    tip_0: r.next(), tip_1: r.next(), prover: r.next(),
+  };
+  const configFelts = r.span();
+  result.config = game.decodeConfig(new Reader(configFelts));
+  Object.assign(result, {
+    status: r.num(), epoch: r.num(), context: r.next(), response_seconds: r.num(),
+    anchor: readRef(r), candidate: readRef(r), anchor_block: r.num(), deadline: r.num(), result: readOutcome(r),
+  });
+  r.done();
+  return result;
+}
+export { Reader };
+
+// ---- Proof adapter (referee_adapter) ----
+
+/** The L2->L1 payload a proved transition commits to (`prover::payload`). */
+export function proofPayload(game, { classHash, prover, terms, context, epoch, startHash, endHash }) {
+  return [felt(classHash), tag(game.tag), tag('REFEREE_PROVED_V1'), felt(terms.chain_id), felt(prover),
+    felt(terms.channel), felt(terms.game_id), felt(context), BigInt(epoch), felt(startHash), felt(endHash)];
+}
+/** The message hash proof facts carry for `payload` sent by `prover` to L1 address 0. */
+export const proofMessageHash = (prover, payload) => poseidon([felt(prover), 0n, BigInt(payload.length), ...payload]);
