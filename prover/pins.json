@@ -1,0 +1,11 @@
+{
+  "sequencer": {
+    "repository": "https://github.com/broody/sequencer.git",
+    "revision": "625929ac645c399f2481fb2b65ffdd14702aa525",
+    "note": "starkware-libs/sequencer e6b6fd2e plus one visibility commit; the revision whose virtual OS Sepolia proof facts attest"
+  },
+  "toolchain": "nightly-2026-01-15",
+  "cairo_lang": "0.14.3a3",
+  "virtual_os_program": "0x53f6c9fcfd31d27279ff7d7e422b44623550a732b59fe193354a7316a96daa1",
+  "spec_version": "0.10.3-rc.2"
+}

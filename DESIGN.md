@@ -255,7 +255,9 @@ its constructor.
 4. Port Surround onto referee, keeping its test suites, and re-measure proofs.
 5. Hashfront rules crate and client integration.
 6. ~~SDK proof builders.~~ Done (`@referee/sdk/proving`).
-7. Self-hosted prover server (PROOF1 and PROOF2), relay and keeper.
+7. ~~Self-hosted PROOF1 prover.~~ Done (`prover/`: upstream transaction prover
+   plus an allowlisting gateway). PROOF2 large path once the network accepts it.
+8. Relay and keeper.
 
 ## Development
 

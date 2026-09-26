@@ -13,7 +13,8 @@
   ],
   "scripts": {
     "fixtures": "node sdk/scripts/gen-counter-fixtures.mjs",
-    "test": "node --test sdk/test/*.test.mjs"
+    "test": "node --test sdk/test/*.test.mjs prover/test/*.test.mjs",
+    "prover": "node prover/server.mjs"
   },
   "dependencies": {
     "starknet": "10.5.0"

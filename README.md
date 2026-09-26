@@ -121,7 +121,8 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 |---|---|
 | Built and tested | Protocol core, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS hashing and replay, counter example (pure, as a Dojo world, and with an adapter) |
 | Proven on Sepolia | Surround (Go) settles full games with one native SNIP-36 proof through `referee_adapter`; see [Surround's results](https://github.com/broody/surround/blob/feat/referee/offchain/RESULTS.md) |
-| Not yet | Self-hosted prover server, relay for moves, keeper, more than 2 seats |
+| Self-hosted proving | [`prover/`](prover/README.md): StarkWare's transaction prover built from source (PROOF1) behind a gateway that proves only allowlisted referee adapters. Settled a Surround game on Sepolia; its proofs are byte-identical to the hosted prover's |
+| Not yet | PROOF2 large-path proving (network support expected ~2026-10-10), relay for moves, keeper, more than 2 seats |
 
 See [DESIGN.md](DESIGN.md) for the protocol details, the proving strategy and
 the roadmap.
