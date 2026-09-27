@@ -16,6 +16,7 @@
   ],
   "scripts": {
     "fixtures": "node sdk/scripts/gen-counter-fixtures.mjs",
+    "poseidon": "node sdk/scripts/build-poseidon.mjs",
     "test": "node --test sdk/test/*.test.mjs prover/test/*.test.mjs keeper/test/*.test.mjs",
     "prover": "node prover/server.mjs",
     "keeper": "node keeper/server.mjs"

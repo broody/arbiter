@@ -1,6 +1,7 @@
 // JS mirror of referee/core/src/protocol.cairo. Every hash here must match the
 // Cairo byte for byte; the counter example's fixtures test that.
-import { ec, hash, shortString } from 'starknet';
+import { ec, shortString } from 'starknet';
+import { poseidonHashMany } from './poseidon.mjs';
 
 export const PROTOCOL_VERSION = 3n;
 export const NO_SEAT = 255;
@@ -39,7 +40,8 @@ export const felt = value => {
 };
 export const tag = value => BigInt(shortString.encodeShortString(value));
 export const hex = value => `0x${BigInt(value).toString(16)}`;
-export const poseidon = values => BigInt(hash.computePoseidonHashOnElements(values.map(felt)));
+export const poseidon = values => poseidonHashMany(values.map(felt));
+export { POSEIDON_BACKEND } from './poseidon.mjs';
 export const signingHash = values => poseidon(values) & MASK250;
 export const low128 = value => BigInt(value) & LOW128;
 

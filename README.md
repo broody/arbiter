@@ -160,4 +160,6 @@ scripts/check.sh
 
 Requirements: Scarb 2.13.1 and 2.18.0 (asdf switches with `ASDF_SCARB_VERSION`),
 Sozo 1.8.5 for the Dojo workspace, Starknet Foundry 0.63.0 for the adapter,
-and Node 22 or later.
+and Node 22 or later. The SDK's Poseidon is committed WebAssembly; rebuilding
+it (`npm run poseidon`) also needs Rust with the `wasm32-unknown-unknown`
+target.

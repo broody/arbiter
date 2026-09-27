@@ -6,3 +6,4 @@ node_modules/
 prover/*.local.json
 keeper/*.local.json
 keeper-data/
+sdk/poseidon/target

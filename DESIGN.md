@@ -22,7 +22,7 @@ Hashfront (`~/development/hashfront`, a tactics game with combat randomness).
 | `referee_dojo` (Cairo) | built | `core`, Dojo | `ChannelGame`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint. Games list the models in `build-external-contracts` |
 | `referee_testing` (Cairo) | built | `core` | Test-only STARK-curve signer and hash-chain helper |
 | `referee_adapter` (Cairo 2.18) | built, tested with mocked proof facts | `core` | Generic logic for a SNIP-36 account contract that proves a replay in the virtual OS and relays it to the channel |
-| `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, clocks and `Referee`, fixtures; native proving client (`@referee/sdk/proving`); session store and signing guard (`@referee/sdk/store`) |
+| `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, clocks and `Referee`, fixtures, Poseidon in WebAssembly; native proving client (`@referee/sdk/proving`); session store and signing guard (`@referee/sdk/store`) |
 | keeper (`keeper/`) | built, tested on Katana | `sdk` | Archives and forwards verified steps, records equivocation, answers disputes, resolves and settles |
 
 `core` has no Dojo or storage dependency and builds on both Cairo 2.13 (Dojo)
@@ -209,11 +209,14 @@ signs time.
     45k gas) per replay or proof. `StandardTime` reads its settings and clocks
     in place for this; decoding them fully cost 83k per step.
 - **Cost offchain** (`node keeper/bench.mjs`): a stamp costs the referee about
-  6 ms and applying a stamped step costs a client about 6 ms, mostly two
-  signature checks at about 1.3 ms each with cached keys. Through a keeper
-  that referees the game, a step reaches the other seat's stream in about
-  26 ms, with the keeper and both clients in one process on one machine. The
-  file store's full rewrite on each save adds about 5 ms by step 400.
+  2.3 ms and applying a stamped step costs a client about 2.4 ms, mostly two
+  signature checks at about 1.3 ms each with cached keys. Poseidon runs in
+  WebAssembly (`sdk/poseidon`: starknet-crypto's `PoseidonHasher`, about 0.12 ms
+  for 8 felts against 1.3 ms in starknet.js), which took a stamp from 7.3 ms.
+  Through a keeper that referees the game, a step reaches the other seat's
+  stream in about 11 ms (from 28 ms), with the keeper and both clients in one
+  process on one machine. The file store's full rewrite on each save adds
+  about 5 ms by step 400.
 - **`Referee`** (`@referee/sdk`) stamps steps as they arrive, flags, and
   reports the `deadline()` for a timer. Its time resumes at the last stamp when
   it is made, so a restarted referee never charges seats for its own downtime.
@@ -464,3 +467,10 @@ scripts/check.sh    # regenerate fixtures, fmt check, test on Cairo 2.13.1 and 2
 
 The counter fixtures are produced by the JS SDK (`sdk/scripts/gen-counter-fixtures.mjs`),
 so the Cairo tests check the two implementations against each other.
+
+The SDK's Poseidon is WebAssembly built from `sdk/poseidon` (Rust) into
+`sdk/src/poseidon-wasm.mjs`, which is committed, so installing the SDK needs no
+Rust. `npm run poseidon` rebuilds it (Rust with the `wasm32-unknown-unknown`
+target); the build is reproducible, and the file records the module's sha256.
+Where WebAssembly cannot run, the SDK falls back to starknet.js
+(`POSEIDON_BACKEND` says which).
