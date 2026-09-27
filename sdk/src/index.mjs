@@ -233,9 +233,18 @@ export function replay(game, terms, start, witness, signed) {
 /**
  * One client's view of a channel: the verified transcript from an anchor.
  * Holds public data only; private keys stay with the caller.
+ *
+ * Each step record is `{ seq, transcript, message, step, signature, seat }`:
+ * the position the step was signed at, its message, the signed step and its
+ * seat. `lastSigned[seat]` is the record of the last step this client signed
+ * for that seat, or null; `sign` refuses to sign anything that would
+ * contradict it. Persist it apart from the transcript (`@referee/sdk/store`
+ * does) and pass it back in when restoring.
  */
 export class Session {
-  constructor(game, terms, { start, witness } = {}) {
+  #staged = null;
+
+  constructor(game, terms, { start, witness, lastSigned } = {}) {
     this.game = game;
     this.terms = terms;
     this.context = contextHash(game, terms);
@@ -244,29 +253,75 @@ export class Session {
     this.env = structuredClone(this.start);
     this.scratch = load(game, terms.config, this.start.game, this.startWitness);
     this.steps = [];
+    this.lastSigned = lastSigned ? [...lastSigned] : [null, null];
   }
 
   /** Verify and apply a step signed by the other seat (or ourselves). */
   receive(signed) {
+    const staged = this.#staged;
+    this.#staged = null;
+    if (staged?.record === signed && staged.base === this.env) return this.#commit(staged);
     // Authenticate before running any game logic on the step.
     const seat = actorOf(this.game, this.env, signed.step);
     check(seat === 0 || seat === 1, 'Invalid seat');
     const message = actionHash(this.game, this.context, this.env.seq, this.env.transcript, signed.step);
     check(verify(message, signed.signature, this.terms.keys[seat]), 'Invalid session signature');
-    const scratch = cloneScratch(this.game, this.scratch);
-    const { env } = applyStep(this.game, this.context, this.terms.config, this.env, signed.step, scratch);
-    this.env = env;
-    this.scratch = scratch;
-    const record = { step: signed.step, signature: normSignature(signed.signature), seat };
-    this.steps.push(record);
-    return record;
+    return this.#commit(this.#stage(signed.step, signed.signature, message));
+  }
+
+  /**
+   * Sign our own step at the current state, after checking it against the
+   * rules, without applying it: pass the result to `receive` (`move` does
+   * both). Refuses to sign unless this session extends `lastSigned[seat]`,
+   * because two different steps signed at one seq are equivocation: the other
+   * seat could settle whichever branch suits it. Updates `lastSigned[seat]`.
+   */
+  sign(step, privateKey) {
+    const seat = actorOf(this.game, this.env, step);
+    check(seat === 0 || seat === 1, 'Invalid seat');
+    check(publicKey(privateKey) === felt(this.terms.keys[seat]), 'Wrong signing key');
+    const message = actionHash(this.game, this.context, this.env.seq, this.env.transcript, step);
+    this.#guard(this.lastSigned[seat], message);
+    this.#staged = this.#stage(step, sign(message, privateKey), message);
+    this.lastSigned[seat] = this.#staged.record;
+    return this.#staged.record;
   }
 
   /** Sign and apply our own step. */
-  move(step, privateKey) {
-    check(publicKey(privateKey) === felt(this.terms.keys[actorOf(this.game, this.env, step)]), 'Wrong signing key');
-    const message = actionHash(this.game, this.context, this.env.seq, this.env.transcript, step);
-    return this.receive({ step, signature: sign(message, privateKey) });
+  move(step, privateKey) { return this.receive(this.sign(step, privateKey)); }
+
+  /** The transcript at `seq`, for `start.seq <= seq <= env.seq`; otherwise undefined. */
+  transcriptAt(seq) {
+    return seq === this.env.seq ? this.env.transcript : this.steps[seq - this.start.seq]?.transcript;
+  }
+
+  /** Whether this session's history passes through `{ seq, transcript }`, or starts after it. */
+  includes({ seq, transcript }) {
+    const at = this.transcriptAt(seq);
+    return seq < this.start.seq || (at !== undefined && felt(at) === felt(transcript));
+  }
+
+  #guard(mark, message) {
+    if (!mark || mark.seq < this.start.seq) return; // a later anchor supersedes it
+    check(mark.seq <= this.env.seq, `Session is behind seq ${mark.seq}, which this key signed`);
+    const at = mark.seq === this.env.seq ? { transcript: this.env.transcript, message } : this.steps[mark.seq - this.start.seq];
+    check(felt(at.transcript) === felt(mark.transcript) && at.message === felt(mark.message),
+      `Would equivocate: this key signed a different step at seq ${mark.seq}`);
+  }
+
+  // Apply a step to copies of the state, so a rejected step changes nothing.
+  #stage(step, signature, message) {
+    const scratch = cloneScratch(this.game, this.scratch);
+    const { env, seat } = applyStep(this.game, this.context, this.terms.config, this.env, step, scratch);
+    const record = { seq: this.env.seq, transcript: this.env.transcript, message, step, signature: normSignature(signature), seat };
+    return { base: this.env, env, scratch, record };
+  }
+
+  #commit({ env, scratch, record }) {
+    this.env = env;
+    this.scratch = scratch;
+    this.steps.push(record);
+    return record;
   }
 
   /** Steps and one final signature per seat, as replay calldata takes them. */
@@ -287,9 +342,10 @@ export class Session {
     const steps = this.steps.map(({ step, signature }) => ({ step, signature }));
     return { version: 2, terms: this.terms, start: this.start, witness: this.startWitness, steps };
   }
-  static import(game, record) {
+  /** Rebuild a session from `export()`, verifying every step. `lastSigned` is as for the constructor. */
+  static import(game, record, { lastSigned } = {}) {
     check(record.version === 2, 'Unsupported transcript version');
-    const session = new Session(game, record.terms, { start: record.start, witness: record.witness });
+    const session = new Session(game, record.terms, { start: record.start, witness: record.witness, lastSigned });
     for (const signed of record.steps) session.receive(signed);
     return session;
   }

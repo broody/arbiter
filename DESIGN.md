@@ -21,8 +21,8 @@ Hashfront (`~/development/hashfront`, a tactics game with combat randomness).
 | `referee_dojo` (Cairo) | built | `core`, Dojo | `ChannelGame`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint. Games list the models in `build-external-contracts` |
 | `referee_testing` (Cairo) | built | `core` | Test-only STARK-curve signer and hash-chain helper |
 | `referee_adapter` (Cairo 2.18) | built, tested with mocked proof facts | `core` | Generic logic for a SNIP-36 account contract that proves a replay in the virtual OS and relays it to the channel |
-| `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, fixtures; native proving client (`@referee/sdk/proving`) |
-| relay, keeper | planned | `sdk` | Move transport and archive; prove, settle and answer disputes |
+| `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, fixtures; native proving client (`@referee/sdk/proving`); session store and signing guard (`@referee/sdk/store`) |
+| keeper | planned | `sdk` | Move archive and transport; prove, settle and answer disputes |
 
 `core` has no Dojo or storage dependency and builds on both Cairo 2.13 (Dojo)
 and 2.18 (the adapter). `scripts/check.sh` tests both.
@@ -225,6 +225,40 @@ its constructor.
   `nativeProofBlock` are exported for callers that drive the steps themselves.
 - A game with a replay witness adds `encodeWitness(witness)` to its codec.
 
+## Client persistence
+
+**Signing guard.** A seat that signs two different steps at one seq has
+equivocated: the other seat holds both branches and can settle whichever suits
+it. The usual cause is a client restored from a stale copy (a backup, a second
+tab, a lost write) that signs again below its last step.
+- `Session.lastSigned[seat]` is the record of the last step the client signed
+  for that seat. `sign` and `move` refuse unless the session's history
+  includes it:
+  - at the mark's seq, only the identical step, which re-signs to the same
+    signature;
+  - past it, only if the history contains the marked step;
+  - behind it, nothing until the missing steps arrive.
+- A mark before the session's anchor is superseded by the anchor.
+- Marks are opt-in. A `Session` without them behaves as before, so tests can
+  still build forks.
+
+**Session store** (`@referee/sdk/store`). `SessionStore` keeps transcripts,
+marks and session keys in a backend: `indexedDbBackend` for browsers,
+`fileBackend` (`@referee/sdk/store/file`) for Node, `memoryBackend` for tests.
+- `move` checks the stored mark, signs, and records the new mark in one atomic
+  update before it returns the signed step, so two tabs cannot both sign at one
+  seq.
+- Marks are stored apart from transcripts, so restoring an old transcript never
+  rolls one back.
+- `load` re-verifies the transcript (`Session.import`) and re-applies a marked
+  step that never reached it.
+- `save` refuses to overwrite a transcript it does not extend.
+- `saveKey` keeps a session key, with the seat's randomness seed, under its
+  public key; `keyFor(terms)` finds the seat.
+- The guard is per store. Two devices holding one key do not share marks, so a
+  key is used on one device at a time. The file backend locks its directory to
+  one process.
+
 ## Proving strategy
 
 - **Whole game in one proof when it fits.** Final-signature authentication and
@@ -257,7 +291,9 @@ its constructor.
 6. ~~SDK proof builders.~~ Done (`@referee/sdk/proving`).
 7. ~~Self-hosted PROOF1 prover.~~ Done (`prover/`: upstream transaction prover
    plus an allowlisting gateway). PROOF2 large path once the network accepts it.
-8. Relay and keeper.
+8. Keeper. The client half is done: `@referee/sdk/store` persists sessions and
+   guards signing. Still to do: the keeper service, which archives and forwards
+   verified steps, proves, settles and answers disputes.
 
 ## Development
 

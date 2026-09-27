@@ -6,7 +6,9 @@
   "description": "Signing, transcripts, sessions, channel codecs and native proving for referee games.",
   "exports": {
     ".": "./sdk/src/index.mjs",
-    "./proving": "./sdk/src/proving.mjs"
+    "./proving": "./sdk/src/proving.mjs",
+    "./store": "./sdk/src/store.mjs",
+    "./store/file": "./sdk/src/store-file.mjs"
   },
   "files": [
     "sdk/src"
@@ -21,5 +23,8 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5"
   }
 }

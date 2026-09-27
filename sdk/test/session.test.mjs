@@ -65,6 +65,58 @@ test('export and import round-trip through full verification', () => {
   assert.equal(env.transcript, session.env.transcript);
 });
 
+test('a stale copy with the last-signed marks cannot equivocate', () => {
+  const session = new Session(counter, terms);
+  session.move(add(3), keys[0]);
+  const atOne = structuredClone(session.export());
+  session.move(add(2), keys[1]);
+  session.move(add(1), keys[0]);
+  const marks = session.lastSigned;
+  assert.deepEqual(marks.map(m => m.seq), [2, 1]);
+
+  const stale = Session.import(counter, structuredClone(atOne), { lastSigned: marks });
+  assert.throws(() => stale.move(add(3), keys[1]), /Would equivocate: this key signed a different step at seq 1/);
+  // Re-signing the same step is harmless and gives the same signature.
+  assert.deepEqual(stale.move(add(2), keys[1]).signature, session.steps[1].signature);
+  assert.throws(() => stale.move(add(2), keys[0]), /Would equivocate/);
+  stale.move(add(1), keys[0]);
+  assert.equal(stale.stateHash(), session.stateHash());
+
+  const opening = Session.import(counter, { ...structuredClone(atOne), steps: [] }, { lastSigned: marks });
+  assert.throws(() => opening.move(add(3), keys[0]), /Session is behind seq 2, which this key signed/);
+});
+
+test('a branch that drops a signed step is refused, and a later anchor supersedes it', () => {
+  const signed = new Session(counter, terms);
+  signed.move(add(3), keys[0]);
+  const prefix = structuredClone(signed.export());
+  signed.move(add(2), keys[1]);
+  // Without marks two copies still fork freely; the fork carries the other branch.
+  const fork = Session.import(counter, structuredClone(prefix));
+  fork.move(add(1), keys[1]);
+  fork.move(add(1), keys[0]);
+  const forked = Session.import(counter, structuredClone(fork.export()), { lastSigned: signed.lastSigned });
+  assert.throws(() => forked.move(add(1), keys[1]), /Would equivocate: this key signed a different step at seq 1/);
+  assert.equal(forked.includes({ seq: 1, transcript: signed.steps[1].transcript }), true);
+  assert.equal(forked.includes({ seq: 2, transcript: signed.env.transcript }), false);
+
+  const anchored = new Session(counter, terms, { start: fork.env, lastSigned: signed.lastSigned });
+  anchored.move(add(1), keys[1]);
+  assert.equal(anchored.includes({ seq: 1, transcript: 0n }), true);
+});
+
+test('a signed step is checked against the rules before the mark moves', () => {
+  const session = played();
+  const mark = session.lastSigned[0];
+  assert.throws(() => session.sign(add(4), keys[0]), /Invalid amount/);
+  assert.equal(session.lastSigned[0], mark);
+  const record = session.sign(add(1), keys[0]);
+  assert.equal(session.env.seq, 3);
+  assert.deepEqual([record.seq, record.transcript, session.lastSigned[0]], [3, session.env.transcript, record]);
+  assert.equal(session.receive(record), record);
+  assert.equal(session.env.seq, 4);
+});
+
 test('replay calldata carries one final signature per seat', () => {
   const session = played();
   assert.deepEqual(session.steps.map(s => s.seat), [0, 1, 0]);
