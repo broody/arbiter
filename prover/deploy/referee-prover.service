@@ -1,0 +1,41 @@
+# systemd unit for the referee prover gateway (system or user instance).
+# Delegate=yes gives the gateway its own cgroup v2 subtree: with
+# workers.cgroup_root "self" it moves itself into a `gateway` leaf and runs each
+# worker in a sibling group under the job limits (prover/README.md, Isolation).
+# Paths assume the repository at /opt/referee (with `npm ci --omit=dev`), a build
+# from prover/build.sh at /var/lib/referee-prover/build and the config at
+# /etc/referee/prover.json.
+[Unit]
+Description=referee prover gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=referee
+Group=referee
+Environment=REFEREE_PROVER_BUILD=/var/lib/referee-prover/build
+ExecStart=/usr/bin/node /opt/referee/prover/server.mjs /etc/referee/prover.json
+Delegate=yes
+# The whole subtree: max_concurrent workers at workers.job_memory each, plus the
+# gateway. Size it to the host (for example 2 x 56G standard workers).
+MemoryMax=120G
+MemorySwapMax=0
+Restart=on-failure
+RestartSec=10
+# Hardening. Workers keep network access: the backend reads chain state from
+# the RPC node while it proves.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/referee-prover
+StateDirectory=referee-prover
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=no
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

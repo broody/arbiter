@@ -1,0 +1,10 @@
+*
+!package.json
+!package-lock.json
+!sdk/src
+!prover/build.sh
+!prover/pins.json
+!prover/patches
+!prover/server.mjs
+!prover/workers.mjs
+!prover/deploy/entrypoint.sh

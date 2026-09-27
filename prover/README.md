@@ -236,6 +236,40 @@ JSON line per request (client, sender, block, calldata size, outcome, time)
 and per worker restart; the workers' own logs follow on stderr, each line
 prefixed `worker-N:`. `GET /health` answers `ok`.
 
+## Deploy
+
+Both setups in [`deploy/`](deploy) give the gateway the delegated cgroup its
+workers need, and run it as an unprivileged `referee` user.
+
+**systemd** (recommended): [`referee-prover.service`](deploy/referee-prover.service)
+runs the gateway with `Delegate=yes`. Install the repository at `/opt/referee`
+(`npm ci --omit=dev`), build with
+`REFEREE_PROVER_BUILD=/var/lib/referee-prover/build prover/build.sh`, put the
+config at `/etc/referee/prover.json`, and size the unit's `MemoryMax` to the
+workers (`max_concurrent` × `workers.job_memory`, plus the gateway).
+
+**Docker**: [`Dockerfile`](deploy/Dockerfile) builds the backend with
+`build.sh` (build argument `CPU`: `x86-64-v3` by default, or `native`) into an
+image with the gateway. Its [entrypoint](deploy/entrypoint.sh) remounts the
+container's private cgroup namespace writable, hands it to `referee`, and drops
+every capability before starting the gateway:
+
+```bash
+docker build -f prover/deploy/Dockerfile -t referee-prover .
+docker run -d --name referee-prover --cgroupns=private --cap-add SYS_ADMIN \
+  --security-opt apparmor=unconfined --network host --memory 120g --memory-swap 120g \
+  -v /etc/referee/prover.json:/etc/referee/prover.json:ro referee-prover
+```
+
+`SYS_ADMIN` (and, on AppArmor hosts, `apparmor=unconfined`) is only for the
+remount; `--network host` lets the gateway reach a local RPC node and listen
+on its configured port.
+
+Checked 2026-09-27: the image (`x86-64-v3`) ran its gateway as `referee` with
+no capabilities and proved the 529-step game on a worker in 26.6 s (24.8 s
+with a `native` build), and the unit's cgroup settings, as a user service,
+proved the 319-step game; both proofs were byte-identical to native builds'.
+
 ## API
 
 JSON-RPC 2.0 on `/`:
