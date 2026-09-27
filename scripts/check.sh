@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Regenerate fixtures, fail if they changed, run the SDK and prover gateway
+# Regenerate fixtures, fail if they changed, run the SDK, prover gateway and keeper
 # tests, and test the pure crates on both Cairo toolchains (2.13 for Dojo, 2.18
 # for the native proof adapter), then the Dojo binding on 2.13 and the proof
 # adapter on 2.18.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 node sdk/scripts/gen-counter-fixtures.mjs
-node --test sdk/test/*.test.mjs prover/test/*.test.mjs
+node --test sdk/test/*.test.mjs prover/test/*.test.mjs keeper/test/*.test.mjs
 # The root workspace mixes toolchains (see Scarb.toml). Scarb 2.18 also cannot
 # read registry records cached by 2.13, so it gets its own cache.
 export SCARB_IGNORE_CAIRO_VERSION=true

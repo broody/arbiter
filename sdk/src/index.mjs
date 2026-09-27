@@ -351,6 +351,28 @@ export class Session {
   }
 }
 
+/**
+ * `session` from the state whose hash is `anchorHash` (an anchor the channel
+ * committed), keeping the steps after it; null if its history never reaches
+ * that state. Proofs and onchain replays start from the channel's anchor.
+ */
+export function rebase(session, anchorHash) {
+  const { game, terms, context } = session;
+  const target = felt(anchorHash);
+  let env = session.start;
+  const scratch = load(game, terms.config, env.game, session.startWitness);
+  for (let i = 0; ; i++) {
+    if (stateHash(game, env) === target) {
+      const witness = i === 0 ? session.startWitness : game.witness ? structuredClone(game.witness(scratch)) : null;
+      const base = new Session(game, terms, { start: env, witness, lastSigned: session.lastSigned });
+      for (const record of session.steps.slice(i)) base.receive(record);
+      return base;
+    }
+    if (i === session.steps.length) return null;
+    env = applyStep(game, context, terms.config, env, session.steps[i].step, scratch).env;
+  }
+}
+
 // ---- Cairo Serde encoders and decoders for channel calldata ----
 
 export const encodeSignature = sig => [felt(sig.r), felt(sig.s)];

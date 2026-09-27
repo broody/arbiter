@@ -9,7 +9,7 @@
 // The game's channel exposes `snapshot(game_id)` (referee_dojo::channel::snapshot).
 import { RpcProvider } from 'starknet';
 import {
-  ZERO_SIGNATURE, batchOf, contextHash, decodeSnapshot, encodeBatch, encodeEnvelope, encodeSignatures,
+  ZERO_SIGNATURE, batchOf, contextHash, decodeChannelGame, decodeSnapshot, encodeBatch, encodeEnvelope, encodeSignatures,
   encodeWitness, felt, hex, proofMessageHash, proofPayload, replay, stateHash, tag,
 } from './index.mjs';
 
@@ -75,6 +75,22 @@ export function provingTransaction({ session, epoch, nonce, l2GasLimit = 10_000_
     calldata: provingCalldata(session, epoch).map(hex), signature: [], nonce: hex(nonce),
     resource_bounds: { l1_gas: zero, l1_data_gas: zero, l2_gas: { max_amount: hex(l2GasLimit), max_price_per_unit: '0x0' } },
     tip: '0x0', paymaster_data: [], account_deployment_data: [], nonce_data_availability_mode: 'L1', fee_data_availability_mode: 'L1' };
+}
+
+/**
+ * The channel's `submit_history` call: replay `session` onchain from its start,
+ * which must be the channel's anchor (see `rebase`), against each seat's final
+ * signature. Without `acks` the end state becomes a dispute candidate.
+ */
+export const historyCall = (session, epoch, { acks = NO_ACKS, entrypoint = 'submit_history' } = {}) => {
+  const { game, terms } = session;
+  return contractCall(terms.channel, entrypoint, [terms.game_id, epoch, ...encodeEnvelope(game, session.start),
+    ...encodeWitness(game, session.startWitness), ...encodeBatch(game, batchOf(session.steps)), ...encodeSignatures(acks)]);
+};
+
+/** A game's `get_channel(game_id)`: referee_dojo's `ChannelGame` model, decoded. */
+export async function getChannel(provider, game, channel, gameId, { block = 'latest', entrypoint = 'get_channel' } = {}) {
+  return decodeChannelGame(game, await provider.callContract(contractCall(channel, entrypoint, [gameId]), block));
 }
 
 /** The adapter's `settle` call, to send with the proof as `validateNativeProof`'s options. */

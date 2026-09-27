@@ -8,15 +8,17 @@
     ".": "./sdk/src/index.mjs",
     "./proving": "./sdk/src/proving.mjs",
     "./store": "./sdk/src/store.mjs",
-    "./store/file": "./sdk/src/store-file.mjs"
+    "./store/file": "./sdk/src/store-file.mjs",
+    "./keeper": "./sdk/src/keeper.mjs"
   },
   "files": [
     "sdk/src"
   ],
   "scripts": {
     "fixtures": "node sdk/scripts/gen-counter-fixtures.mjs",
-    "test": "node --test sdk/test/*.test.mjs prover/test/*.test.mjs",
-    "prover": "node prover/server.mjs"
+    "test": "node --test sdk/test/*.test.mjs prover/test/*.test.mjs keeper/test/*.test.mjs",
+    "prover": "node prover/server.mjs",
+    "keeper": "node keeper/server.mjs"
   },
   "dependencies": {
     "starknet": "10.5.0"

@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import {
   REASON_RESIGN, Reader, Session, ZERO_SIGNATURE, contextHash, decodeChannelGame, decodeSnapshot,
   decodeTerms, encodeBatch, encodeSignatures, encodeTerms, finalSignatures, play, playRandom,
-  proofMessageHash, proofPayload, publicKey, replay, resign, reveal, rngChain, tag,
+  proofMessageHash, proofPayload, publicKey, rebase, replay, resign, reveal, rngChain, stateHash, tag,
 } from '../src/index.mjs';
 import { ADD, GAMBLE, counter } from '../examples/counter.mjs';
 
@@ -115,6 +115,19 @@ test('a signed step is checked against the rules before the mark moves', () => {
   assert.deepEqual([record.seq, record.transcript, session.lastSigned[0]], [3, session.env.transcript, record]);
   assert.equal(session.receive(record), record);
   assert.equal(session.env.seq, 4);
+});
+
+test('rebase restarts a session at a committed anchor', () => {
+  const session = played();
+  const pending = new Session(counter, terms);
+  session.steps.slice(0, 2).forEach(record => pending.receive(record));
+  assert.equal(pending.env.pending.active, true);
+  const base = rebase(session, pending.stateHash());
+  assert.deepEqual([base.start.seq, base.steps.length, base.stateHash()], [2, 1, session.stateHash()]);
+  assert.deepEqual(base.steps[0], session.steps[2]);
+  assert.equal(rebase(session, stateHash(counter, session.start)).steps.length, 3);
+  assert.equal(rebase(session, session.stateHash()).steps.length, 0);
+  assert.equal(rebase(session, 0x123n), null);
 });
 
 test('replay calldata carries one final signature per seat', () => {

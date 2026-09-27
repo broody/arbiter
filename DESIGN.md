@@ -22,7 +22,7 @@ Hashfront (`~/development/hashfront`, a tactics game with combat randomness).
 | `referee_testing` (Cairo) | built | `core` | Test-only STARK-curve signer and hash-chain helper |
 | `referee_adapter` (Cairo 2.18) | built, tested with mocked proof facts | `core` | Generic logic for a SNIP-36 account contract that proves a replay in the virtual OS and relays it to the channel |
 | `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, fixtures; native proving client (`@referee/sdk/proving`); session store and signing guard (`@referee/sdk/store`) |
-| keeper | planned | `sdk` | Move archive and transport; prove, settle and answer disputes |
+| keeper (`keeper/`) | built, tested on Katana | `sdk` | Archives and forwards verified steps, records equivocation, answers disputes, resolves and settles |
 
 `core` has no Dojo or storage dependency and builds on both Cairo 2.13 (Dojo)
 and 2.18 (the adapter). `scripts/check.sh` tests both.
@@ -259,6 +259,34 @@ marks and session keys in a backend: `indexedDbBackend` for browsers,
   key is used on one device at a time. The file backend locks its directory to
   one process.
 
+## Keeper
+
+`keeper/` is one service that archives moves, answers disputes and settles
+(see [keeper/README.md](keeper/README.md)). The two jobs share one state: the
+latest verified transcript.
+- **Trust.** The keeper's trust model is the prover gateway's. It keeps only
+  steps that verify, so it cannot forge one. It can delay or withhold steps,
+  but both players keep their own copies. It holds no player keys: its own
+  account sends only `submit_history`, `resolve` and the adapter's `settle`,
+  which anyone may send.
+- **Archive.** A game is admitted when its context matches the one the
+  channel stores. Where two branches meet, the one that ranks higher as a
+  dispute candidate is kept. Two different steps one seat signed at one seq
+  are stored as equivocation evidence.
+- **Transport.** Clients (`@referee/sdk/keeper`) register a session, send
+  steps and long-poll for the other seat's. They verify every step they pull,
+  and `pull` refuses a branch that diverges from their own.
+- **Watcher.** It answers a dispute whose candidate the archive outranks,
+  replaying from the channel's anchor (`rebase`). It resolves once the window
+  passes, and submits finished games still ACTIVE. Up to `max_history_steps`
+  steps go onchain through `submit_history`; longer transcripts are proved.
+  Forced play and timeouts need a player's wallet, so it leaves them alone.
+- **Channel reads.** A game system exposes `get_channel(game_id)`, which
+  returns the `ChannelGame` model, decoded by the SDK's `getChannel`.
+- **Tests.** `keeper/katana.sh` runs the keeper on a local Katana with the
+  counter world. It answers a stale dispute and resolves it into forced play,
+  and it settles a finished game through the dispute window to SETTLED.
+
 ## Proving strategy
 
 - **Whole game in one proof when it fits.** Final-signature authentication and
@@ -291,9 +319,11 @@ marks and session keys in a backend: `indexedDbBackend` for browsers,
 6. ~~SDK proof builders.~~ Done (`@referee/sdk/proving`).
 7. ~~Self-hosted PROOF1 prover.~~ Done (`prover/`: upstream transaction prover
    plus an allowlisting gateway). PROOF2 large path once the network accepts it.
-8. Keeper. The client half is done: `@referee/sdk/store` persists sessions and
-   guards signing. Still to do: the keeper service, which archives and forwards
-   verified steps, proves, settles and answers disputes.
+8. ~~Keeper.~~ Done: `@referee/sdk/store` persists sessions and guards
+   signing, and `keeper/` archives and forwards steps and answers disputes,
+   resolves and settles (tested on Katana). Still to do: the proof path against
+   a live prover, and cooperative checkpoint approvals (`acks`) through the
+   keeper.
 
 ## Development
 

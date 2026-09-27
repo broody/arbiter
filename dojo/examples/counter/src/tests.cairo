@@ -149,6 +149,10 @@ fn join_fixes_context_and_opening_anchor() {
     assert_eq!(channel.context, context_hash::<CounterRules>(@terms));
     assert_eq!(channel.anchor.hash, state_hash::<CounterRules>(@opening(@terms)));
     assert_eq!(terms.players, array![ALICE().into(), BOB().into()].span());
+    let (mut served, mut model) = (array![], array![]);
+    game.get_channel(id).serialize(ref served);
+    channel.serialize(ref model);
+    assert_eq!(served, model);
 }
 
 #[test]

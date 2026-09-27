@@ -9,8 +9,8 @@ import {
   hex, play, proofMessageHash, proofPayload, publicKey, stateHash, tag,
 } from '../src/index.mjs';
 import {
-  VIRTUAL_OS_PROGRAM, getSnapshot, nativeProofBlock, proveSession, provingCalldata, provingTransaction,
-  settlementCall, validateNativeProof,
+  VIRTUAL_OS_PROGRAM, getChannel, getSnapshot, historyCall, nativeProofBlock, proveSession, provingCalldata,
+  provingTransaction, settlementCall, validateNativeProof,
 } from '../src/proving.mjs';
 import { ADD, counter } from '../examples/counter.mjs';
 
@@ -63,6 +63,25 @@ test('proving calldata is the adapter __execute__ layout with final signatures o
   assert.equal(BigInt(tx.sender_address), terms.prover);
   assert.equal(tx.nonce, '0x5');
   assert.equal(tx.resource_bounds.l2_gas.max_price_per_unit, '0x0');
+});
+
+test('submit_history replays from the start against final signatures', async () => {
+  const signatures = [session.steps[2].signature, session.steps[1].signature];
+  const call = historyCall(session, 4);
+  assert.deepEqual([call.contractAddress, call.entrypoint], [hex(terms.channel), 'submit_history']);
+  assert.deepEqual(call.calldata.map(BigInt), [terms.game_id, 4n, ...encodeEnvelope(counter, session.start),
+    ...encodeSteps(counter, session.steps.map(s => s.step)), ...encodeSignatures(signatures),
+    ...encodeSignatures([ZERO_SIGNATURE, ZERO_SIGNATURE])]);
+  assert.equal(historyCall(session, 4, { entrypoint: 'submit' }).entrypoint, 'submit');
+
+  const ref = [0x11n, 5n, 3n, 1n, 0n, 0n, 0n];
+  const stored = [terms.game_id, 0xa11cen, 0xb0bn, 1n, 2n, 3n, 4n, terms.prover, 1n, 20n, 2n, 3n, 0xc0n, 3600n, ...ref, ...ref, 55n, 900n, 0n, 0n, 0n];
+  const provider = { callContract: async (c, block) => {
+    assert.deepEqual([c.contractAddress, c.entrypoint, c.calldata, block], [hex(terms.channel), 'get_channel', [hex(terms.game_id)], 'latest']);
+    return stored.map(hex);
+  } };
+  const channel = await getChannel(provider, counter, terms.channel, terms.game_id);
+  assert.deepEqual([channel.status, channel.epoch, channel.deadline, channel.anchor.seq], [2, 3, 900, 5]);
 });
 
 test('games with a replay witness must encode it', () => {

@@ -2,6 +2,7 @@
 //! entrypoint on top of `referee_dojo::channel`.
 use referee::{Envelope, Move, Signature, Terms};
 use referee_counter::{Action, Config, Counter};
+use referee_dojo::models::ChannelGame;
 use starknet::ContractAddress;
 
 #[starknet::interface]
@@ -49,6 +50,8 @@ pub trait ICounterChannel<T> {
     fn allow_prover(ref self: T, class_hash: felt252, allowed: bool);
     fn terms(self: @T, game_id: felt252) -> Terms<Config>;
     fn snapshot(self: @T, game_id: felt252) -> (Terms<Config>, u32, felt252, u64);
+    /// The stored channel, for clients and keepers watching disputes.
+    fn get_channel(self: @T, game_id: felt252) -> ChannelGame;
 }
 
 #[dojo::contract]
@@ -57,6 +60,7 @@ pub mod channel {
     use referee::{Envelope, Move, Signature, Terms};
     use referee_counter::{Action, Config, Counter, CounterRules};
     use referee_dojo::channel as binding;
+    use referee_dojo::models::ChannelGame;
     use starknet::ContractAddress;
 
     #[abi(embed_v0)]
@@ -164,6 +168,11 @@ pub mod channel {
         fn snapshot(self: @ContractState, game_id: felt252) -> (Terms<Config>, u32, felt252, u64) {
             let world = self.world_default();
             binding::snapshot::<CounterRules>(@world, game_id)
+        }
+
+        fn get_channel(self: @ContractState, game_id: felt252) -> ChannelGame {
+            let world = self.world_default();
+            binding::read(@world, game_id)
         }
     }
 

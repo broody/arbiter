@@ -4,3 +4,5 @@ node_modules/
 *.log
 .snfoundry_cache/
 prover/*.local.json
+keeper/*.local.json
+keeper-data/
