@@ -1,6 +1,8 @@
 // referee prover gateway: a `starknet_proveTransaction` JSON-RPC endpoint (the
 // API `@referee/sdk/proving` calls) in front of a proving backend, today
-// StarkWare's starknet_transaction_prover built by build.sh (PROOF1).
+// StarkWare's starknet_transaction_prover built by build.sh (PROOF1). It runs
+// the backend as isolated workers, one job each (workers.mjs), or forwards to an
+// external backend at `backend_url`.
 //
 // Before a request takes a proving slot, the gateway checks that it is the
 // zero-fee virtual INVOKE_V3 of an allowlisted referee adapter class whose
@@ -12,39 +14,46 @@
 //
 // Methods: starknet_specVersion, starknet_proveTransaction, referee_info.
 import { createServer } from 'node:http';
+import { existsSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { hash } from 'starknet';
 import { hex, tag } from '../sdk/src/index.mjs';
 import { rpc } from '../sdk/src/proving.mjs';
+import { Slots, cgroupSandbox, post, processSandbox, startWorkers } from './workers.mjs';
 
 // JSON-RPC error codes: the proving API's where one fits, then referee's own.
 export const INVALID_REQUEST = -32600, METHOD_NOT_FOUND = -32601, INVALID_PARAMS = -32602, INTERNAL = -32603;
 export const SERVICE_BUSY = -32005, RATE_LIMITED = -32029;
 export const BLOCK_NOT_FOUND = 24, INVALID_TRANSACTION = 1000;
-export const NOT_ALLOWED = 1100, WRONG_OS_PROGRAM = 1101, EXCEEDS_PROOF1 = 1102;
+export const NOT_ALLOWED = 1100, WRONG_OS_PROGRAM = 1101, EXCEEDS_PROOF1 = 1102, JOB_FAILED = 1103;
 
 // The adapter's pinned virtual OS program getter (referee_adapter `os_program`).
 const OS_PROGRAM_SELECTOR = hash.getSelectorFromName('os_program');
 
 const DEFAULTS = {
   host: '127.0.0.1', port: 3100, max_concurrent: 1, max_queued: 8, max_calldata: 20000,
-  max_body_bytes: 1 << 20, rate_per_minute: 12, backend_timeout_ms: 600000, memory: 'standard',
+  max_body_bytes: 1 << 20, rate_per_minute: 12, backend_timeout_ms: 600000, memory: 'standard', prefetch_state: true,
 };
+const WORKER_DEFAULTS = { cgroup_root: 'self', base_port: 3200, job_cpus: null, pids_max: 1024, sandbox: 'cgroup' };
 
 /**
- * The backend's memory modes (config `memory`) and the environment run.sh starts
- * it with. Both produce the same proofs: `bounded` needs about 45% less memory
- * per proof and proves about 2x slower (README). Both give glibc a fixed 1 MiB
- * mmap threshold, so proving buffers return to the system after each proof
- * instead of accumulating in the heap across proofs.
+ * The backend's memory modes (config `memory`): the environment workers start
+ * with and each worker's default memory limit (`workers.job_memory`). Both
+ * produce the same proofs: `bounded` needs about 45% less memory per proof and
+ * proves about 2x slower (README). Both give glibc a fixed 1 MiB mmap
+ * threshold, so proving buffers return to the system after each proof instead
+ * of accumulating in the heap across proofs.
  */
 const RELEASE_BUFFERS = { MALLOC_MMAP_THRESHOLD_: '1048576' };
 export const MEMORY_MODES = {
-  standard: { ...RELEASE_BUFFERS },
-  bounded: { ...RELEASE_BUFFERS, PROVER_LOW_MEMORY: '1', PROVER_BOUNDED_CAIRO_COLUMNS: '16',
-    PROVER_BOUNDED_CIRCUIT_COLUMNS: '16' },
+  standard: { env: { ...RELEASE_BUFFERS }, job_memory: '56G' },
+  bounded: { env: { ...RELEASE_BUFFERS, PROVER_LOW_MEMORY: '1', PROVER_BOUNDED_CAIRO_COLUMNS: '16',
+    PROVER_BOUNDED_CIRCUIT_COLUMNS: '16' }, job_memory: '28G' },
 };
+const SANDBOXES = { cgroup: cgroupSandbox, none: processSandbox };
 
 class RpcError extends Error {
   constructor(code, message, data) { super(message); this.code = code; this.data = data; }
@@ -57,7 +66,7 @@ const zero = v => big(v) === 0n;
 /** Resolve and validate a gateway config (a parsed config.example.json). */
 export function loadConfig(raw) {
   const config = { ...DEFAULTS, ...raw };
-  for (const key of ['rpc_url', 'backend_url', 'chain_id', 'virtual_os_program'])
+  for (const key of ['rpc_url', 'chain_id', 'virtual_os_program'])
     if (!config[key]) throw Error(`Config needs ${key}`);
   if (!Array.isArray(config.adapter_classes) || config.adapter_classes.length === 0)
     throw Error('Config needs at least one adapter class in adapter_classes');
@@ -65,6 +74,12 @@ export function loadConfig(raw) {
   config.virtual_os_program = BigInt(config.virtual_os_program);
   if (!Object.hasOwn(MEMORY_MODES, config.memory))
     throw Error(`Config memory must be one of ${Object.keys(MEMORY_MODES).join(', ')}`);
+  if (!config.backend_url) {
+    config.workers = { ...WORKER_DEFAULTS, job_memory: MEMORY_MODES[config.memory].job_memory, ...config.workers };
+    if (!Object.hasOwn(SANDBOXES, config.workers.sandbox))
+      throw Error(`Config workers.sandbox must be one of ${Object.keys(SANDBOXES).join(', ')}`);
+    config.build_dir ??= process.env.REFEREE_PROVER_BUILD ?? join(homedir(), '.cache/referee-prover');
+  }
   return config;
 }
 
@@ -89,7 +104,7 @@ function checkTransaction(params, config) {
  * Start a gateway. Returns { url, close, info }. `log` receives one object per
  * finished request.
  */
-export async function startGateway(rawConfig, { log = entry => console.log(JSON.stringify(entry)) } = {}) {
+export async function startGateway(rawConfig, { log = entry => console.log(JSON.stringify(entry)), sandbox } = {}) {
   const config = loadConfig(rawConfig);
   const node = (method, params) => rpc(config.rpc_url, method, params);
 
@@ -97,21 +112,15 @@ export async function startGateway(rawConfig, { log = entry => console.log(JSON.
   // and every allowlisted adapter class is declared.
   const chain = BigInt(await node('starknet_chainId'));
   if (chain !== tag(config.chain_id)) throw Error(`RPC node is on ${hex(chain)}, not ${config.chain_id}`);
-  const backendVersion = await rpc(config.backend_url, 'starknet_specVersion', []);
   for (const classHash of config.adapter_classes) {
     try { await node('starknet_getClass', { block_id: 'latest', class_hash: hex(classHash) }); }
     catch (e) { throw Error(`Adapter class ${hex(classHash)} is not declared: ${e.message}`); }
   }
+  const backend = config.backend_url ? await externalBackend(config) : await workerBackend(config, { log, sandbox });
+  const backendVersion = backend.version;
 
-  let running = 0, jobs = 0;
-  const waiting = [];
+  let jobs = 0;
   const buckets = new Map();
-  const acquire = () => {
-    if (running < config.max_concurrent) { running++; return Promise.resolve(); }
-    if (waiting.length >= config.max_queued) fail(SERVICE_BUSY, 'Service busy: proving queue is full; retry later');
-    return new Promise(resolve => waiting.push(resolve));
-  };
-  const release = () => { const next = waiting.shift(); if (next) next(); else running--; };
   const admit = client => {
     const now = Date.now(), capacity = config.rate_per_minute;
     const b = buckets.get(client) ?? { tokens: capacity, at: now };
@@ -123,9 +132,9 @@ export async function startGateway(rawConfig, { log = entry => console.log(JSON.
   const info = () => ({
     chain_id: config.chain_id, virtual_os_program: hex(config.virtual_os_program),
     adapter_classes: [...config.adapter_classes].map(hex), proof_paths: ['PROOF1'], backend_spec_version: backendVersion,
-    memory: config.memory,
+    memory: config.memory, backend: backend.status(),
     limits: { max_concurrent: config.max_concurrent, max_queued: config.max_queued, max_calldata: config.max_calldata,
-      rate_per_minute: config.rate_per_minute },
+      rate_per_minute: config.rate_per_minute, ...(config.workers ? { job_memory: config.workers.job_memory } : {}) },
   });
 
   async function prove(params, client) {
@@ -143,19 +152,18 @@ export async function startGateway(rawConfig, { log = entry => console.log(JSON.
       request: { contract_address: tx.sender_address, entry_point_selector: OS_PROGRAM_SELECTOR, calldata: [] } });
     if (BigInt(osProgram) !== config.virtual_os_program)
       fail(WRONG_OS_PROGRAM, 'Adapter pins another virtual OS program; its proofs could not settle', { os_program: osProgram });
-    await acquire();
-    try {
-      const result = await rpc(config.backend_url, 'starknet_proveTransaction', params, config.backend_timeout_ms);
-      if (big(result.proof_facts?.[2]) !== config.virtual_os_program) fail(INTERNAL, 'Backend proved with another virtual OS program');
-      return { result, classHash };
-    } catch (e) {
+    let result;
+    try { result = await backend.run(params, config.backend_timeout_ms); }
+    catch (e) {
       if (e.rpcError) {
         const detail = `${e.rpcError.message} ${JSON.stringify(e.rpcError.data ?? '')}`;
         if (detail.includes('Not enough twiddles')) fail(EXCEEDS_PROOF1, 'Transaction exceeds PROOF1 capacity; settle in checkpoints', e.rpcError);
         fail(e.rpcError.code, e.rpcError.message, e.rpcError.data);
       }
       throw e;
-    } finally { release(); }
+    }
+    if (big(result.proof_facts?.[2]) !== config.virtual_os_program) fail(INTERNAL, 'Backend proved with another virtual OS program');
+    return { result, classHash };
   }
 
   async function handle(request, client) {
@@ -204,10 +212,65 @@ export async function startGateway(rawConfig, { log = entry => console.log(JSON.
   });
   // Proofs take seconds to minutes; keep idle client connections open past Node's 5 s default.
   server.keepAliveTimeout = 65000; server.headersTimeout = 66000; server.requestTimeout = config.backend_timeout_ms + 60000;
-  await new Promise(resolve => server.listen(config.port, config.host, resolve));
+  try {
+    await new Promise((resolve, reject) => server.once('error', reject).listen(config.port, config.host, resolve));
+  } catch (e) { await backend.close(); throw e; }
   const { address, port } = server.address();
   return { url: `http://${address.includes(':') ? `[${address}]` : address}:${port}`, info,
-    close: () => new Promise(resolve => server.close(resolve)) };
+    close: async () => { await new Promise(resolve => server.close(resolve)); await backend.close(); } };
+}
+
+const busy = () => new RpcError(SERVICE_BUSY, 'Service busy: proving queue is full; retry later');
+
+/** A backend someone else runs at `backend_url`: `max_concurrent` jobs at a time, no isolation. */
+async function externalBackend(config) {
+  const version = await rpc(config.backend_url, 'starknet_specVersion', []);
+  const slots = new Slots(config.max_queued, busy);
+  for (let i = 0; i < config.max_concurrent; i++) slots.offer(i);
+  return {
+    version, status: () => ({ external: true }), close: async () => {},
+    async run(params, timeoutMs) {
+      const slot = await slots.acquire();
+      try { return await post(config.backend_url, 'starknet_proveTransaction', params, timeoutMs); }
+      catch (e) {
+        if (e.rpcError) throw e;
+        fail(JOB_FAILED, e.timedOut ? `Proving job timed out after ${timeoutMs / 1000} s` : 'The proving backend is unreachable; retry later',
+          { reason: e.timedOut ? 'timeout' : 'unreachable' });
+      } finally { slots.offer(slot); }
+    },
+  };
+}
+
+const FAILURES = {
+  memory: 'Proving job exceeded its memory budget; the worker was restarted',
+  timeout: 'Proving job timed out; the worker was restarted',
+  exited: 'The proving backend stopped during the job; retry later',
+  unreachable: 'The proving backend stopped answering during the job; retry later',
+};
+
+/** `max_concurrent` workers running the backend from `build_dir`, each in its own cgroup. */
+async function workerBackend(config, { log, sandbox }) {
+  const { build_dir: build, workers } = config;
+  const binary = join(build, 'bin/starknet_transaction_prover');
+  if (!existsSync(binary)) throw Error(`No backend at ${binary}: run prover/build.sh (or set build_dir)`);
+  const mode = MEMORY_MODES[config.memory];
+  // An unpatched backend ignores the PROVER_* settings and would prove in standard mode.
+  const patched = (() => { try { return 'patches' in JSON.parse(readFileSync(join(build, 'build.json'), 'utf8')); } catch { return false; } })();
+  if (Object.keys(mode.env).some(k => k.startsWith('PROVER_')) && !patched)
+    throw Error(`memory: ${config.memory} needs a backend built with prover/patches: rerun prover/build.sh`);
+  return startWorkers({
+    size: config.max_concurrent, maxQueued: config.max_queued, command: binary, args: ['--no-cors'],
+    basePort: workers.base_port, cgroupRoot: workers.cgroup_root, sandbox: sandbox ?? SANDBOXES[workers.sandbox],
+    limits: { memory: workers.job_memory, cpus: workers.job_cpus, pids: workers.pids_max },
+    env: port => ({
+      ...process.env, ...mode.env, RPC_URL: config.rpc_url, CHAIN_ID: config.chain_id, PROVER_IP: '127.0.0.1',
+      PROVER_PORT: String(port), MAX_CONCURRENT_REQUESTS: '1', PREFETCH_STATE: String(config.prefetch_state),
+      CARGO_TOOLS_ROOT: join(build, 'tools'), LOG_FORMAT: process.env.LOG_FORMAT ?? 'json',
+      RUST_LOG: process.env.RUST_LOG ?? 'warn,starknet_transaction_prover=info,privacy_prove=info',
+    }),
+    busy, failed: (reason, data) => new RpcError(JOB_FAILED, FAILURES[reason], data),
+    log: entry => log({ ...entry, at: new Date().toISOString() }),
+  });
 }
 
 

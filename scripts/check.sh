@@ -7,6 +7,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 node sdk/scripts/gen-counter-fixtures.mjs
 node --test sdk/test/*.test.mjs prover/test/*.test.mjs keeper/test/*.test.mjs
+# The prover's cgroup worker tests need a delegated cgroup (a systemd user scope).
+if command -v systemd-run >/dev/null; then prover/test/cgroup.sh; fi
 # The root workspace mixes toolchains (see Scarb.toml). Scarb 2.18 also cannot
 # read registry records cached by 2.13, so it gets its own cache.
 export SCARB_IGNORE_CAIRO_VERSION=true

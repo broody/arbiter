@@ -3,13 +3,16 @@
   "port": 3100,
   "chain_id": "SN_SEPOLIA",
   "rpc_url": "http://127.0.0.1:9545/rpc/v0_10",
-  "backend_url": "http://127.0.0.1:3000",
   "virtual_os_program": "0x53f6c9fcfd31d27279ff7d7e422b44623550a732b59fe193354a7316a96daa1",
   "adapter_classes": [
     "0x0000000000000000000000000000000000000000000000000000000000000000"
   ],
   "max_concurrent": 1,
   "memory": "standard",
+  "workers": {
+    "cgroup_root": "self",
+    "base_port": 3200
+  },
   "max_queued": 8,
   "max_calldata": 20000,
   "rate_per_minute": 12,

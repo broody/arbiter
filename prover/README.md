@@ -8,7 +8,7 @@ yourself:
 | Process | What it is |
 | --- | --- |
 | backend | StarkWare's `starknet_transaction_prover` (the service behind the hosted prover), built from source at the sequencer revision in [`pins.json`](pins.json), with referee's [memory patches](#memory). It runs the adapter's virtual transaction in the virtual OS and proves it with Stwo in process. **PROOF1.** |
-| gateway | [`server.mjs`](server.mjs): the same JSON-RPC API in front of the backend. It admits only referee settlements (below), queues and rate-limits them, and maps capacity errors. |
+| gateway | [`server.mjs`](server.mjs): the same JSON-RPC API in front of the backend. It admits only referee settlements (below), queues and rate-limits them, proves each on its own [isolated worker](#isolation), and maps capacity errors. |
 
 Point a client at the gateway: `proveSession({ proverUrl: 'http://host:3100', ... })`.
 Nothing else changes: the proof, its facts and the `settle` call are exactly
@@ -77,29 +77,27 @@ cannot tell them apart; only memory and time differ.
 higher throughput too: use it where memory allows. `bounded` fits hosts that
 `standard` does not (a 32 GiB host fits one `bounded` job and no `standard`
 one; a 64 GiB host, two `bounded` jobs or one `standard`), and gives memory
-back between proofs on a shared host. Budget per concurrent job about 40 GiB
-in `standard` (46 once a long-running backend has proved games of mixed sizes)
-and 22 GiB in `bounded`, plus headroom: the backend is one process, so a job
-over budget is OOM-killed together with every other job in it. On the 125 GiB
-machine below, with copies of the largest game started together in one
-backend:
+back between proofs on a shared host. Budget per worker about 38 GiB in
+`standard` (46 once it has proved games of mixed sizes) and 22 GiB in
+`bounded`. Each worker's memory limit (`workers.job_memory`, by default 56 and
+28 GiB) leaves headroom over that, and a job that reaches it fails alone
+([Isolation](#isolation)). On the 125 GiB machine below, with copies of the
+largest game started together:
 
-| `memory` | `max_concurrent` | Peak | Seconds per proof |
+| `memory` | `max_concurrent` | Peak, all workers | Seconds per proof |
 | --- | ---: | ---: | ---: |
-| `standard` | 1 | 39.5 GiB | 23 |
-| `standard` | 2 | 70.7 GiB | 23 |
+| `standard` | 1 | 37.1 GiB | 24.8 |
+| `standard` | 2 | 73.9 GiB | 17.7 |
 | `bounded` | 1 | 21.8 GiB | 43 |
-| `bounded` | 3 | 56.5 GiB | 31 |
-| `bounded` | 4 | 67.1 GiB | 29 |
+| `bounded` | 4 | 79.7 GiB | 27.7 |
 
-(Wall time divided by proofs, OS run included.) A second `standard` slot adds
-no throughput here; it lets one job's OS run, which waits on the RPC node,
-overlap another's proof. `bounded` gains from concurrency because one bounded
-proof does not keep every core busy. On this machine: `standard` with
-`max_concurrent: 2`.
+(Wall time divided by proofs, OS run included; `bounded` with one worker was
+measured as one backend proving in sequence.) A second `standard` worker adds
+about 40% throughput; each keeps its own precomputes and column pool. On this
+machine: `standard` with `max_concurrent: 2`.
 
-**Allocator.** `run.sh` starts the backend with a fixed 1 MiB glibc mmap
-threshold (`MALLOC_MMAP_THRESHOLD_`) in both modes. Without it, freed proving
+**Allocator.** Workers start with a fixed 1 MiB glibc mmap threshold
+(`MALLOC_MMAP_THRESHOLD_`) in both modes. Without it, freed proving
 buffers stay in the heap and a long-running backend grows with every proof:
 eight proofs of the largest game took `standard` from 39 to 48 GiB and
 `bounded` from 22 to 38 GiB, still rising. With it, both stay flat (39.5 and
@@ -141,7 +139,8 @@ repository against the exact revisions the sequencer's `Cargo.lock` pins
 5ef951a, in `pins.json`). They change how the prover stores data, not what it
 proves. Without `PROVER_LOW_MEMORY=1` the backend runs upstream's code paths.
 `stwo`'s own tests (267, with and without `parallel`) pass with them. The
-sequencer patch adds the backend's settings, which `run.sh` sets from `memory`:
+sequencer patch adds the backend's settings, which the gateway sets from
+`memory`:
 
 | Variable | Meaning |
 | --- | --- |
@@ -151,6 +150,45 @@ sequencer patch adds the backend's settings, which `run.sh` sets from `memory`:
 
 Moving to a new sequencer revision means regenerating the patches against the
 revisions its lockfile pins; `build.sh` refuses a mismatch.
+
+## Isolation
+
+The gateway runs the backend as `max_concurrent` workers: long-running
+backends that prove one job at a time, each in its own cgroup v2 group
+([`workers.mjs`](workers.mjs)).
+
+- **Limits.** Each worker's group gets a memory limit (`workers.job_memory`),
+  no swap, a PID limit (`workers.pids_max`, 1024) and optionally a CPU quota
+  (`workers.job_cpus`). An out-of-memory kill takes that worker's whole group
+  and nothing else.
+- **Failures.** A job that runs out of memory, times out (`backend_timeout_ms`)
+  or loses its backend fails with code `1103`, and `data.reason` says which
+  (`memory`, `timeout`, `exited`, `unreachable`). The gateway kills the
+  worker's whole group, including anything it started, and starts a fresh
+  backend in its place; other jobs carry on. An idle worker that dies is
+  replaced the same way.
+- **Warm workers.** Workers stay up between jobs, so the backend's
+  compiled-class cache and precomputes stay warm: a fresh backend's OS run
+  took 7–10 s, a warm one's 3–5 s.
+- **Network.** Workers keep network access: the in-process backend reads chain
+  state from the RPC node while it proves. Transcripts and signatures are
+  public, so there is no witness to keep in (Templar's no-network steps
+  protected private ones). PROOF2's offline prove step can run without it.
+- **Delegation.** The groups live under a delegated cgroup subtree,
+  `workers.cgroup_root`. With `"self"` (the default) the gateway's own cgroup
+  is the subtree: the gateway moves itself into a `gateway` leaf and runs its
+  workers in sibling groups. `run.sh` gets one from a systemd user scope with
+  `Delegate=yes`. At startup the gateway checks that it can create a limited
+  group and start a process in it, and refuses to start otherwise.
+  `workers.sandbox: "none"` runs workers as plain processes without limits, for
+  development only; `backend_url` forwards to a backend you run yourself, with
+  no isolation.
+
+Checked with the real backend (2026-09-27): two `bounded` workers proved the
+529- and 319-step games at once (peaks 21.8 and 20.1 GiB under 28 GiB, then
+back to about 1 GiB); with an 8 GiB limit the 529-step game failed after 15 s
+with reason `memory` and its worker came back; with a 5 s timeout the job
+failed with reason `timeout` and its backend was killed with its group.
 
 ## Build
 
@@ -178,11 +216,13 @@ Copy [`config.example.json`](config.example.json) and set:
 | Field | Meaning |
 | --- | --- |
 | `chain_id`, `rpc_url` | The network and a Starknet RPC v0.10 node. A local node is recommended: the OS run reads a lot of state. |
-| `backend_url` | Where the backend listens. Keep it on localhost. |
 | `virtual_os_program` | The program adapters pin and the backend runs (`pins.json`). |
 | `adapter_classes` | Allowlisted adapter class hashes. |
-| `max_concurrent`, `max_queued` | Proofs in parallel (the backend gets the same limit; see [Memory](#memory) for the budget) and waiting requests. |
+| `max_concurrent`, `max_queued` | Workers, each proving one job at a time (see [Memory](#memory) for the budget), and waiting requests. |
 | `memory` | `standard` (default) or `bounded`: see [Memory](#memory). |
+| `workers` | `cgroup_root` (`"self"`), `base_port` (3200; worker `i` listens on `base_port + i` on localhost), `job_memory` (by `memory`: 56G or 28G), `job_cpus` (no quota), `pids_max` (1024), `sandbox` (`"cgroup"`, or `"none"` for development): see [Isolation](#isolation). |
+| `build_dir` | The build to run (default `$REFEREE_PROVER_BUILD`, else `~/.cache/referee-prover`). |
+| `backend_url` | Instead of workers, forward to a backend you run yourself, without isolation. |
 | `prefetch_state` | Fetch the transaction's state up front with one simulation (default true). |
 | `max_calldata`, `rate_per_minute`, `backend_timeout_ms` | Request size, per-client rate and backend timeout. |
 
@@ -190,9 +230,11 @@ Copy [`config.example.json`](config.example.json) and set:
 prover/run.sh my-config.json
 ```
 
-`run.sh` starts the backend on `backend_url`, waits for it, then runs the
-gateway. The gateway logs one JSON line per request (client, sender, block,
-calldata size, outcome, time). `GET /health` answers `ok`.
+`run.sh` runs the gateway in a systemd user scope with `Delegate=yes`; the
+gateway starts its workers, waits until each answers, then serves. It logs one
+JSON line per request (client, sender, block, calldata size, outcome, time)
+and per worker restart; the workers' own logs follow on stderr, each line
+prefixed `worker-N:`. `GET /health` answers `ok`.
 
 ## API
 
@@ -201,7 +243,7 @@ JSON-RPC 2.0 on `/`:
   `{ proof, proof_facts, l2_to_l1_messages }`, as the hosted prover does;
 - `starknet_specVersion` is the backend's version;
 - `referee_info` returns the chain, OS program, allowlisted classes, proof paths,
-  memory mode and limits.
+  memory mode, workers (ready, busy, restarts) and limits.
 
 | Code | Meaning |
 | --- | --- |
@@ -210,6 +252,7 @@ JSON-RPC 2.0 on `/`:
 | `1100` | Sender is not an allowlisted referee adapter |
 | `1101` | The adapter pins another virtual OS program |
 | `1102` | The transaction exceeds PROOF1; settle in checkpoints |
+| `1103` | The proving job failed: out of memory, timed out, or its backend stopped (`data.reason`); retry later |
 | `-32005` | Queue full; retry later |
 | `-32029` | Rate limited |
 
@@ -230,6 +273,9 @@ games are unaffected.
 ## Tests
 
 `node --test prover/test/*.test.mjs` runs the gateway against a mock node and
-backend; `scripts/check.sh` includes it. [`measure.sh`](measure.sh) starts a
+mock backends, as an external backend and as workers without cgroups.
+[`test/cgroup.sh`](test/cgroup.sh) runs the worker tests that need real
+cgroups (limits, a job killed for memory alone, a timeout killing a whole
+group) in a delegated systemd user scope. `scripts/check.sh` runs both. [`measure.sh`](measure.sh) starts a
 backend in its own cgroup, runs any client against it, and reports peak memory
 and the backend's OS-run and proof times.
