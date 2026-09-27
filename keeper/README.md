@@ -5,7 +5,7 @@ One service that keeps referee games moving when players can't or won't:
 | Part | What it does |
 | --- | --- |
 | archive | Keeps each game's signed transcript ([`archive.mjs`](archive.mjs)). Clients register a session and send steps. The keeper stores only steps that `Session.receive` verifies. |
-| transport | Forwards steps between the seats. A client long-polls for the other seat's steps. A player who refreshes, switches device or comes back online restores the game from here. |
+| transport | Forwards steps between the seats. A client long-polls for the other seat's steps or follows a server-sent event stream. A player who refreshes, switches device or comes back online restores the game from here. |
 | watcher | Reads every open game's channel ([`watch.mjs`](watch.mjs)). It answers stale disputes, resolves expired ones and settles finished games, from the keeper's own account ([`chain.mjs`](chain.mjs)). |
 | referee | Optional. With a referee key, it stamps the steps of timed games that name that key, and flags a seat whose time runs out. |
 
@@ -22,6 +22,10 @@ const record = await store.move(session, step, key);     // @referee/sdk/store
 await keeper.send(session, record.seq);                  // our step
 await keeper.pull(session, { wait: 30, store });         // the other seat's, verified
 const restored = await keeper.load(game, terms);         // a new device
+
+// Or keep one stream open instead of polling:
+const stop = new AbortController();
+keeper.follow(session, { store, signal: stop.signal, onSteps: records => render(session) });
 ```
 
 In a timed game, `store.move` signs the step without applying it. The keeper
@@ -117,11 +121,13 @@ The API speaks JSON, with BigInts encoded as `{ "$n": "<decimal>" }`
 | `GET /games/:channel/:game/steps` | `?from=SEQ&wait=SECONDS` | `{ start, seq, transcript, steps }`: step records from `from`, long-polling up to `max_wait_seconds` |
 | `POST /games/:channel/:game/steps` | `{ from, steps: [{ step, signature, stamp?, attestation? }] }` | `{ seq, accepted, switched? }` |
 | `GET /games/:channel/:game/evidence` | | `{ evidence }` |
+| `GET /games/:channel/:game/events` | `?from=SEQ` | A `text/event-stream`: an event `steps` whose data is `{ start, seq, transcript, steps }` each time the archive gets steps, and a comment line every `heartbeat_seconds` |
 | `GET /info`, `GET /health` | | `/info` includes the `referee` public key, or null |
 
 POSTs are rate-limited per client (`rate_per_minute`) and capped at
-`max_body_bytes`. Waiting clients are capped at `max_waiters`. Games and
-transcripts are capped at `max_games` and `max_steps`.
+`max_body_bytes`. Waiting clients, long polls and streams together, are
+capped at `max_waiters`. Games and transcripts are capped at `max_games` and
+`max_steps`.
 
 ## Config
 
@@ -135,14 +141,16 @@ transcripts are capped at `max_games` and `max_steps`.
 - `store`: the file store directory (`@referee/sdk/store/file`, one process
   per directory).
 - `settle: false` stops the keeper from submitting finished games itself.
+- `heartbeat_seconds` (default 15) spaces the comment lines that keep proxies
+  from closing an idle stream.
 - `referee.private_key_env` (default `KEEPER_REFEREE_KEY`) names the
   environment variable holding the referee's private key. Without `referee`,
   the keeper referees nothing.
 
 ## Tests
 
-- `node --test keeper/test/*.test.mjs`: the archive, the watcher, the referee
-  and the HTTP API against a fake chain.
+- `node --test keeper/test/*.test.mjs`: the archive, the watcher, the referee,
+  the step stream and the HTTP API against a fake chain.
 - `keeper/katana.sh`: starts a Katana, deploys the counter Dojo world and runs
   [`katana.mjs`](katana.mjs) with real transactions. The keeper answers a stale
   dispute and resolves it into forced play, settles a finished game and

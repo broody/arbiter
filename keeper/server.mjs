@@ -15,6 +15,7 @@
 //   GET  /games                             archived game ids
 //   GET  /games/:channel/:game              { record, start, seq, transcript }
 //   GET  /games/:channel/:game/steps        ?from=SEQ&wait=SECONDS (long poll)
+//   GET  /games/:channel/:game/events       ?from=SEQ (server-sent events: `steps`)
 //   POST /games/:channel/:game/steps        { from, steps: [{ step, signature, stamp?, attestation? }] }
 //   GET  /games/:channel/:game/evidence     equivocation evidence
 //   GET  /info, GET /health
@@ -32,7 +33,7 @@ import { WAITING, startWatcher } from './watch.mjs';
 const DEFAULTS = {
   host: '127.0.0.1', port: 3200, store: 'keeper-data', poll_seconds: 15, settle: true,
   max_games: 10000, max_steps: 4096, max_body_bytes: 1 << 20, rate_per_minute: 120,
-  max_wait_seconds: 30, max_waiters: 1000, cors_origin: '*', max_history_steps: 64,
+  max_wait_seconds: 30, max_waiters: 1000, cors_origin: '*', max_history_steps: 64, heartbeat_seconds: 15,
 };
 
 const chainTag = id => (/^0x/i.test(id) ? BigInt(id) : tag(id));
@@ -114,7 +115,7 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
     referee: archive.referee === null ? null : hex(archive.referee),
     games: [...entries.values()].map(e => ({ channel: hex(e.channel), tag: e.game.tag, prover: Boolean(e.prover) })),
     limits: { max_games: config.max_games, max_steps: config.max_steps, max_body_bytes: config.max_body_bytes,
-      rate_per_minute: config.rate_per_minute, max_wait_seconds: config.max_wait_seconds },
+      rate_per_minute: config.rate_per_minute, max_wait_seconds: config.max_wait_seconds, max_waiters: config.max_waiters },
   });
   const idsOf = (channel, game) => {
     try { return archive.ids(channel, game); } catch { fail(400, 'Invalid game id'); }
@@ -150,6 +151,37 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
     return archive.steps(ids, from);
   }
 
+  // Server-sent events: each batch of steps from `from` on, as the archive
+  // gets it, with a comment line every `heartbeat_seconds` to keep proxies
+  // from closing an idle stream. A stream counts as a waiting client.
+  async function stream(ids, query, res, headers, done) {
+    const from = Number(query.get('from') ?? 0);
+    if (!Number.isSafeInteger(from) || from < 0) fail(400, 'Expected ?from=SEQ');
+    await archive.session(ids) ?? fail(404, 'Unknown game');
+    if (waiters >= config.max_waiters) fail(503, 'Too many waiting clients; retry later');
+    waiters++;
+    res.writeHead(200, { ...headers, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+    let sent = from, tail = Promise.resolve();
+    const push = () => {
+      tail = tail.then(async () => {
+        const result = await archive.steps(ids, sent);
+        if (!result.steps.length || res.writableEnded) return;
+        res.write(`event: steps\ndata: ${stringify(result)}\n\n`);
+        sent = result.seq;
+      }).catch(e => log({ event: 'stream', error: e.message }));
+    };
+    const unsubscribe = archive.subscribe(ids, push);
+    const heartbeat = setInterval(() => res.write(': ping\n\n'), config.heartbeat_seconds * 1000);
+    heartbeat.unref?.();
+    res.once('close', () => {
+      unsubscribe();
+      clearInterval(heartbeat);
+      waiters--;
+      done();
+    });
+    push();
+  }
+
   const server = createServer(async (req, res) => {
     const started = Date.now(), client = req.socket.remoteAddress;
     const url = new URL(req.url, 'http://keeper');
@@ -165,6 +197,11 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
     if (req.method === 'GET' && url.pathname === '/health') { res.writeHead(200, headers); res.end('ok'); return; }
     try {
       if (req.method === 'GET' && url.pathname === '/info') return reply(200, info());
+      const parts = url.pathname.split('/').filter(Boolean);
+      if (req.method === 'GET' && parts.length === 4 && parts[0] === 'games' && parts[3] === 'events') {
+        return await stream(idsOf(parts[1], parts[2]), url.searchParams, res, headers, () =>
+          log({ method: req.method, path: url.pathname, status: 200, client, ms: Date.now() - started, stream: true }));
+      }
       let body;
       if (req.method === 'POST') {
         admit(client);
@@ -176,7 +213,7 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
         }
         try { body = parse(text); } catch { fail(400, 'Invalid JSON'); }
       }
-      reply(200, await handle(req.method, url.pathname.split('/').filter(Boolean), url.searchParams, body, res));
+      reply(200, await handle(req.method, parts, url.searchParams, body, res));
     } catch (e) {
       if (!(e instanceof KeeperError)) console.error(e);
       const status = e instanceof KeeperError ? e.status : 500;

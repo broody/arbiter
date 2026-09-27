@@ -336,8 +336,10 @@ latest verified transcript.
   dispute candidate is kept. Two different steps one seat signed at one seq
   are stored as equivocation evidence.
 - **Transport.** Clients (`@referee/sdk/keeper`) register a session, send
-  steps and long-poll for the other seat's. They verify every step they pull,
-  and `pull` refuses a branch that diverges from their own.
+  steps, and get the other seat's by long poll (`pull`) or a server-sent event
+  stream (`follow`). The stream pushes each batch as the archive gets it, with
+  no gap between polls, and serves spectators too. Clients verify every step
+  they apply, and both refuse a branch that diverges from their own.
 - **Watcher.** It answers a dispute whose candidate the archive outranks,
   replaying from the channel's anchor (`rebase`). It resolves once the window
   passes, and submits finished games still ACTIVE. Up to `max_history_steps`
@@ -401,8 +403,10 @@ latest verified transcript.
    keeper.
 9. ~~Referee clocks.~~ Done: optional per-game time controls, referee stamps
    and flags in core, the SDK (`Referee`) and the keeper (tested on Katana).
-   Still to do: a websocket or SSE transport for bullet time controls, and a
-   referee bond that equivocation evidence can slash.
+   The keeper also streams steps as server-sent events. Network delay is
+   charged to the seat that has it, which is noise against clocks of seconds;
+   `turn_ms` can serve as a grace if tighter clocks ever need one. Still to
+   do: a referee bond that equivocation evidence can slash.
 10. More than 2 seats: endings as eliminations (`forfeit`), an outcome with
     teams or placements, randomness that two colluding seats cannot predict,
     and joining N seats.

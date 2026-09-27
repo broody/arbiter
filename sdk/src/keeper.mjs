@@ -2,7 +2,8 @@
 // our steps and fetch the other seat's, over the keeper's HTTP API. The keeper
 // cannot forge steps (this client verifies each one it applies) but it can
 // withhold them, so a client keeps its own copy (`@referee/sdk/store`). A
-// keeper that referees a timed game also stamps each step it receives.
+// keeper that referees a timed game also stamps each step it receives. Steps
+// arrive by long poll (`pull`) or as a server-sent event stream (`follow`).
 import { Session, felt, hex, signedStep } from './index.mjs';
 import { parse, stringify } from './store.mjs';
 
@@ -53,13 +54,58 @@ export class KeeperClient {
    */
   async pull(session, { wait = 0, store, signal } = {}) {
     const { steps } = await this.steps(session.terms, session.env.seq, { wait, signal });
+    return this.#apply(session, steps, store);
+  }
+
+  /**
+   * Follow the game's step stream (server-sent events): apply each step past
+   * `session`'s end as the keeper gets it, as `pull` does, and call
+   * `onSteps(records)` after each batch. Resolves when `signal` aborts or the
+   * keeper ends the stream; rejects if the keeper holds another branch.
+   */
+  async follow(session, { store, signal, onSteps = () => {} } = {}) {
+    const response = await this.fetch(`${this.url}${path(session.terms)}/events?from=${session.env.seq}`,
+      { signal, headers: { Accept: 'text/event-stream' } });
+    if (!response.ok) await failed(response);
+    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = '';
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        buffer += value.replace(/\r\n?/g, '\n');
+        for (let end; (end = buffer.indexOf('\n\n')) >= 0;) {
+          const event = parseEvent(buffer.slice(0, end));
+          buffer = buffer.slice(end + 2);
+          if (event.type === 'steps') onSteps(await this.#apply(session, parse(event.data).steps, store));
+        }
+      }
+    } catch (error) {
+      if (signal?.aborted) return;
+      throw error;
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  // Apply records past the session's end, skipping ones it already holds (a
+  // stream may repeat our own steps back to us).
+  async #apply(session, steps, store) {
+    const applied = [];
     for (const record of steps) {
+      if (record.seq < session.env.seq) {
+        const held = session.steps[record.seq - session.start.seq];
+        check(record.seq < session.start.seq || (held && held.message === felt(record.message)),
+          `The keeper holds another branch at seq ${record.seq}`);
+        continue;
+      }
       check(record.seq === session.env.seq && felt(record.transcript) === session.env.transcript,
         `The keeper holds another branch at seq ${record.seq}`);
       if (store) await store.receive(session, signedStep(record));
       else session.receive(signedStep(record));
+      applied.push(record);
     }
-    return steps;
+    return applied;
   }
 
   /** The keeper's copy of a game, with every signature verified. */
@@ -76,12 +122,32 @@ export class KeeperClient {
       method, signal, body: body === undefined ? undefined : stringify(body),
       headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
     });
+    if (!response.ok) await failed(response);
     const text = await response.text();
-    let data = null;
-    try { data = text ? parse(text) : null; } catch { /* not JSON */ }
-    if (!response.ok) {
-      throw Object.assign(Error(data?.error?.message ?? `HTTP ${response.status}`), { status: response.status, data: data?.error?.data });
-    }
-    return data;
+    return text ? parse(text) : null;
   }
+}
+
+// Throw the keeper's `{ error: { message, data } }` with its HTTP status.
+async function failed(response) {
+  let data = null;
+  try { data = parse(await response.text()); } catch { /* not JSON */ }
+  throw Object.assign(Error(data?.error?.message ?? `HTTP ${response.status}`), { status: response.status, data: data?.error?.data });
+}
+
+// One server-sent event block: its `event:` type and `data:` lines. Comment
+// lines (heartbeats) start with a colon.
+function parseEvent(block) {
+  const event = { type: 'message', data: '' };
+  const data = [];
+  for (const line of block.split('\n')) {
+    if (line.startsWith(':')) continue;
+    const colon = line.indexOf(':');
+    const field = colon < 0 ? line : line.slice(0, colon);
+    const value = colon < 0 ? '' : line.slice(colon + 1).replace(/^ /, '');
+    if (field === 'event') event.type = value;
+    else if (field === 'data') data.push(value);
+  }
+  event.data = data.join('\n');
+  return event;
 }

@@ -179,6 +179,18 @@ export class Archive {
     return { promise, cancel: () => done() };
   }
 
+  /** Call `fn` whenever the game's transcript changes, until the returned function is called. */
+  subscribe(ids, fn) {
+    const key = gameKey(ids);
+    const listeners = this.#listeners.get(key) ?? new Set();
+    this.#listeners.set(key, listeners);
+    listeners.add(fn);
+    return () => {
+      listeners.delete(fn);
+      if (!listeners.size && this.#listeners.get(key) === listeners) this.#listeners.delete(key);
+    };
+  }
+
   async #load(ids) {
     const key = gameKey(ids);
     if (this.#loaded.has(key)) return this.#loaded.get(key);
