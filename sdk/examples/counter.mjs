@@ -1,5 +1,5 @@
 // JS mirror of examples/counter/src/lib.cairo, for fixtures and SDK tests.
-import { low128 } from '../src/index.mjs';
+import { MAX_CLOCK_MS, low128 } from '../src/index.mjs';
 
 export const ADD = 0, GAMBLE = 1, REACHED = 1;
 
@@ -31,3 +31,29 @@ export const counter = {
   due: s => s.next,
   outcome: s => (s.winner !== 0 ? [s.winner, REACHED] : null),
 };
+
+/**
+ * Hourglass time rules, mirroring examples/counter/src/hourglass.cairo: the
+ * time a seat uses flows to its opponent. Settings `{ bank_ms }`, clocks
+ * `{ banks }`.
+ */
+export const hourglassTime = {
+  encodeSettings: s => [BigInt(s.bank_ms)],
+  decodeSettings: r => ({ bank_ms: r.num() }),
+  encodeClock: c => [BigInt(c.banks.length), ...c.banks.map(BigInt)],
+  check(s) {
+    if (!(Number.isSafeInteger(s.bank_ms) && s.bank_ms > 0 && s.bank_ms <= MAX_CLOCK_MS)) throw Error('Invalid hourglass');
+  },
+  open: (s, seats) => ({ banks: Array(seats).fill(s.bank_ms) }),
+  limit: (s, c, seat) => c.banks[seat],
+  settle(s, c, seat, used) {
+    const banks = [...c.banks];
+    banks[seat] -= used;
+    banks[1 - seat] += used;
+    return { banks };
+  },
+  view: (s, c, seat, used) => ({ bank: Math.max(0, c.banks[seat] - used) }),
+};
+
+/** The counter game with hourglass time (`HourglassCounterRules`). */
+export const hourglassCounter = { ...counter, time: hourglassTime };

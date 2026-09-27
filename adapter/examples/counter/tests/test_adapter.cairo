@@ -2,6 +2,7 @@
 //! replays a signed game and emits the transition message; `settle` accepts
 //! exactly that message as proof facts and relays the end state. Proof facts
 //! are cheated here; a real run attaches a native Stwo proof instead.
+use referee::clocks::{Standard, encode};
 use referee::{
     Batch, Envelope, Move, Signature, Terms, TimeControl, action_hash, actor, apply_steps,
     context_hash, open, stamp_hash, state_hash,
@@ -38,11 +39,10 @@ pub fn terms_for(
     channel: ContractAddress, game_id: felt252, prover: ContractAddress, timed: bool,
 ) -> Terms<Config> {
     let clock = if timed {
-        Option::Some(
-            TimeControl {
-                referee: public_key(PK_REF), turn_ms: 30000, bank_ms: 60000, increment_ms: 2000,
-            },
-        )
+        let settings = Standard {
+            turn_ms: 30000, bank_ms: 60000, increment_ms: 2000, byoyomi: Option::None,
+        };
+        Option::Some(TimeControl { referee: public_key(PK_REF), settings: encode(@settings) })
     } else {
         Option::None
     };

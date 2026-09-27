@@ -8,11 +8,12 @@ import {
   flag, play, playRandom, publicKey, recommit, resign, reveal, rngChain, signedStep, tag, timeLeft,
 } from '../src/index.mjs';
 import { SessionStore, memoryBackend } from '../src/store.mjs';
-import { ADD, GAMBLE, counter } from '../examples/counter.mjs';
+import { ADD, GAMBLE, counter, hourglassCounter } from '../examples/counter.mjs';
 
 const keys = [0x1a2b3cn, 0x4d5e6fn], refereeKey = 0x7e7e7en;
 const chains = [rngChain(0x5eed0n, 8), rngChain(0x5eed1n, 8)];
-const clock = { referee: publicKey(refereeKey), turn_ms: 30000, bank_ms: 60000, increment_ms: 2000 };
+const settings = { turn_ms: 30000, bank_ms: 60000, increment_ms: 2000, byoyomi: null };
+const clock = { referee: publicKey(refereeKey), settings };
 const terms = {
   chain_id: tag('SN_TEST'), channel: 0xc4a11e1n, game_id: 2n, prover: 0xad0b7e5n, response_seconds: 3600, clock,
   players: [0xa11cen, 0xb0bn], keys: keys.map(publicKey), rng_tips: chains.map(c => c[8]), config: { target: 20 },
@@ -38,7 +39,7 @@ test('the referee stamps each step and every seat verifies the stamps', () => {
   assert.equal(first.stamp, T0);
   play1(referee, seat, add(3), T0 + 45000);
   // Seat 1 spent its 30 s allowance and 15 s of bank, then gained 2 s.
-  assert.deepEqual(seat.env.clock, { banks: [62000, 47000], turn: 30000, stamp: T0 + 45000 });
+  assert.deepEqual(seat.env.clock, { seats: { banks: [62000, 47000], periods: [] }, used: 0, stamp: T0 + 45000 });
   assert.equal(seat.stateHash(), referee.session.stateHash());
   const copy = Session.import(counter, structuredClone(seat.export()));
   assert.equal(copy.stateHash(), seat.stateHash());
@@ -77,7 +78,7 @@ test('reveals are timed on their own and leave the turn allowance alone', () => 
   play1(referee, seat, playRandom({ kind: GAMBLE, amount: 0 }, chains[1][7]), T0 + 40000);
   play1(referee, seat, reveal(chains[0][7]), T0 + 45000);
   // Seat 1 paid 10 s of bank for its gamble; the roll passed the turn and added its increment.
-  assert.deepEqual(seat.env.clock, { banks: [62000, 52000], turn: 30000, stamp: T0 + 45000 });
+  assert.deepEqual(seat.env.clock, { seats: { banks: [62000, 52000], periods: [] }, used: 0, stamp: T0 + 45000 });
 });
 
 test('a restarted referee does not charge for its downtime', () => {
@@ -148,14 +149,17 @@ test('untimed games take no stamps', () => {
 test('time controls round-trip through Cairo serialization', () => {
   const decoded = decodeTerms(counter, encodeTerms(counter, terms));
   assert.deepEqual(decoded.clock, clock);
-  assert.throws(() => new Session(counter, { ...terms, clock: { ...clock, turn_ms: 0, bank_ms: 0 } }), /Invalid time control/);
+  const none = { ...clock, settings: { ...settings, turn_ms: 0, bank_ms: 0 } };
+  assert.throws(() => new Session(counter, { ...terms, clock: none }), /Invalid time control/);
 });
 
 test('time left counts down the due seat only', () => {
   const { referee, seat } = table();
   play1(referee, seat, add(3), T0);
-  assert.deepEqual(timeLeft(counter, terms, seat.env, T0 + 40000), [62000, 50000]);
-  assert.deepEqual(timeLeft(counter, terms, seat.env, T0 + 200000), [62000, 0]);
+  // Seat 1 is 40 s in: its 30 s allowance and 10 s of bank are gone.
+  const view = (turn, bank) => ({ turn, bank, periods: 0, period: 0 });
+  assert.deepEqual(timeLeft(counter, terms, seat.env, T0 + 40000), [view(30000, 62000), view(0, 50000)]);
+  assert.deepEqual(timeLeft(counter, terms, seat.env, T0 + 200000), [view(30000, 62000), view(0, 0)]);
   assert.equal(timeLeft(counter, { ...terms, clock: null }, new Session(counter, { ...terms, clock: null }).env, T0), null);
 });
 
@@ -213,4 +217,36 @@ test('a failed write never releases the step it signed', async () => {
   backend.update = async (key, fn) => { if (key.startsWith('signed/')) { fn(undefined); throw Error('disk full'); } return update(key, fn); };
   await assert.rejects(store.move(session, add(3), keys[0]), /disk full/);
   assert.deepEqual(session.pending, []);
+});
+
+// Byo-yomi: 10 s of main time, then 3 periods of 5 s.
+const japanese = { ...terms, game_id: 3n,
+  clock: { referee: publicKey(refereeKey), settings: { turn_ms: 0, bank_ms: 10000, increment_ms: 0, byoyomi: { periods: 3, period_ms: 5000 } } } };
+
+test('byo-yomi spends main time, then loses each period that runs out', () => {
+  const referee = new Referee(new Session(counter, japanese), refereeKey, { now: T0 });
+  const seat = new Session(counter, japanese);
+  play1(referee, seat, add(3), T0);
+  // Seat 1 is 17 s in: its main time, one whole period, and 2 s of the next.
+  const view = timeLeft(counter, japanese, seat.env, T0 + 17000)[1];
+  assert.deepEqual(view, { turn: 0, bank: 0, periods: 2, period: 3000 });
+  play1(referee, seat, add(3), T0 + 17000);
+  assert.deepEqual(seat.env.clock.seats, { banks: [10000, 0], periods: [3, 2] });
+  // Seat 0 has 10 s + 3 periods; its flag falls 1 ms after that.
+  assert.equal(referee.deadline(), T0 + 17000 + 25001);
+});
+
+test('a game plugs in its own time rules', () => {
+  // The counter game on an hourglass: the time a seat uses flows to its opponent.
+  const hourglass = { ...terms, game_id: 4n, clock: { referee: publicKey(refereeKey), settings: { bank_ms: 10000 } } };
+  const referee = new Referee(new Session(hourglassCounter, hourglass), refereeKey, { now: T0 });
+  const seat = new Session(hourglassCounter, hourglass);
+  const move = (step, now) => seat.receive(referee.stamp(seat.sign(step, keys[seat.due()]), now));
+  move(add(3), T0);
+  move(add(3), T0 + 4000);
+  assert.deepEqual(seat.env.clock.seats, { banks: [14000, 6000] });
+  assert.deepEqual(timeLeft(hourglassCounter, hourglass, seat.env, T0 + 5000), [{ bank: 13000 }, { bank: 6000 }]);
+  assert.equal(referee.deadline(), T0 + 4000 + 14001);
+  assert.throws(() => new Session(hourglassCounter, { ...hourglass, clock: { ...hourglass.clock, settings: { bank_ms: 0 } } }),
+    /Invalid hourglass/);
 });

@@ -151,6 +151,9 @@ capped at `max_waiters`. Games and transcripts are capped at `max_games` and
 
 - `node --test keeper/test/*.test.mjs`: the archive, the watcher, the referee,
   the step stream and the HTTP API against a fake chain.
+- `node keeper/bench.mjs [STEPS]`: the latency a referee adds, from the SDK
+  work per step to a step's trip through a refereeing keeper to the other
+  seat's stream, with the memory and the file store.
 - `keeper/katana.sh`: starts a Katana, deploys the counter Dojo world and runs
   [`katana.mjs`](katana.mjs) with real transactions. The keeper answers a stale
   dispute and resolves it into forced play, settles a finished game and

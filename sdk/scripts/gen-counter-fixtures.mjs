@@ -1,6 +1,8 @@
-// Plays scripted counter games through the JS SDK, one untimed and one timed
-// (stamped by a referee and ending in a flag), and writes the signed
-// transcripts and expected results as Cairo fixtures for examples/counter.
+// Plays scripted counter games through the JS SDK, one untimed and three timed
+// (stamped by a referee and ending in a flag): on the standard time rules,
+// with byo-yomi, and on the hourglass rules of examples/counter/src/hourglass.
+// Writes the signed transcripts and expected results as Cairo fixtures for
+// examples/counter.
 // Usage (from the repo root): node sdk/scripts/gen-counter-fixtures.mjs
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +11,7 @@ import {
   flag, hex, open, play, playRandom, publicKey, recommit, reveal, rngChain, sign, stateHash, tag, verify,
 } from '../src/index.mjs';
 
-import { ADD, GAMBLE, counter } from '../examples/counter.mjs';
+import { ADD, GAMBLE, counter, hourglassCounter } from '../examples/counter.mjs';
 
 const RNG_LEN = 8;
 const privateKeys = [0x1a2b3cn, 0x4d5e6fn];
@@ -50,27 +52,46 @@ const finalHash = stateHash(counter, env);
 const checkpoint = checkpointHash(counter, context, 0, finalHash);
 const acks = privateKeys.map(k => sign(checkpoint, k));
 
-// The timed game: a 30 s turn allowance, a 60 s bank and a 2 s increment. The
-// referee stamps every step; seat 0 then stalls and is flagged.
+// The timed games. The referee stamps every step, `after` ms after the last.
 const refereeKey = 0x7e7e7en;
-const timedTerms = { ...terms, game_id: 2n,
-  clock: { referee: publicKey(refereeKey), turn_ms: 30000, bank_ms: 60000, increment_ms: 2000 } };
-const timed = new Session(counter, timedTerms);
-let now = 1_000_000;
-function stamped(move, after) {
-  now += after;
-  const seat = timed.due();
-  return move.kind === MOVE_FLAG
-    ? timed.stamp({ step: move }, now, refereeKey)
-    : timed.stamp(timed.sign(move, privateKeys[seat]), now, refereeKey);
+function timedGame(game_id, settings, script, game = counter) {
+  const session = new Session(game, { ...terms, game_id, clock: { referee: publicKey(refereeKey), settings } });
+  let now = 1_000_000;
+  for (const [move, after] of script) {
+    now += after;
+    const signed = move.kind === MOVE_FLAG ? { step: move } : session.sign(move, privateKeys[session.due()]);
+    session.stamp(signed, now, refereeKey);
+  }
+  return session;
 }
-stamped(play({ kind: ADD, amount: 3 }), 0); // seat 0; the first stamp starts the clock
-stamped(playRandom({ kind: GAMBLE, amount: 0 }, chains[1][RNG_LEN - 1]), 40000); // seat 1: all its allowance and 10 s of bank
-stamped(reveal(chains[0][RNG_LEN - 1]), 5000); // seat 0 reveals on its own allowance
-stamped(play({ kind: ADD, amount: 1 }), 20000); // seat 0
-stamped(play({ kind: ADD, amount: 1 }), 1000); // seat 1
-stamped(flag(), 30000 + 64000 + 1); // seat 0's allowance and bank are gone
-const timedEnv = timed.env;
+const gambleMove = entropy => playRandom({ kind: GAMBLE, amount: 0 }, entropy);
+// A 30 s turn allowance, a 60 s bank and a 2 s increment; seat 0 stalls.
+const timed = timedGame(2n, { turn_ms: 30000, bank_ms: 60000, increment_ms: 2000, byoyomi: null }, [
+  [play({ kind: ADD, amount: 3 }), 0], // seat 0; the first stamp starts the clock
+  [gambleMove(chains[1][RNG_LEN - 1]), 40000], // seat 1: all its allowance and 10 s of bank
+  [reveal(chains[0][RNG_LEN - 1]), 5000], // seat 0 reveals on its own allowance
+  [play({ kind: ADD, amount: 1 }), 20000], // seat 0
+  [play({ kind: ADD, amount: 1 }), 1000], // seat 1
+  [flag(), 30000 + 64000 + 1], // seat 0's allowance and bank are gone
+]);
+// Byo-yomi: 10 s of main time, then 3 periods of 5 s; seat 1 stalls in overtime.
+const byoyomi = timedGame(3n, { turn_ms: 0, bank_ms: 10000, increment_ms: 0, byoyomi: { periods: 3, period_ms: 5000 } }, [
+  [play({ kind: ADD, amount: 3 }), 0], // seat 0
+  [play({ kind: ADD, amount: 3 }), 12000], // seat 1: its main time, and 2 s inside its first period
+  [play({ kind: ADD, amount: 3 }), 14000], // seat 0: its main time, and 4 s inside a period
+  [gambleMove(chains[1][RNG_LEN - 1]), 6000], // seat 1: 6 s of overtime so far
+  [reveal(chains[0][RNG_LEN - 1]), 7000], // seat 0's reveal outlasts a period; seat 1's turn, one
+  [play({ kind: ADD, amount: 1 }), 3000], // seat 0, inside a period
+  [flag(), 10001], // seat 1 outlasts both of its last periods
+]);
+// Hourglass: 10 s each, and the time a seat uses flows to its opponent.
+const hourglass = timedGame(4n, { bank_ms: 10000 }, [
+  [play({ kind: ADD, amount: 3 }), 0], // seat 0
+  [play({ kind: ADD, amount: 3 }), 4000], // seat 1: 6 s left, seat 0 now has 14 s
+  [play({ kind: ADD, amount: 3 }), 9000], // seat 0: 5 s left, seat 1 has 15 s
+  [play({ kind: ADD, amount: 3 }), 1000], // seat 1: 14 s left, seat 0 has 6 s
+  [flag(), 6001], // seat 0 runs dry
+], hourglassCounter);
 
 // ---- emit Cairo ----
 const h = hex;
@@ -89,34 +110,89 @@ function moveCairo(m) {
   }
 }
 const g = env.game;
-const clockCairo = c => (c == null ? 'Option::None'
-  : `Option::Some(Clock { banks: array![${c.banks.join(', ')}].span(), turn: ${c.turn}, stamp: ${c.stamp} })`);
-const termsCairo = t => `Terms {
+// Each time rule set's settings and clocks as Cairo, serialized with `encode`.
+const byoyomiCairo = b => (b == null ? 'Option::None' : `Option::Some(Byoyomi { periods: ${b.periods}, period_ms: ${b.period_ms} })`);
+const cairoOf = game => (game === hourglassCounter ? {
+  settings: t => `encode(@Hourglass { bank_ms: ${t.bank_ms} })`,
+  clock: c => `encode(@HourglassClock { banks: array![${c.banks.join(', ')}].span() })`,
+} : {
+  settings: t => `encode(@Standard { turn_ms: ${t.turn_ms}, bank_ms: ${t.bank_ms}, increment_ms: ${t.increment_ms}, byoyomi: ${byoyomiCairo(t.byoyomi)} })`,
+  clock: c => `encode(@StandardClock { banks: array![${c.banks.join(', ')}].span(), periods: array![${c.periods.join(', ')}].span() })`,
+});
+const clockCairo = (game, c) => (c == null ? 'Option::None'
+  : `Option::Some(Clock { seats: ${cairoOf(game).clock(c.seats)}, used: ${c.used}, stamp: ${c.stamp} })`);
+const termsCairo = (t, game = counter) => `Terms {
         chain_id: ${h(t.chain_id)},
         channel: ${h(t.channel)},
         game_id: ${h(t.game_id)},
         prover: ${h(t.prover)},
         response_seconds: ${t.response_seconds},
-        clock: ${t.clock == null ? 'Option::None' : `Option::Some(TimeControl { referee: ${h(t.clock.referee)}, turn_ms: ${t.clock.turn_ms}, bank_ms: ${t.clock.bank_ms}, increment_ms: ${t.clock.increment_ms} })`},
+        clock: ${t.clock == null ? 'Option::None' : `Option::Some(TimeControl { referee: ${h(t.clock.referee)}, settings: ${cairoOf(game).settings(t.clock.settings)} })`},
         players: ${spanOf(t.players)},
         keys: ${spanOf(t.keys)},
         rng_tips: ${spanOf(t.rng_tips)},
         config: Config { target: ${t.config.target} },
     }`;
-const envelopeCairo = e => `Envelope {
+const envelopeCairo = (e, game = counter) => `Envelope {
         seq: ${e.seq},
         transcript: ${h(e.transcript)},
         support_turn: ${e.support_turn},
         last_seat: ${e.last_seat},
         pending: Pending { active: ${bool(e.pending.active)}, seat: ${e.pending.seat}, seq: ${e.pending.seq}, entropy: ${h(e.pending.entropy)} },
         rng_heads: ${spanOf(e.rng_heads)},
-        clock: ${clockCairo(e.clock)},
+        clock: ${clockCairo(game, e.clock)},
         outcome: Outcome { finished: ${bool(e.outcome.finished)}, winner: ${e.outcome.winner}, reason: ${e.outcome.reason} },
         game: Counter { total: ${e.game.total}, next: ${e.game.next}, gamble: ${bool(e.game.gamble)}, winner: ${e.game.winner}, target: ${e.game.target} },
     }`;
 
+// A timed game's fixtures, named `${name}_terms()` and so on.
+const timedCairo = (name, session) => `pub fn ${name}_terms() -> Terms<Config> {
+    ${termsCairo(session.terms, session.game)}
+}
+
+pub fn ${name}_steps() -> Array<Move<Action>> {
+    array![
+${session.steps.map(s => `        ${moveCairo(s.step)},`).join('\n')}
+    ]
+}
+
+/// The referee's stamp on each step.
+pub fn ${name}_stamps() -> Array<u64> {
+    array![${session.steps.map(s => s.stamp).join(', ')}]
+}
+
+/// The seat of each step (REFEREE for the flag).
+pub fn ${name}_seats() -> Array<u8> {
+    array![${session.steps.map(s => s.seat).join(', ')}]
+}
+
+pub fn ${name}_signatures() -> Array<Signature> {
+    array![
+${session.steps.map(s => `        ${sig(s.signature)},`).join('\n')}
+    ]
+}
+
+/// The referee's attestation after each step.
+pub fn ${name}_attestations() -> Array<Signature> {
+    array![
+${session.steps.map(s => `        ${sig(s.attestation)},`).join('\n')}
+    ]
+}
+
+/// Each seat's last signature among steps \`from..to\`.
+pub fn ${name}_finals(from: u32, to: u32) -> Array<Signature> {
+    finals_of(${name}_seats(), ${name}_signatures(), from, to)
+}
+
+pub fn ${name}_expected() -> Envelope<Counter> {
+    ${envelopeCairo(session.env, session.game)}
+}
+`;
+
 const out = `// Generated by sdk/scripts/gen-counter-fixtures.mjs. Do not edit.
+use referee::clocks::{Byoyomi, Standard, StandardClock, encode};
 use referee::{Clock, Envelope, Move, Outcome, Pending, REFEREE, Signature, Terms, TimeControl};
+use crate::hourglass::{Hourglass, HourglassClock};
 use crate::{Action, Config, Counter};
 
 pub const CONTEXT: felt252 = ${h(context)};
@@ -127,7 +203,11 @@ pub const SEED_0: felt252 = ${h(chains[0][0])};
 pub const SEED_1: felt252 = ${h(chains[1][0])};
 pub const REFEREE_KEY: felt252 = ${h(refereeKey)};
 pub const TIMED_CONTEXT: felt252 = ${h(timed.context)};
-pub const TIMED_STATE_HASH: felt252 = ${h(stateHash(counter, timedEnv))};
+pub const TIMED_STATE_HASH: felt252 = ${h(timed.stateHash())};
+pub const BYOYOMI_CONTEXT: felt252 = ${h(byoyomi.context)};
+pub const BYOYOMI_STATE_HASH: felt252 = ${h(byoyomi.stateHash())};
+pub const HOURGLASS_CONTEXT: felt252 = ${h(hourglass.context)};
+pub const HOURGLASS_STATE_HASH: felt252 = ${h(hourglass.stateHash())};
 
 pub fn terms() -> Terms<Config> {
     ${termsCairo(terms)}
@@ -179,50 +259,13 @@ pub fn acks() -> Array<Signature> {
     array![${acks.map(sig).join(', ')}]
 }
 
-pub fn timed_terms() -> Terms<Config> {
-    ${termsCairo(timedTerms)}
-}
-
-pub fn timed_steps() -> Array<Move<Action>> {
-    array![
-${timed.steps.map(s => `        ${moveCairo(s.step)},`).join('\n')}
-    ]
-}
-
-/// The referee's stamp on each timed step.
-pub fn timed_stamps() -> Array<u64> {
-    array![${timed.steps.map(s => s.stamp).join(', ')}]
-}
-
-/// The seat of each timed step (REFEREE for the flag).
-pub fn timed_seats() -> Array<u8> {
-    array![${timed.steps.map(s => s.seat).join(', ')}]
-}
-
-pub fn timed_signatures() -> Array<Signature> {
-    array![
-${timed.steps.map(s => `        ${sig(s.signature)},`).join('\n')}
-    ]
-}
-
-/// The referee's attestation after each timed step.
-pub fn timed_attestations() -> Array<Signature> {
-    array![
-${timed.steps.map(s => `        ${sig(s.attestation)},`).join('\n')}
-    ]
-}
-
-/// Each seat's last signature among timed steps \`from..to\`.
-pub fn timed_finals(from: u32, to: u32) -> Array<Signature> {
-    finals_of(timed_seats(), timed_signatures(), from, to)
-}
-
-pub fn timed_expected() -> Envelope<Counter> {
-    ${envelopeCairo(timedEnv)}
-}
-`;
+${timedCairo('timed', timed)}
+${timedCairo('byoyomi', byoyomi)}
+${timedCairo('hourglass', hourglass)}`;
 
 const target = fileURLToPath(new URL('../../examples/counter/src/fixtures.cairo', import.meta.url));
 writeFileSync(target, out);
 console.log(`wrote ${target}: ${signed.length} steps, total ${g.total}, winner seat ${env.outcome.winner - 1}; `
-  + `timed: ${timed.steps.length} steps, seat ${timedEnv.outcome.winner - 1} wins on time`);
+  + `timed: ${timed.steps.length} steps, seat ${timed.env.outcome.winner - 1} wins on time; `
+  + `byo-yomi: ${byoyomi.steps.length} steps, seat ${byoyomi.env.outcome.winner - 1} wins on time; `
+  + `hourglass: ${hourglass.steps.length} steps, seat ${hourglass.env.outcome.winner - 1} wins on time`);

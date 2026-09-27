@@ -9,8 +9,8 @@ use dojo::model::ModelStorage;
 use dojo::world::{IWorldDispatcherTrait, WorldStorage};
 use referee::{
     Batch, Envelope, GameRules, Move, Outcome, Signature, Terms, TimeControl, approve_all,
-    channel as machine, check_time_control, checkpoint_hash, context_hash, open, reopen_hash,
-    replay, state_ref,
+    channel as machine, check_clock, checkpoint_hash, context_hash, open, reopen_hash, replay,
+    state_ref,
 };
 use starknet::syscalls::get_class_hash_at_syscall;
 use starknet::{
@@ -36,7 +36,7 @@ pub fn create<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Drop<R::S
     clock: Option<TimeControl>,
 ) -> felt252 {
     valid_key(session_key);
-    check_time_control(@clock);
+    check_clock::<R>(@clock);
     if let Option::Some(time) = clock {
         valid_key(time.referee);
         assert(time.referee != session_key, 'Referee is a seat');
@@ -65,7 +65,14 @@ pub fn create<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Drop<R::S
         epoch: 0,
         context: 0,
         response_seconds: 0,
-        time_control: clock.into(),
+        referee: match clock {
+            Option::Some(time) => time.referee,
+            Option::None => 0,
+        },
+        clock_settings: match clock {
+            Option::Some(time) => time.settings,
+            Option::None => array![].span(),
+        },
         anchor: channel.anchor.into(),
         candidate: channel.candidate.into(),
         anchor_block: 0,
@@ -89,7 +96,7 @@ pub fn join<
     assert(game.player_1.is_zero() || game.player_1 == joiner, 'Not invited');
     valid_key(session_key);
     assert(session_key != game.key_0, 'Shared session key');
-    assert(session_key != game.time_control.referee, 'Referee is a seat');
+    assert(session_key != game.referee, 'Referee is a seat');
     assert(rng_tip != 0 && rng_tip != game.tip_0, 'Invalid tip');
     valid_prover(@world, game.prover);
     game.player_1 = joiner;
@@ -256,7 +263,11 @@ pub fn terms<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>>(
         game_id: *game.id,
         prover: (*game.prover).into(),
         response_seconds: *game.response_seconds,
-        clock: (*game.time_control).into(),
+        clock: if *game.referee == 0 {
+            Option::None
+        } else {
+            Option::Some(TimeControl { referee: *game.referee, settings: *game.clock_settings })
+        },
         players: array![(*game.player_0).into(), (*game.player_1).into()].span(),
         keys: keys(game),
         rng_tips: array![*game.tip_0, *game.tip_1].span(),

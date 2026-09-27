@@ -40,6 +40,7 @@ pub trait GameRules {
     const TAG: felt252;
     const RULES_VERSION: u32;
     const SEATS: u8;   // 2 for now
+    impl Time: ClockRules<State>;   // how its clocks run when timed, e.g. StandardTime<State>
     fn init(config: @Config) -> State;
     fn load(config: @Config, state: @State, witness: Witness) -> Scratch;
     fn apply(config: @Config, ref scratch: Scratch, state: State, seat: u8, action: Action)
@@ -127,26 +128,61 @@ acknowledged.
   impossible while a reveal is pending.
 
 **Clocks** (optional, per game). `Terms.clock` is an
-`Option<TimeControl { referee, turn_ms, bank_ms, increment_ms }>`. Players sign
-moves; the referee signs time.
+`Option<TimeControl { referee, settings }>`: the referee's public key and the
+settings of the game's time rules, serialized. Players sign moves; the referee
+signs time.
 - **Stamps.** The referee stamps every offchain step with its own clock, in
   milliseconds, and after each step signs
   `signing_hash(TAG, 'REFEREE_STAMP_V1', context, seq, transcript, clock)`.
   Stamps stay out of the transcript, so a seat's signature never waits on the
   referee: a seat signs the rest of its turn from its `tip` while earlier steps
   wait in `pending` for their stamps.
-- **Charging.** `Envelope.clock` is `Option<Clock { banks, turn, stamp }>`. A
-  step charges the time since the last stamp to the seat on the clock (`due`):
-  the turn's allowance first, then its bank.
-  - A turn is a run of steps while `GameRules::due` stays the same. When it
-    changes, the finished turn's seat gains `increment_ms` and the next turn
-    starts with `turn_ms`.
-  - A pending reveal is timed on its own, with a fresh `turn_ms`, so
-    withholding a reveal burns the revealer's clock.
-- **Flags.** A step after the seat's time ran out fails with `'Flag fell'`. The
-  referee's `Flag` is valid only then, and the due seat loses with
-  `REASON_TIMEOUT`. Resign, flag and `claim_timeout` share `forfeit`, the one
-  place a protocol with more seats would turn into an elimination.
+- **Turns.** `Envelope.clock` is `Option<Clock { seats, used, stamp }>`. A
+  step adds the time since the last stamp to `used`, the time the current turn
+  has used. A turn is a run of steps while `GameRules::due` stays the same;
+  when it ends, the game's time rules settle `used` and it starts again from
+  zero. A pending reveal is a turn of one step for the revealer, settled at
+  once, so withholding a reveal burns the revealer's clock.
+- **Time rules** (`referee::clocks::ClockRules<State>`). A game names its own
+  with `GameRules::Time`. The protocol keeps the mechanics (stamps, `used`,
+  turns, reveals, pauses, flags, attestations); the rules decide what a seat
+  has and what a finished turn costs:
+  - `check(settings)` rejects settings a game could not be played under;
+  - `open(settings, seats)` gives each seat's clocks (`Clock.seats`);
+  - `limit(settings, clocks, seat, state)` is the time a seat can use in a turn
+    that starts now, which the protocol compares with `used`;
+  - `settle(settings, clocks, seat, used, reveal, state)` gives the clocks the
+    next turn starts with.
+
+  Settings and clocks cross the interface serialized, so `Terms`, `Envelope`
+  and the Dojo model are the same for every rule set. A rule set decodes them
+  into its own types (`decode`, `encode`). It gets the game state, so a turn's
+  time can depend on the position.
+- **`StandardTime`** covers most clocks, in milliseconds, with
+  `Standard { turn_ms, bank_ms, increment_ms, byoyomi }`. A turn's time comes
+  from `turn_ms` first, which does not carry over, then from the seat's bank
+  (main time), then from its byo-yomi periods; the bank then gains
+  `increment_ms`. With `byoyomi: Some({ periods, period_ms })`, a turn that
+  ends inside a period costs none, each period that runs out is lost, and the
+  seat that outlasts its last period has flagged (Japanese byo-yomi).
+
+  | Clock | Settings |
+  |---|---|
+  | Per-turn timer (Surround's old 60 s) | `turn_ms` |
+  | Delay | `turn_ms` + `bank_ms` |
+  | Fischer (blitz 3+2) | `bank_ms` 180 s + `increment_ms` 2 s |
+  | Japanese byo-yomi (10 min + 5 × 30 s) | `bank_ms` 600 s + `byoyomi` 5 × 30 s |
+
+  `examples/counter/src/hourglass.cairo` is a second rule set, where the time
+  a seat uses flows to its opponent, in about 40 lines. The SDK mirrors a rule
+  set as `game.time` (`standardTime` by default), with the same functions over
+  decoded values, its codecs, and a `view` for `timeLeft`.
+- **Flags.** A step after the seat used more than its `limit` fails with
+  `'Flag fell'`. The referee's `Flag` is valid only then, and the due seat
+  loses with `REASON_TIMEOUT`. Resign, flag and `claim_timeout` share
+  `forfeit`, the one place a protocol with more seats would turn into an
+  elimination. What running out does (lose, pass, be eliminated) is a game
+  rule for that work, not a time rule.
 - **Replay.** `replay` takes a `Batch { steps, stamps, signatures, attestation }`.
   The referee's last attestation covers every stamp, since the clocks depend on
   all of them, so one attestation reaches calldata. An untimed batch has no
@@ -165,12 +201,19 @@ moves; the referee signs time.
   attestations at one seq with different transcripts are evidence of
   equivocation. Each game opts in: the referee's key is in the terms, which
   both seats accept by joining.
-- **Settings.** Surround's old per-turn clock is `turn_ms` 60 s and no bank;
-  blitz 3+2 is `bank_ms` 180 s and `increment_ms` 2 s; Hashfront's turn timers
-  are a turn allowance plus a small bank. Each setting is at most 30 days.
-- **Cost.** An untimed game adds 1 felt to the terms and the envelope and 3
-  felts per replay. A timed game adds 1 felt per step, the clock to the
-  envelope, and one ECDSA check per replay or proof.
+- **Cost onchain and in proofs** (counter game, cairo-test gas):
+  - untimed games pay about 12k gas per step for carrying the optional clock,
+    about 120 Cairo steps, or 2% of a Surround move;
+  - timed games pay about 50k gas per step with `StandardTime`, about 500 Cairo
+    steps, plus 1 felt of calldata per step and one attestation check (about
+    45k gas) per replay or proof. `StandardTime` reads its settings and clocks
+    in place for this; decoding them fully cost 83k per step.
+- **Cost offchain** (`node keeper/bench.mjs`): a stamp costs the referee about
+  6 ms and applying a stamped step costs a client about 6 ms, mostly two
+  signature checks at about 1.3 ms each with cached keys. Through a keeper
+  that referees the game, a step reaches the other seat's stream in about
+  26 ms, with the keeper and both clients in one process on one machine. The
+  file store's full rewrite on each save adds about 5 ms by step 400.
 - **`Referee`** (`@referee/sdk`) stamps steps as they arrive, flags, and
   reports the `deadline()` for a timer. Its time resumes at the last stamp when
   it is made, so a restarted referee never charges seats for its own downtime.
@@ -228,8 +271,10 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 - `ChannelGame` stores 2 seats (wallet, session key, randomness tip), the prover,
   the time control, the serialized game `Config`, the `Channel` fields and the
   result.
-- `create` takes an `Option<TimeControl>`. A referee key must be a curve point
-  and neither seat's session key.
+- `create` takes an `Option<TimeControl>`, checked by the game's time rules. A
+  referee key must be a curve point and neither seat's session key.
+  `ChannelGame` keeps the referee key and the serialized settings, whatever the
+  rules.
 - Callers are authenticated by wallet for create, join, cancel, dispute, forced
   play, timeout and resign. `submit_history` and `resolve` are open to anyone, for
   example a keeper. `accept_verified` accepts only the game's prover.

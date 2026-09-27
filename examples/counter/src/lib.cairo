@@ -40,6 +40,7 @@ pub impl CounterRules of GameRules {
     const TAG: felt252 = 'COUNTER';
     const RULES_VERSION: u32 = 1;
     const SEATS: u8 = 2;
+    impl Time = referee::clocks::StandardTime<Counter>;
 
     fn init(config: @Config) -> Counter {
         assert(*config.target > 0, 'Invalid target');
@@ -96,5 +97,7 @@ mod channel_tests;
 mod clock_tests;
 #[cfg(test)]
 mod fixtures;
+
+pub mod hourglass;
 #[cfg(test)]
 mod tests;

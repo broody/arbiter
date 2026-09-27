@@ -70,9 +70,10 @@ stall ends in a forced reveal or a timeout loss.
 game names a **referee** in its terms, a third key that witnesses time:
 - The referee stamps every step with its own clock and signs the resulting
   clocks. Only its last signature reaches the settlement.
-- Each turn has an allowance (`turn_ms`), then a bank (`bank_ms`) that gains an
-  increment (`increment_ms`) at the end of each turn. This covers per-turn
-  timers, blitz clocks, and anything in between.
+- How the clocks run is pluggable: a game names its time rules. The standard
+  rules cover per-turn timers, delay, Fischer increments and Japanese
+  byo-yomi; a game can write its own (the counter example ships an
+  hourglass).
 - A seat whose time runs out is flagged by the referee and loses on time. The
   flag settles like any finished game.
 - The referee can't forge moves or results. It can only skew time, so an
@@ -96,6 +97,7 @@ pub trait GameRules {
     const TAG: felt252;
     const RULES_VERSION: u32;
     const SEATS: u8;
+    impl Time: ClockRules<State>;   // how its clocks run when timed: referee::clocks::StandardTime<State>
     fn init(config: @Config) -> State;
     fn load(config: @Config, state: @State, witness: Witness) -> Scratch;
     fn apply(config: @Config, ref scratch: Scratch, state: State, seat: u8, action: Action)

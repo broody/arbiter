@@ -51,7 +51,7 @@ async function passWindow() {
  */
 async function newGame(seed, clock = null) {
   const tips = [rngChain(seed, 8)[8], rngChain(seed + 1n, 8)[8]];
-  const time = clock === null ? [1n] : [0n, ...encodeTimeControl(clock)]; // Option<TimeControl>
+  const time = clock === null ? [1n] : [0n, ...encodeTimeControl(counter, clock)]; // Option<TimeControl>
   const created = await send(alice, 'create', [20, bob.address, publicKey(sessionKeys[0]), tips[0], owner.address, WINDOW, ...time]);
   const trace = await provider.getTransactionTrace(created);
   const id = BigInt(trace.execute_invocation.calls.find(c => BigInt(c.contract_address) === BigInt(CHANNEL)).result[0]);
@@ -103,7 +103,8 @@ try {
 
   // A timed game the keeper referees: 2 s per turn and no bank. Alice moves;
   // Bob stalls, so the keeper flags him and settles the flag onchain.
-  const c = await newGame(0x5eedcn, { referee: publicKey(REFEREE_KEY), turn_ms: 2000, bank_ms: 0, increment_ms: 0 });
+  const c = await newGame(0x5eedcn, { referee: publicKey(REFEREE_KEY),
+    settings: { turn_ms: 2000, bank_ms: 0, increment_ms: 0, byoyomi: null } });
   await client.register(c.session);
   c.session.sign(play({ kind: ADD, amount: 3 }), sessionKeys[0]);
   await client.submit(c.session);

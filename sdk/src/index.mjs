@@ -10,6 +10,8 @@ export const REASON_RESIGN = 128;
 export const REASON_TIMEOUT = 129;
 /** Upper bound on each time-control setting (ms): 30 days. */
 export const MAX_CLOCK_MS = 2592000000;
+/** Upper bound on byo-yomi periods. */
+export const MAX_PERIODS = 255;
 export const MOVE_PLAY = 0, MOVE_PLAY_RANDOM = 1, MOVE_REVEAL = 2, MOVE_RECOMMIT = 3, MOVE_RESIGN = 4, MOVE_FLAG = 5;
 
 /**
@@ -48,21 +50,22 @@ export const span = values => [BigInt(values.length), ...values.map(felt)];
 const option = (value, encode) => (value == null ? [1n] : [0n, ...encode(value)]);
 
 /**
- * A timed game's `terms.clock`: `{ referee, turn_ms, bank_ms, increment_ms }`,
- * with the referee's public key and times in milliseconds. `null` (or absent)
- * for an untimed game.
+ * A timed game's `terms.clock`: `{ referee, settings }`, the referee's public
+ * key and the settings of the game's time rules (`game.time`, `standardTime`
+ * by default). `terms.clock` is `null` (or absent) for an untimed game.
  */
-export const encodeTimeControl = c => [felt(c.referee), BigInt(c.turn_ms), BigInt(c.bank_ms), BigInt(c.increment_ms)];
+export const encodeTimeControl = (game, c) => [felt(c.referee), ...span(timeOf(game).encodeSettings(c.settings))];
 
 /**
  * A game codec provides the Cairo Serde encodings of its types:
  * { tag, rulesVersion, encodeConfig(config), encodeAction(action), encodeState(state) },
- * plus `encodeWitness(witness)` if its replay takes a witness (see `load`).
+ * plus `encodeWitness(witness)` if its replay takes a witness (see `load`), and
+ * `time`, its time rules (`ClockRules`), if not `standardTime`.
  */
 export function encodeTerms(game, t) {
   return [
     felt(t.chain_id), felt(t.channel), felt(t.game_id), felt(t.prover), BigInt(t.response_seconds),
-    ...option(t.clock, encodeTimeControl),
+    ...option(t.clock, c => encodeTimeControl(game, c)),
     ...span(t.players), ...span(t.keys), ...span(t.rng_tips), ...game.encodeConfig(t.config),
   ];
 }
@@ -96,10 +99,14 @@ export const reopenHash = (game, context, epoch, stateHash) =>
  * earlier stamp, since the clocks depend on all of them.
  */
 export const stampHash = (game, context, env) =>
-  signingHash([tag(game.tag), tag('REFEREE_STAMP_V1'), felt(context), BigInt(env.seq), felt(env.transcript), ...encodeClock(env.clock)]);
+  signingHash([tag(game.tag), tag('REFEREE_STAMP_V1'), felt(context), BigInt(env.seq), felt(env.transcript), ...encodeClock(game, env.clock)]);
 
-/** A timed game's clocks (`Clock`): `{ banks, turn, stamp }`, in milliseconds. */
-export const encodeClock = c => [BigInt(c.banks.length), ...c.banks.map(BigInt), BigInt(c.turn), BigInt(c.stamp)];
+/**
+ * A timed game's clock (`Clock`): `{ seats, used, stamp }`, each seat's clocks
+ * as the game's time rules keep them, the time used in the current turn, and
+ * the last stamp, in milliseconds.
+ */
+export const encodeClock = (game, c) => [...span(timeOf(game).encodeClock(c.seats)), BigInt(c.used), BigInt(c.stamp)];
 
 export function encodeEnvelope(game, env) {
   const p = env.pending;
@@ -107,7 +114,7 @@ export function encodeEnvelope(game, env) {
     BigInt(env.seq), felt(env.transcript), BigInt(env.support_turn), BigInt(env.last_seat),
     p.active ? 1n : 0n, BigInt(p.seat), BigInt(p.seq), felt(p.entropy),
     ...span(env.rng_heads),
-    ...option(env.clock, encodeClock),
+    ...option(env.clock, c => encodeClock(game, c)),
     env.outcome.finished ? 1n : 0n, BigInt(env.outcome.winner), BigInt(env.outcome.reason),
     ...game.encodeState(env.game),
   ];
@@ -131,37 +138,72 @@ export function sign(message, privateKey) {
   const sig = ec.starkCurve.sign(hex(message), privateHex(privateKey));
   return { r: sig.r, s: sig.s };
 }
+// Public keys, decompressed with both y parities (Starknet keys are x-only, and
+// the Cairo verifier accepts either), the one that last verified first, each
+// with a precomputed multiplication table. Verifying against a cached key is
+// about ten times faster than decompressing it each time.
+const { ProjectivePoint } = ec.starkCurve;
+const ORDER = ec.starkCurve.CURVE.n;
+const KEY_CACHE = 1024;
+const keyPoints = new Map();
+function pointsOf(key) {
+  let points = keyPoints.get(key);
+  if (points) keyPoints.delete(key);
+  else {
+    const x = key.toString(16).padStart(64, '0');
+    points = ['02', '03'].map(parity => ProjectivePoint.fromHex(parity + x));
+    for (const point of points) point._setWindowSize?.(4);
+    if (keyPoints.size >= KEY_CACHE) keyPoints.delete(keyPoints.keys().next().value);
+  }
+  keyPoints.set(key, points);
+  return points;
+}
+const invert = a => {
+  let [t, next, r, rest] = [0n, 1n, ORDER, a % ORDER];
+  while (rest !== 0n) {
+    const q = r / rest;
+    [t, next, r, rest] = [next, t - q * next, rest, r - q * rest];
+  }
+  return ((t % ORDER) + ORDER) % ORDER;
+};
+
+/** STARK-curve ECDSA verification, as Cairo's `check_ecdsa_signature` does it. */
 export function verify(message, signature, key) {
   try {
-    const parsed = new ec.starkCurve.Signature(felt(signature.r), felt(signature.s));
-    const x = felt(key).toString(16).padStart(64, '0');
-    // Starknet keys are x-only; the Cairo verifier accepts either y parity.
-    return ec.starkCurve.verify(parsed, hex(message), `02${x}`) || ec.starkCurve.verify(parsed, hex(message), `03${x}`);
+    const z = felt(message), r = felt(signature.r), s = felt(signature.s);
+    if (!(r > 0n && r < 1n << 251n && s > 0n && s < ORDER)) return false;
+    const points = pointsOf(felt(key));
+    const w = invert(s), u1 = (z * w) % ORDER, u2 = (r * w) % ORDER;
+    const g = u1 === 0n ? ProjectivePoint.ZERO : ProjectivePoint.BASE.multiply(u1);
+    for (let i = 0; i < points.length; i++) {
+      if (g.add(points[i].multiply(u2)).toAffine().x !== r) continue;
+      if (i > 0) points.reverse();
+      return true;
+    }
+    return false;
   } catch { return false; }
 }
 
 const check = (condition, message) => { if (!condition) throw Error(message); };
 
-/** Reject a time control a game could not be played under (`check_time_control`). */
-export function checkTimeControl(c) {
+/** Reject a time control a game could not be played under (`check_clock`). */
+export function checkTimeControl(game, c) {
   if (c == null) return;
   check(felt(c.referee) !== 0n, 'Invalid referee');
-  const times = [c.turn_ms, c.bank_ms, c.increment_ms];
-  check(times.every(ms => Number.isSafeInteger(ms) && ms >= 0 && ms <= MAX_CLOCK_MS) && (c.turn_ms > 0 || c.bank_ms > 0),
-    'Invalid time control');
+  timeOf(game).check(c.settings);
 }
 
 /** The opening envelope for `terms` (`open` in protocol.cairo). */
 export function open(game, terms) {
   check(terms.rng_tips.length === 2, 'Only 2 seats supported');
   check(terms.rng_tips.every(tip => felt(tip) !== 0n), 'Invalid tip');
-  checkTimeControl(terms.clock);
+  checkTimeControl(game, terms.clock);
   const c = terms.clock;
   return {
     seq: 0, transcript: 0n, support_turn: 0, last_seat: NO_SEAT,
     pending: { active: false, seat: 0, seq: 0, entropy: 0n },
     rng_heads: terms.rng_tips.map(felt),
-    clock: c == null ? null : { banks: terms.rng_tips.map(() => c.bank_ms), turn: c.turn_ms, stamp: 0 },
+    clock: c == null ? null : { seats: timeOf(game).open(c.settings, terms.rng_tips.length), used: 0, stamp: 0 },
     outcome: { finished: false, winner: 0, reason: 0 },
     game: game.init(terms.config),
   };
@@ -184,33 +226,31 @@ const idle = () => ({ active: false, seat: 0, seq: 0, entropy: 0n });
 export const forfeit = (seat, reason) => ({ finished: true, winner: 2 - seat, reason });
 
 // Charge the time since the last stamp to `payer`, mirroring `charge` in
-// protocol.cairo: the turn's allowance first (a pending reveal's own fresh
-// allowance), then the bank. An unstamped step pauses the clock, and the first
-// stamp after a pause starts it without charging anyone.
-function charge(time, clock, payer, reveal, stamp, isFlag) {
-  const banks = [...clock.banks];
+// protocol.cairo: the turn seat's time adds to the turn's `used`, and a pending
+// reveal is a one-step turn for the revealer, settled at once. An unstamped step
+// pauses the clock, and the first stamp after a pause starts it without
+// charging anyone.
+function charge(time, settings, clock, payer, reveal, stamp, isFlag, state) {
   if (stamp == null) {
     check(!isFlag, 'Flag needs a stamp');
-    return { banks, turn: clock.turn, stamp: 0 };
+    return { ...clock, stamp: 0 };
   }
   check(Number.isSafeInteger(stamp) && stamp > 0, 'Invalid stamp');
   if (clock.stamp === 0) {
     check(!isFlag, 'Clock not running');
-    return { banks, turn: clock.turn, stamp };
+    return { ...clock, stamp };
   }
   check(stamp >= clock.stamp, 'Stamp out of order');
   const elapsed = stamp - clock.stamp;
-  const allowance = reveal ? time.turn_ms : clock.turn;
-  const bank = banks[payer];
+  const used = reveal ? elapsed : clock.used + elapsed;
+  const expired = used > time.limit(settings, clock.seats, payer, state);
   if (isFlag) {
-    check(elapsed > allowance + bank, 'Clock not expired');
-    banks[payer] = 0;
-    return { banks, turn: reveal ? clock.turn : 0, stamp };
+    check(expired, 'Clock not expired');
+    return { ...clock, stamp };
   }
-  check(elapsed <= allowance + bank, 'Flag fell');
-  const spent = Math.min(elapsed, allowance);
-  banks[payer] = bank - (elapsed - spent);
-  return { banks, turn: reveal ? clock.turn : allowance - spent, stamp };
+  check(!expired, 'Flag fell');
+  if (reveal) return { ...clock, seats: time.settle(settings, clock.seats, payer, elapsed, true, state), stamp };
+  return { ...clock, used, stamp };
 }
 
 /**
@@ -226,14 +266,14 @@ export function applyStep(game, context, terms, env, step, scratch = null, stamp
   check(!env.outcome.finished, 'Game already finished');
   const seat = actorOf(game, env, step);
   check(seat === 0 || seat === 1 || seat === REFEREE, 'Invalid seat');
-  const { config } = terms, time = terms.clock ?? null;
+  const { config } = terms, timed = terms.clock != null, time = timeOf(game);
   const message = actionHash(game, context, env.seq, env.transcript, step);
   const next = structuredClone(env);
   // The seat on the clock, and the seat whose turn it is.
   const payer = due(game, env), turnSeat = game.due(env.game);
-  if (time !== null) {
+  if (timed) {
     check(env.clock != null, 'Untimed state');
-    next.clock = charge(time, env.clock, payer, env.pending.active, stamp, seat === REFEREE);
+    next.clock = charge(time, terms.clock.settings, env.clock, payer, env.pending.active, stamp, seat === REFEREE, env.game);
   } else {
     check(env.clock == null, 'Timed state');
     check(stamp == null && seat !== REFEREE, 'Untimed game');
@@ -284,11 +324,11 @@ export function applyStep(game, context, terms, env, step, scratch = null, stamp
     const result = game.outcome(next.game);
     if (result !== null) next.outcome = { finished: true, winner: result[0], reason: result[1] };
   }
-  // A turn ends when the game's due seat changes: its seat's bank gains the
-  // increment and the next turn starts with a full allowance.
-  if (time !== null && game.due(next.game) !== turnSeat) {
-    next.clock.banks[turnSeat] += time.increment_ms;
-    next.clock.turn = time.turn_ms;
+  // A turn ends when the game's due seat changes: settle the time it used,
+  // and start the next one from nothing.
+  if (timed && game.due(next.game) !== turnSeat) {
+    const seats = time.settle(terms.clock.settings, next.clock.seats, turnSeat, next.clock.used, false, next.game);
+    next.clock = { seats, used: 0, stamp: next.clock.stamp };
   }
   if (next.last_seat !== seat) next.support_turn += 1;
   next.last_seat = seat;
@@ -566,33 +606,79 @@ export class Session {
 
 /**
  * The earliest referee time at which the due seat of a timed game can be
- * flagged (its time is gone once more than its allowance and bank have
- * passed), or null while the clock is paused, the game is over or untimed.
+ * flagged (once it has used more than its time rules allow), or null while
+ * the clock is paused, the game is over or untimed.
  */
 export function flagAt(game, terms, env) {
   const clock = env.clock;
   if (clock == null || clock.stamp === 0 || env.outcome.finished) return null;
-  const allowance = env.pending.active ? terms.clock.turn_ms : clock.turn;
-  return clock.stamp + allowance + clock.banks[due(game, env)] + 1;
+  const seat = due(game, env), used = env.pending.active ? 0 : clock.used;
+  return clock.stamp + timeOf(game).limit(terms.clock.settings, clock.seats, seat, env.game) - used + 1;
 }
 
 /**
- * Each seat's time left at referee time `at`, for display: the due seat's
- * allowance and bank less the time since the last stamp, and every other
- * seat's bank (each seat also gets `turn_ms` at the start of its turn). Null
- * for an untimed game.
+ * Each seat's clock at referee time `at`, for display, as the game's time
+ * rules show it (`view`; `standardTime` gives `{ turn, bank, periods, period }`).
+ * The due seat's counts the time it has used since its turn began; the others
+ * show what they start their next turn with. Null for an untimed game.
  */
 export function timeLeft(game, terms, env, at) {
-  const clock = env.clock;
-  if (clock == null) return null;
-  const left = [...clock.banks];
-  if (env.outcome.finished) return left;
-  const seat = due(game, env);
-  const allowance = env.pending.active ? terms.clock.turn_ms : clock.turn;
-  const elapsed = clock.stamp === 0 ? 0 : Math.max(0, at - clock.stamp);
-  left[seat] = Math.max(0, allowance + clock.banks[seat] - elapsed);
-  return left;
+  const clock = env.clock, time = timeOf(game);
+  if (clock == null || !time.view) return null;
+  const seat = env.outcome.finished ? -1 : due(game, env);
+  const live = (env.pending.active ? 0 : clock.used) + (clock.stamp === 0 ? 0 : Math.max(0, at - clock.stamp));
+  return terms.rng_tips.map((_, s) => time.view(terms.clock.settings, clock.seats, s, s === seat ? live : 0, env.game));
 }
+
+/**
+ * The standard time rules (`referee::clocks::StandardTime`), in milliseconds:
+ * settings `{ turn_ms, bank_ms, increment_ms, byoyomi }` with `byoyomi` null
+ * or `{ periods, period_ms }`, and clocks `{ banks, periods }` per seat. A
+ * turn's time comes from `turn_ms` first, which does not carry over, then from
+ * the bank (main time), then from byo-yomi periods; the bank gains
+ * `increment_ms` when a turn ends.
+ *
+ * A game's time rules (`game.time`) mirror its Cairo `ClockRules`: `check`,
+ * `open`, `limit` and `settle` over decoded values, the Serde codecs
+ * `encodeSettings`, `decodeSettings(reader)` and `encodeClock`, and optionally
+ * `view` for `timeLeft`.
+ */
+export const standardTime = {
+  encodeSettings: s => [BigInt(s.turn_ms), BigInt(s.bank_ms), BigInt(s.increment_ms),
+    ...option(s.byoyomi, b => [BigInt(b.periods), BigInt(b.period_ms)])],
+  decodeSettings: r => ({ turn_ms: r.num(), bank_ms: r.num(), increment_ms: r.num(),
+    byoyomi: r.num() === 0 ? { periods: r.num(), period_ms: r.num() } : null }),
+  encodeClock: c => [BigInt(c.banks.length), ...c.banks.map(BigInt), BigInt(c.periods.length), ...c.periods.map(BigInt)],
+  check(s) {
+    const ms = value => Number.isSafeInteger(value) && value >= 0 && value <= MAX_CLOCK_MS;
+    check([s.turn_ms, s.bank_ms, s.increment_ms].every(ms), 'Invalid time control');
+    const b = s.byoyomi;
+    if (b != null) {
+      check(Number.isSafeInteger(b.periods) && b.periods > 0 && b.periods <= MAX_PERIODS && ms(b.period_ms) && b.period_ms > 0,
+        'Invalid byo-yomi');
+    }
+    check(s.turn_ms > 0 || s.bank_ms > 0 || b != null, 'Invalid time control');
+  },
+  open: (s, seats) => ({ banks: Array(seats).fill(s.bank_ms), periods: s.byoyomi ? Array(seats).fill(s.byoyomi.periods) : [] }),
+  limit: (s, c, seat) => s.turn_ms + c.banks[seat] + (s.byoyomi ? c.periods[seat] * s.byoyomi.period_ms : 0),
+  settle(s, c, seat, used, reveal) {
+    const banks = [...c.banks], periods = [...c.periods];
+    const over = Math.max(0, used - s.turn_ms), fromBank = Math.min(over, banks[seat]), overtime = over - fromBank;
+    // The period the turn ended in is not lost.
+    if (s.byoyomi && overtime > 0) periods[seat] -= Math.floor((overtime - 1) / s.byoyomi.period_ms);
+    banks[seat] += (reveal ? 0 : s.increment_ms) - fromBank;
+    return { banks, periods };
+  },
+  view(s, c, seat, used) {
+    const period = s.byoyomi?.period_ms ?? 0;
+    const over = Math.max(0, used - s.turn_ms), fromBank = Math.min(over, c.banks[seat]), overtime = over - fromBank;
+    const lost = overtime > 0 && period > 0 ? Math.floor((overtime - 1) / period) : 0;
+    const periods = Math.max(0, (c.periods[seat] ?? 0) - lost);
+    return { turn: Math.max(0, s.turn_ms - used), bank: c.banks[seat] - fromBank, periods,
+      period: periods === 0 ? 0 : overtime > 0 ? (lost + 1) * period - overtime : period };
+  },
+};
+const timeOf = game => game.time ?? standardTime;
 
 /**
  * The referee of a timed game: stamps each seat's step as it arrives and flags
@@ -715,13 +801,19 @@ class Reader {
   done() { check(this.at === this.values.length, 'Trailing encoding'); }
 }
 
-const readTimeControl = r => ({ referee: r.next(), turn_ms: r.num(), bank_ms: r.num(), increment_ms: r.num() });
+// A time control: the referee's key and the game's time-rule settings.
+function readTimeControl(game, r) {
+  const referee = r.next(), settings = new Reader(r.span());
+  const decoded = { referee, settings: timeOf(game).decodeSettings(settings) };
+  settings.done();
+  return decoded;
+}
 
 /** A game's `decodeConfig(reader)` reads its `Config` from a Reader. */
 export function readTerms(game, r) {
   return {
     chain_id: r.next(), channel: r.next(), game_id: r.next(), prover: r.next(), response_seconds: r.num(),
-    clock: r.num() === 0 ? readTimeControl(r) : null,
+    clock: r.num() === 0 ? readTimeControl(game, r) : null,
     players: r.span(), keys: r.span(), rng_tips: r.span(), config: game.decodeConfig(r),
   };
 }
@@ -748,7 +840,12 @@ export function decodeChannelGame(game, values) {
   const configFelts = r.span();
   result.config = game.decodeConfig(new Reader(configFelts));
   Object.assign(result, {
-    status: r.num(), epoch: r.num(), context: r.next(), response_seconds: r.num(), time_control: readTimeControl(r),
+    status: r.num(), epoch: r.num(), context: r.next(), response_seconds: r.num(),
+  });
+  // `referee` is zero for an untimed game.
+  const referee = r.next(), settings = r.span();
+  result.clock = referee === 0n ? null : { referee, settings: timeOf(game).decodeSettings(new Reader(settings)) };
+  Object.assign(result, {
     anchor: readRef(r), candidate: readRef(r), anchor_block: r.num(), deadline: r.num(), result: readOutcome(r),
   });
   r.done();

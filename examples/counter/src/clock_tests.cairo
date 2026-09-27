@@ -1,13 +1,21 @@
-//! Referee clocks: the timed fixture game replays against its stamps and the
-//! referee's attestation, and unsigned timed steps pin the clock rules.
+//! Referee clocks: the timed fixture games replay against their stamps and the
+//! referee's attestation, and unsigned timed steps pin the clock rules, on the
+//! standard time rules and on the hourglass example.
+use referee::clocks::{
+    Byoyomi, MAX_CLOCK_MS, MAX_PERIODS, Standard, StandardClock, StandardTime, decode, encode,
+};
 use referee::{
-    Batch, Clock, Envelope, MAX_CLOCK_MS, Move, REASON_TIMEOUT, Signature, Terms, TimeControl,
-    apply_steps, check_time_control, context_hash, force, open, replay, rng_next, state_hash,
+    Batch, Clock, Envelope, Move, REASON_TIMEOUT, Signature, Terms, TimeControl, apply_steps,
+    check_clock, context_hash, force, open, replay, rng_next, state_hash,
 };
 use crate::fixtures::{
-    CONTEXT, RNG_LEN, SEED_0, SEED_1, TIMED_CONTEXT, TIMED_STATE_HASH, finals, steps, terms,
-    timed_attestations, timed_expected, timed_finals, timed_stamps, timed_steps, timed_terms,
+    BYOYOMI_CONTEXT, BYOYOMI_STATE_HASH, CONTEXT, HOURGLASS_CONTEXT, HOURGLASS_STATE_HASH, RNG_LEN,
+    SEED_0, SEED_1, TIMED_CONTEXT, TIMED_STATE_HASH, byoyomi_attestations, byoyomi_expected,
+    byoyomi_finals, byoyomi_stamps, byoyomi_steps, byoyomi_terms, finals, hourglass_attestations,
+    hourglass_expected, hourglass_finals, hourglass_stamps, hourglass_steps, hourglass_terms, steps,
+    terms, timed_attestations, timed_expected, timed_finals, timed_stamps, timed_steps, timed_terms,
 };
+use crate::hourglass::{Hourglass, HourglassClock, HourglassCounterRules};
 use crate::{ADD, Action, Config, Counter, CounterRules, GAMBLE};
 
 fn zero() -> Signature {
@@ -36,9 +44,12 @@ fn reveal() -> Move<Action> {
     Move::Reveal(chain(SEED_0, RNG_LEN - 1))
 }
 
-/// The fixture's timed terms (30 s turn, 60 s bank, 2 s increment) under another time control.
-fn terms_with(time: TimeControl) -> Terms<Config> {
-    Terms { clock: Option::Some(time), ..timed_terms() }
+/// The fixture's timed terms under other standard settings.
+fn standard(settings: Standard) -> Terms<Config> {
+    Terms {
+        clock: Option::Some(TimeControl { referee: 1, settings: encode(@settings) }),
+        ..timed_terms(),
+    }
 }
 
 fn timed_start() -> Envelope<Counter> {
@@ -58,6 +69,19 @@ fn run(steps: Array<Move<Action>>, stamps: Array<u64>) -> Envelope<Counter> {
 
 fn clock(env: @Envelope<Counter>) -> Clock {
     (*env.clock).unwrap()
+}
+
+/// The standard time rules' clocks: each seat's bank and periods.
+fn seats(env: @Envelope<Counter>) -> StandardClock {
+    decode(clock(env).seats)
+}
+
+fn banks(env: @Envelope<Counter>) -> Span<u64> {
+    seats(env).banks
+}
+
+fn periods(env: @Envelope<Counter>) -> Span<u32> {
+    seats(env).periods
 }
 
 /// Timed fixture steps `from..to` with their stamps, final signatures and the
@@ -161,9 +185,10 @@ fn untimed_replay_takes_no_attestation() {
 
 #[test]
 fn clocks_open_paused_with_full_banks() {
-    assert_eq!(
-        clock(@timed_start()), Clock { banks: array![60000, 60000].span(), turn: 30000, stamp: 0 },
-    );
+    let env = timed_start();
+    assert_eq!(banks(@env), array![60000, 60000].span());
+    assert_eq!(periods(@env), array![].span());
+    assert_eq!((clock(@env).used, clock(@env).stamp), (0, 0));
     assert!(open::<CounterRules>(@terms()).clock.is_none());
 }
 
@@ -171,22 +196,35 @@ fn clocks_open_paused_with_full_banks() {
 fn first_stamp_starts_the_clock_without_charge() {
     let env = run(array![add(3)], array![5000]);
     // Seat 0's turn ended: its bank gains the increment.
-    assert_eq!(clock(@env), Clock { banks: array![62000, 60000].span(), turn: 30000, stamp: 5000 });
+    assert_eq!(banks(@env), array![62000, 60000].span());
+    assert_eq!((clock(@env).used, clock(@env).stamp), (0, 5000));
 }
 
 #[test]
 fn time_comes_from_the_turn_then_the_bank() {
     let env = run(array![add(3), add(3)], array![1000, 46000]);
     // Seat 1 spent its 30 s allowance and 15 s of bank, then gained 2 s.
-    assert_eq!(
-        clock(@env), Clock { banks: array![62000, 47000].span(), turn: 30000, stamp: 46000 },
+    assert_eq!(banks(@env), array![62000, 47000].span());
+}
+
+#[test]
+fn a_turn_adds_up_its_steps() {
+    // Seat 0 recommits and then plays: 40 s in one turn, 10 s from its bank.
+    let env = run(
+        array![add(3), add(3), Move::Recommit(rng_next(0x5eed2))], array![1000, 2000, 22000],
     );
+    assert_eq!(clock(@env).used, 20000);
+    let env = apply_steps::<
+        CounterRules,
+    >(TIMED_CONTEXT, @timed_terms(), env, (), array![add(3)].span(), array![42000].span());
+    assert_eq!(banks(@env), array![54000, 62000].span());
+    assert_eq!(clock(@env).used, 0);
 }
 
 #[test]
 fn a_step_on_the_last_millisecond_counts() {
     let env = run(array![add(3), add(3)], array![1000, 91000]);
-    assert_eq!(*clock(@env).banks.at(1), 2000);
+    assert_eq!(*banks(@env).at(1), 2000);
 }
 
 #[test]
@@ -201,7 +239,6 @@ fn flag_once_time_runs_out() {
     assert!(env.outcome.finished);
     assert_eq!(env.outcome.winner, 1); // seat 0 + 1
     assert_eq!(env.outcome.reason, REASON_TIMEOUT);
-    assert_eq!(*clock(@env).banks.at(1), 0);
 }
 
 #[test]
@@ -239,7 +276,7 @@ fn an_unstamped_step_pauses_the_clock() {
     let env = apply_steps::<
         CounterRules,
     >(TIMED_CONTEXT, @t, forced, (), array![add(3)].span(), array![999999999].span());
-    assert_eq!(*clock(@env).banks.at(1), 62000);
+    assert_eq!(*banks(@env).at(1), 62000);
 }
 
 #[test]
@@ -251,7 +288,7 @@ fn forced_play_cannot_flag() {
 }
 
 fn per_turn() -> Terms<Config> {
-    terms_with(TimeControl { referee: 1, turn_ms: 10000, bank_ms: 0, increment_ms: 0 })
+    standard(Standard { turn_ms: 10000, bank_ms: 0, increment_ms: 0, byoyomi: Option::None })
 }
 
 #[test]
@@ -259,7 +296,8 @@ fn a_reveal_has_its_own_allowance() {
     // Seat 1 gambles with 1 s of its turn left; seat 0 still has a full 10 s
     // to reveal, and the roll passes the turn back with a fresh allowance.
     let env = run_with(per_turn(), array![add(3), gamble(), reveal()], array![1000, 10000, 20000]);
-    assert_eq!(clock(@env), Clock { banks: array![0, 0].span(), turn: 10000, stamp: 20000 });
+    assert_eq!(banks(@env), array![0, 0].span());
+    assert_eq!((clock(@env).used, clock(@env).stamp), (0, 20000));
 }
 
 #[test]
@@ -286,28 +324,228 @@ fn untimed_games_have_no_flag() {
     >(CONTEXT, @t, open::<CounterRules>(@t), (), array![Move::Flag].span(), array![].span());
 }
 
+fn check_standard(settings: Standard) {
+    StandardTime::<Counter>::check(encode(@settings));
+}
+
 #[test]
 #[should_panic(expected: 'Invalid time control')]
 fn a_clock_needs_some_time() {
-    check_time_control(
-        @Option::Some(TimeControl { referee: 1, turn_ms: 0, bank_ms: 0, increment_ms: 1000 }),
-    );
+    check_standard(Standard { turn_ms: 0, bank_ms: 0, increment_ms: 1000, byoyomi: Option::None });
 }
 
 #[test]
 #[should_panic(expected: 'Invalid time control')]
 fn clock_settings_are_bounded() {
-    check_time_control(
-        @Option::Some(
-            TimeControl { referee: 1, turn_ms: 0, bank_ms: MAX_CLOCK_MS + 1, increment_ms: 0 },
-        ),
+    check_standard(
+        Standard { turn_ms: 0, bank_ms: MAX_CLOCK_MS + 1, increment_ms: 0, byoyomi: Option::None },
     );
 }
 
 #[test]
 #[should_panic(expected: 'Invalid referee')]
 fn a_clock_needs_a_referee() {
-    check_time_control(
-        @Option::Some(TimeControl { referee: 0, turn_ms: 1000, bank_ms: 0, increment_ms: 0 }),
+    let settings = Standard { turn_ms: 1000, bank_ms: 0, increment_ms: 0, byoyomi: Option::None };
+    check_clock::<
+        CounterRules,
+    >(@Option::Some(TimeControl { referee: 0, settings: encode(@settings) }));
+}
+
+#[test]
+#[should_panic(expected: 'Invalid clock data')]
+fn clock_settings_must_decode_exactly() {
+    let mut settings = array![1000, 0, 0, 1, 7];
+    check_clock::<
+        CounterRules,
+    >(@Option::Some(TimeControl { referee: 1, settings: settings.span() }));
+}
+
+fn byoyomi_start() -> Envelope<Counter> {
+    open::<CounterRules>(@byoyomi_terms())
+}
+
+fn byoyomi_batch(from: u32, to: u32) -> Batch<Action> {
+    Batch {
+        steps: byoyomi_steps().span().slice(from, to - from),
+        stamps: byoyomi_stamps().span().slice(from, to - from),
+        signatures: byoyomi_finals(from, to).span(),
+        attestation: *byoyomi_attestations().at(to - 1),
+    }
+}
+
+/// 10 s of main time, then 3 periods of 5 s, as in the byo-yomi fixture.
+fn japanese() -> Terms<Config> {
+    standard(
+        Standard {
+            turn_ms: 0,
+            bank_ms: 10000,
+            increment_ms: 0,
+            byoyomi: Option::Some(Byoyomi { periods: 3, period_ms: 5000 }),
+        },
+    )
+}
+
+#[test]
+fn byoyomi_replay_matches_sdk() {
+    assert_eq!(context_hash::<CounterRules>(@byoyomi_terms()), BYOYOMI_CONTEXT);
+    let end = replay::<
+        CounterRules,
+    >(BYOYOMI_CONTEXT, @byoyomi_terms(), byoyomi_start(), (), byoyomi_batch(0, 7));
+    assert_eq!(end, byoyomi_expected());
+    assert_eq!(state_hash::<CounterRules>(@end), BYOYOMI_STATE_HASH);
+    assert_eq!(end.outcome.winner, 1); // seat 0: seat 1 ran out of periods
+    assert_eq!(end.outcome.reason, REASON_TIMEOUT);
+}
+
+#[test]
+fn byoyomi_clocks_open_with_every_period() {
+    let env = open::<CounterRules>(@japanese());
+    assert_eq!(periods(@env), array![3, 3].span());
+    assert_eq!(banks(@env), array![10000, 10000].span());
+}
+
+#[test]
+fn main_time_comes_before_the_periods() {
+    let env = run_with(japanese(), array![add(3), add(3)], array![1000, 11000]);
+    assert_eq!(banks(@env), array![10000, 0].span());
+    assert_eq!(periods(@env), array![3, 3].span());
+}
+
+#[test]
+fn a_turn_ending_inside_a_period_costs_none() {
+    // Seat 1: its 10 s of main time, then exactly one 5 s period.
+    let env = run_with(japanese(), array![add(3), add(3)], array![1000, 16000]);
+    assert_eq!(periods(@env), array![3, 3].span());
+}
+
+#[test]
+fn each_period_that_runs_out_is_lost() {
+    // One millisecond into the second period, then 1 ms into the third.
+    let env = run_with(japanese(), array![add(3), add(3)], array![1000, 16001]);
+    assert_eq!(periods(@env), array![3, 2].span());
+    let env = run_with(japanese(), array![add(3), add(3)], array![1000, 21001]);
+    assert_eq!(periods(@env), array![3, 1].span());
+}
+
+#[test]
+fn the_last_period_can_be_used_to_its_end() {
+    let env = run_with(japanese(), array![add(3), add(3)], array![1000, 26000]);
+    assert_eq!(periods(@env), array![3, 1].span());
+}
+
+#[test]
+#[should_panic(expected: 'Flag fell')]
+fn outlasting_the_last_period_flags() {
+    run_with(japanese(), array![add(3), add(3)], array![1000, 26001]);
+}
+
+#[test]
+fn a_flag_in_overtime_ends_the_game() {
+    let env = run_with(japanese(), array![add(3), Move::Flag], array![1000, 26001]);
+    assert_eq!(env.outcome.winner, 1);
+    assert_eq!(env.outcome.reason, REASON_TIMEOUT);
+}
+
+#[test]
+fn periods_count_per_turn_not_per_step() {
+    // Seat 0 recommits and then plays: one turn, 7 s of overtime in all.
+    let env = run_with(
+        japanese(),
+        array![add(3), add(3), Move::Recommit(rng_next(0x5eed2)), add(3)],
+        array![1000, 2000, 15000, 19000],
     );
+    assert_eq!(banks(@env), array![0, 9000].span());
+    assert_eq!(periods(@env), array![2, 3].span());
+}
+
+#[test]
+#[should_panic(expected: 'Invalid byo-yomi')]
+fn byoyomi_needs_a_period() {
+    check_standard(
+        Standard {
+            turn_ms: 0,
+            bank_ms: 1000,
+            increment_ms: 0,
+            byoyomi: Option::Some(Byoyomi { periods: 0, period_ms: 1000 }),
+        },
+    );
+}
+
+#[test]
+#[should_panic(expected: 'Invalid byo-yomi')]
+fn byoyomi_periods_are_bounded() {
+    check_standard(
+        Standard {
+            turn_ms: 0,
+            bank_ms: 0,
+            increment_ms: 0,
+            byoyomi: Option::Some(Byoyomi { periods: MAX_PERIODS + 1, period_ms: 1000 }),
+        },
+    );
+}
+
+#[test]
+fn byoyomi_alone_is_a_time_control() {
+    check_standard(
+        Standard {
+            turn_ms: 0,
+            bank_ms: 0,
+            increment_ms: 0,
+            byoyomi: Option::Some(Byoyomi { periods: 1, period_ms: 30000 }),
+        },
+    );
+}
+
+fn hourglass_start() -> Envelope<Counter> {
+    open::<HourglassCounterRules>(@hourglass_terms())
+}
+
+fn hourglass_banks(env: @Envelope<Counter>) -> Span<u64> {
+    let clock: HourglassClock = decode(clock(env).seats);
+    clock.banks
+}
+
+#[test]
+fn hourglass_replay_matches_sdk() {
+    assert_eq!(context_hash::<HourglassCounterRules>(@hourglass_terms()), HOURGLASS_CONTEXT);
+    let batch = Batch {
+        steps: hourglass_steps().span(),
+        stamps: hourglass_stamps().span(),
+        signatures: hourglass_finals(0, 5).span(),
+        attestation: *hourglass_attestations().at(4),
+    };
+    let end = replay::<
+        HourglassCounterRules,
+    >(HOURGLASS_CONTEXT, @hourglass_terms(), hourglass_start(), (), batch);
+    assert_eq!(end, hourglass_expected());
+    assert_eq!(state_hash::<HourglassCounterRules>(@end), HOURGLASS_STATE_HASH);
+    assert_eq!(end.outcome.winner, 2); // seat 1: seat 0 ran dry
+}
+
+#[test]
+fn hourglass_time_flows_to_the_opponent() {
+    let t = hourglass_terms();
+    let env = apply_steps::<
+        HourglassCounterRules,
+    >(
+        HOURGLASS_CONTEXT,
+        @t,
+        hourglass_start(),
+        (),
+        array![add(3), add(3)].span(),
+        array![1000, 5000].span(),
+    );
+    assert_eq!(hourglass_banks(@env), array![14000, 6000].span());
+}
+
+#[test]
+#[should_panic(expected: 'Invalid hourglass')]
+fn hourglass_checks_its_settings() {
+    let t = Terms {
+        clock: Option::Some(
+            TimeControl { referee: 1, settings: encode(@Hourglass { bank_ms: 0 }) },
+        ),
+        ..hourglass_terms(),
+    };
+    open::<HourglassCounterRules>(@t);
 }

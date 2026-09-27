@@ -68,7 +68,8 @@ test('our own steps echoed back are skipped', async () => {
 test('a timed game streams its stamps and its flag', async () => {
   const k = await keeper();
   try {
-    const timed = { ...terms(), clock: { referee: publicKey(REFEREE_KEY), turn_ms: 150, bank_ms: 0, increment_ms: 0 } };
+    const timed = { ...terms(), clock: { referee: publicKey(REFEREE_KEY),
+      settings: { turn_ms: 150, bank_ms: 0, increment_ms: 0, byoyomi: null } } };
     const aliceStore = new SessionStore(memoryBackend());
     const alice = await aliceStore.open(counter, timed), watcher = new Session(counter, timed);
     await k.client.register(alice);

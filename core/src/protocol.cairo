@@ -10,8 +10,6 @@ use crate::types::{
 /// Version 3: optional referee clocks. Version 2 made steps seat-implicit
 /// `Move`s and replays take one final signature per seat.
 pub const PROTOCOL_VERSION: felt252 = 3;
-/// Upper bound on each time-control setting: 30 days.
-pub const MAX_CLOCK_MS: u64 = 2592000000;
 
 // Stark signatures require a message below 2^251. Use an explicit 250-bit mask
 // in every language; never reinterpret a field hash as an unrestricted message.
@@ -71,17 +69,12 @@ pub fn stamp_hash<impl R: GameRules>(
     signing_hash(fields.span())
 }
 
-/// Reject a time control a game could not be played under.
-pub fn check_time_control(time: @Option<TimeControl>) {
+/// Reject a time control a game could not be played under: its referee key,
+/// and settings its `ClockRules` accept.
+pub fn check_clock<impl R: GameRules>(time: @Option<TimeControl>) {
     if let Option::Some(time) = time {
         assert(*time.referee != 0, 'Invalid referee');
-        assert(*time.turn_ms > 0 || *time.bank_ms > 0, 'Invalid time control');
-        assert(
-            *time.turn_ms <= MAX_CLOCK_MS
-                && *time.bank_ms <= MAX_CLOCK_MS
-                && *time.increment_ms <= MAX_CLOCK_MS,
-            'Invalid time control',
-        );
+        R::Time::check(*time.settings);
     }
 }
 
@@ -150,15 +143,11 @@ pub fn open<impl R: GameRules, +Drop<R::State>>(terms: @Terms<R::Config>) -> Env
     for tip in rng_tips {
         assert(*tip != 0, 'Invalid tip');
     }
-    check_time_control(terms.clock);
+    check_clock::<R>(terms.clock);
     let clock = match *terms.clock {
-        Option::Some(time) => {
-            let mut banks = array![];
-            while banks.len() < R::SEATS.into() {
-                banks.append(time.bank_ms);
-            }
-            Option::Some(Clock { banks: banks.span(), turn: time.turn_ms, stamp: 0 })
-        },
+        Option::Some(time) => Option::Some(
+            Clock { seats: R::Time::open(time.settings, R::SEATS), used: 0, stamp: 0 },
+        ),
         Option::None => Option::None,
     };
     Envelope {
@@ -225,7 +214,7 @@ pub fn replay<
     batch: Batch<R::Action>,
 ) -> Envelope<R::State> {
     let keys = *terms.keys;
-    let time = *terms.clock;
+    let time = settings_of(terms.clock);
     assert(keys.len() == R::SEATS.into(), 'Wrong key count');
     assert(batch.signatures.len() == R::SEATS.into(), 'Wrong signature count');
     let timed = time.is_some();
@@ -246,7 +235,7 @@ pub fn replay<
         };
         let (next, seat, message) = advance::<
             R,
-        >(context, time, terms.config, ref scratch, env, *step, stamp);
+        >(context, @time, terms.config, ref scratch, env, *step, stamp);
         env = next;
         if seat != REFEREE {
             finals.insert(seat.into(), message);
@@ -265,7 +254,7 @@ pub fn replay<
         }
         seat += 1;
     }
-    let attested = match time {
+    let attested = match *terms.clock {
         Option::Some(time) => if batch.steps.len() > 0 {
             let clock = env.clock.expect('Untimed state');
             let message = stamp_hash::<R>(context, env.seq, env.transcript, @clock);
@@ -303,6 +292,7 @@ pub fn apply_steps<
     stamps: Span<u64>,
 ) -> Envelope<R::State> {
     assert(stamps.len() == 0 || stamps.len() == steps.len(), 'Wrong stamp count');
+    let time = settings_of(terms.clock);
     let mut scratch = R::load(terms.config, @start.game, witness);
     let mut env = start;
     let mut i: u32 = 0;
@@ -314,7 +304,7 @@ pub fn apply_steps<
         };
         let (next, _, _) = advance::<
             R,
-        >(context, *terms.clock, terms.config, ref scratch, env, *step, stamp);
+        >(context, @time, terms.config, ref scratch, env, *step, stamp);
         env = next;
         i += 1;
     }
@@ -341,12 +331,13 @@ pub fn force<
     seat: u8,
     steps: Span<Move<R::Action>>,
 ) -> Envelope<R::State> {
+    let time = settings_of(terms.clock);
     let mut scratch = R::load(terms.config, @start.game, witness);
     let mut env = start;
     for step in steps {
         let (next, actor, _) = advance::<
             R,
-        >(context, *terms.clock, terms.config, ref scratch, env, *step, Option::None);
+        >(context, @time, terms.config, ref scratch, env, *step, Option::None);
         assert(actor == seat, 'Not your step');
         env = next;
     }
@@ -365,7 +356,7 @@ fn advance<
     +Destruct<R::Scratch>,
 >(
     context: felt252,
-    time: Option<TimeControl>,
+    time: @Option<Span<felt252>>,
     config: @R::Config,
     ref scratch: R::Scratch,
     mut env: Envelope<R::State>,
@@ -381,14 +372,18 @@ fn advance<
     let turn_seat = R::due(@env.game);
     let flag = seat == REFEREE;
     match time {
-        Option::Some(time) => {
+        Option::Some(settings) => {
             let clock = env.clock.expect('Untimed state');
-            env.clock = Option::Some(charge(@time, clock, payer, env.pending.active, stamp, flag));
+            let reveal = env.pending.active;
+            env
+                .clock =
+                    Option::Some(
+                        charge::<R>(*settings, clock, payer, reveal, stamp, flag, @env.game),
+                    );
         },
         Option::None => {
             assert(env.clock.is_none(), 'Timed state');
-            assert(stamp.is_none(), 'Untimed game');
-            assert(!flag, 'Untimed game');
+            assert(stamp.is_none() && !flag, 'Untimed game');
         },
     }
     match step {
@@ -415,7 +410,7 @@ fn advance<
         },
         Move::Recommit(tip) => {
             assert(tip != 0, 'Invalid tip');
-            env.rng_heads = set_head(env.rng_heads, seat, tip);
+            env.rng_heads = set_at(env.rng_heads, seat, tip);
         },
         Move::Resign(_) => {
             env.pending = idle();
@@ -433,21 +428,15 @@ fn advance<
             env.outcome = Outcome { finished: true, winner, reason };
         }
     }
-    // A turn ends when the game's due seat changes: its seat's bank gains the
-    // increment and the next turn starts with a full allowance.
-    if let Option::Some(time) = time {
+    // A turn ends when the game's due seat changes: settle the time it used,
+    // and start the next one from nothing.
+    if let Option::Some(settings) = time {
         let clock = env.clock.expect('Untimed state');
         if R::due(@env.game) != turn_seat {
-            let bank = *clock.banks.at(turn_seat.into());
-            env
-                .clock =
-                    Option::Some(
-                        Clock {
-                            banks: set_bank(clock.banks, turn_seat, bank + time.increment_ms),
-                            turn: time.turn_ms,
-                            stamp: clock.stamp,
-                        },
-                    );
+            let seats = R::Time::settle(
+                *settings, clock.seats, turn_seat, clock.used, false, @env.game,
+            );
+            env.clock = Option::Some(Clock { seats, used: 0, stamp: clock.stamp });
         }
     }
     if env.last_seat != seat {
@@ -459,13 +448,20 @@ fn advance<
     (env, seat, message)
 }
 
-/// Charge the time since the last stamp to `payer`, the seat on the clock: from
-/// the turn's allowance first (a pending reveal's own fresh allowance), then
-/// from its bank. A `Flag` is valid only once that time ran out; any other step
-/// is refused after it. An unstamped step pauses the clock, and the first stamp
-/// after a pause starts it without charging anyone.
-fn charge(
-    time: @TimeControl, clock: Clock, payer: u8, reveal: bool, stamp: Option<u64>, flag: bool,
+/// Charge the time since the last stamp to `payer`, the seat on the clock. The
+/// turn seat's time adds to the turn's `used`; a pending reveal is a turn of one
+/// step for the revealer, settled at once. A `Flag` is valid only once the payer
+/// has used more than the game's `ClockRules` allow; any other step is refused
+/// after that. An unstamped step pauses the clock, and the first stamp after a
+/// pause starts it without charging anyone.
+fn charge<impl R: GameRules>(
+    settings: Span<felt252>,
+    clock: Clock,
+    payer: u8,
+    reveal: bool,
+    stamp: Option<u64>,
+    flag: bool,
+    state: @R::State,
 ) -> Clock {
     let t = match stamp {
         Option::Some(t) => t,
@@ -481,33 +477,30 @@ fn charge(
     }
     assert(t >= clock.stamp, 'Stamp out of order');
     let elapsed = t - clock.stamp;
-    let allowance = if reveal {
-        *time.turn_ms
-    } else {
-        clock.turn
-    };
-    let bank = *clock.banks.at(payer.into());
-    if flag {
-        assert(elapsed > allowance + bank, 'Clock not expired');
-        let turn = if reveal {
-            clock.turn
-        } else {
-            0
-        };
-        return Clock { banks: set_bank(clock.banks, payer, 0), turn, stamp: t };
-    }
-    assert(elapsed <= allowance + bank, 'Flag fell');
-    let spent = if elapsed < allowance {
+    let used = if reveal {
         elapsed
     } else {
-        allowance
+        clock.used + elapsed
     };
-    let turn = if reveal {
-        clock.turn
-    } else {
-        allowance - spent
-    };
-    Clock { banks: set_bank(clock.banks, payer, bank - (elapsed - spent)), turn, stamp: t }
+    let expired = used > R::Time::limit(settings, clock.seats, payer, state);
+    if flag {
+        assert(expired, 'Clock not expired');
+        return Clock { stamp: t, ..clock };
+    }
+    assert(!expired, 'Flag fell');
+    if reveal {
+        let seats = R::Time::settle(settings, clock.seats, payer, elapsed, true, state);
+        return Clock { seats, used: clock.used, stamp: t };
+    }
+    Clock { used, stamp: t, ..clock }
+}
+
+// A timed game's `ClockRules` settings, or `None` for an untimed game.
+fn settings_of(time: @Option<TimeControl>) -> Option<Span<felt252>> {
+    match time {
+        Option::Some(time) => Option::Some(*time.settings),
+        Option::None => Option::None,
+    }
 }
 
 fn idle() -> Pending {
@@ -516,31 +509,17 @@ fn idle() -> Pending {
 
 fn take_reveal(heads: Span<felt252>, seat: u8, value: felt252) -> Span<felt252> {
     assert(value != 0 && rng_next(value) == *heads.at(seat.into()), 'Invalid reveal');
-    set_head(heads, seat, value)
+    set_at(heads, seat, value)
 }
 
-fn set_bank(banks: Span<u64>, seat: u8, value: u64) -> Span<u64> {
+pub(crate) fn set_at<T, +Copy<T>, +Drop<T>>(values: Span<T>, seat: u8, value: T) -> Span<T> {
     let mut out = array![];
     let mut i: u32 = 0;
-    while i < banks.len() {
+    while i < values.len() {
         out.append(if i == seat.into() {
             value
         } else {
-            *banks.at(i)
-        });
-        i += 1;
-    }
-    out.span()
-}
-
-fn set_head(heads: Span<felt252>, seat: u8, value: felt252) -> Span<felt252> {
-    let mut out = array![];
-    let mut i: u32 = 0;
-    while i < heads.len() {
-        out.append(if i == seat.into() {
-            value
-        } else {
-            *heads.at(i)
+            *values.at(i)
         });
         i += 1;
     }

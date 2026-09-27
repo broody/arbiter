@@ -13,7 +13,7 @@ import { CHAIN, CHANNEL, Session, add, counter, keys, terms } from './fixtures.m
 const REFEREE_KEY = 0x7e7e7en, T0 = 1_000_000;
 // 30 s per turn and a 60 s bank: a seat's time runs out 90 s after its turn starts.
 const timed = (game_id = 7n) => ({ ...terms(game_id),
-  clock: { referee: publicKey(REFEREE_KEY), turn_ms: 30000, bank_ms: 60000, increment_ms: 0 } });
+  clock: { referee: publicKey(REFEREE_KEY), settings: { turn_ms: 30000, bank_ms: 60000, increment_ms: 0, byoyomi: null } } });
 const ids = { chain_id: CHAIN, channel: CHANNEL, game_id: 7n };
 const open = (backend, options = {}) =>
   Archive.open(backend, { games: [[CHANNEL, counter]], chainId: CHAIN, referee: { privateKey: REFEREE_KEY }, ...options });

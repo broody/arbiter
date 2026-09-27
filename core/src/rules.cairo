@@ -1,3 +1,5 @@
+use crate::clocks::ClockRules;
+
 /// What a game implements. Every function must be deterministic and panic on
 /// an illegal action: the same code runs in clients, the Dojo channel and the
 /// proving program.
@@ -16,6 +18,9 @@ pub trait GameRules {
     const RULES_VERSION: u32;
     /// Number of seats. The protocol currently supports 2.
     const SEATS: u8;
+    /// How the game's clocks run when it is timed, e.g.
+    /// `referee::clocks::StandardTime<State>`. Untimed games never use it.
+    impl Time: ClockRules<Self::State>;
 
     fn init(config: @Self::Config) -> Self::State;
 

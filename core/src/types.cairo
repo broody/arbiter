@@ -14,27 +14,23 @@ pub struct Signature {
     pub s: felt252,
 }
 
-/// A timed game's time control, bound into its terms. The referee stamps every
-/// step with its own clock, in milliseconds. A turn is a run of steps while the
-/// game's `due` seat stays the same: that seat spends `turn_ms` first, which
-/// does not carry over, then its bank, which gains `increment_ms` when the turn
-/// ends. A pending reveal is timed on its own, with a fresh `turn_ms`.
+/// A timed game's time control, bound into its terms: the referee's public key,
+/// which signs stamps and flags, and the settings of the game's `ClockRules`,
+/// serialized.
 #[derive(Copy, Drop, Serde, PartialEq, Debug)]
 pub struct TimeControl {
-    /// Public key that signs stamps and flags.
     pub referee: felt252,
-    pub turn_ms: u64,
-    pub bank_ms: u64,
-    pub increment_ms: u64,
+    pub settings: Span<felt252>,
 }
 
-/// A timed game's clocks.
+/// A timed game's clock. The time a turn uses adds up in `used` and is settled
+/// by the game's `ClockRules` when the turn ends.
 #[derive(Copy, Drop, Serde, PartialEq, Debug)]
 pub struct Clock {
-    /// Bank left per seat.
-    pub banks: Span<u64>,
-    /// Allowance left in the current turn.
-    pub turn: u64,
+    /// Each seat's clocks, as the game's `ClockRules` serialize them.
+    pub seats: Span<felt252>,
+    /// Time used so far in the current turn, in milliseconds.
+    pub used: u64,
     /// Referee time of the last stamped step, or 0 while the clock is paused:
     /// before the first stamp, and after an unstamped (forced onchain) step.
     pub stamp: u64,

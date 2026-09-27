@@ -5,6 +5,7 @@ use dojo_cairo_test::{
     spawn_test_world,
 };
 use referee::channel::{ACTIVE, DISPUTE, FORCED, SETTLED};
+use referee::clocks::{Standard, encode};
 use referee::{
     Batch, Envelope, Move, REASON_TIMEOUT, REFEREE, Signature, Terms, TimeControl, action_hash,
     actor, apply_steps, checkpoint_hash, context_hash, force, open, reopen_hash, stamp_hash,
@@ -73,11 +74,16 @@ fn started() -> (ICounterChannelDispatcher, WorldStorage, felt252) {
 
 /// 30 s per turn, a 60 s bank and a 2 s increment, refereed by PK_REF.
 fn blitz() -> Option<TimeControl> {
-    Option::Some(
-        TimeControl {
-            referee: public_key(PK_REF), turn_ms: 30000, bank_ms: 60000, increment_ms: 2000,
-        },
-    )
+    let settings = Standard {
+        turn_ms: 30000, bank_ms: 60000, increment_ms: 2000, byoyomi: Option::None,
+    };
+    Option::Some(TimeControl { referee: public_key(PK_REF), settings: encode(@settings) })
+}
+
+/// Standard settings that allow `turn_ms` per turn, refereed by `referee`.
+fn per_turn(referee: felt252) -> TimeControl {
+    let settings = Standard { turn_ms: 30000, bank_ms: 0, increment_ms: 0, byoyomi: Option::None };
+    TimeControl { referee, settings: encode(@settings) }
 }
 
 fn started_with(clock: Option<TimeControl>) -> (ICounterChannelDispatcher, WorldStorage, felt252) {
@@ -419,9 +425,7 @@ fn the_referee_is_not_the_creator() {
     let (game, _) = setup();
     game.allow_prover(channel::TEST_CLASS_HASH.try_into().unwrap(), true);
     caller(ALICE());
-    let clock = TimeControl {
-        referee: public_key(PK_A), turn_ms: 30000, bank_ms: 0, increment_ms: 0,
-    };
+    let clock = per_turn(public_key(PK_A));
     game
         .create(
             TARGET,
@@ -461,7 +465,7 @@ fn the_referee_key_is_a_curve_point() {
     game.allow_prover(channel::TEST_CLASS_HASH.try_into().unwrap(), true);
     caller(ALICE());
     // x = 5 is not on the STARK curve.
-    let clock = TimeControl { referee: 5, turn_ms: 30000, bank_ms: 0, increment_ms: 0 };
+    let clock = per_turn(5);
     game
         .create(
             TARGET,

@@ -8,15 +8,16 @@
 //! the Dojo channel (Cairo 2.13) and the native proof adapter (Cairo 2.18).
 
 pub mod channel;
+pub mod clocks;
 pub mod protocol;
 pub mod rules;
 pub mod types;
 pub use channel::{Channel, StateRef, state_ref};
 
 pub use protocol::{
-    MAX_CLOCK_MS, PROTOCOL_VERSION, action_hash, actor, apply_steps, approve_all,
-    check_time_control, checkpoint_hash, context_hash, due, force, forfeit, open, reopen_hash,
-    replay, rng_next, seed, signing_hash, stamp_hash, state_hash, verify,
+    PROTOCOL_VERSION, action_hash, actor, apply_steps, approve_all, check_clock, checkpoint_hash,
+    context_hash, due, force, forfeit, open, reopen_hash, replay, rng_next, seed, signing_hash,
+    stamp_hash, state_hash, verify,
 };
 pub use rules::GameRules;
 pub use types::{
