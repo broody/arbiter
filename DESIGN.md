@@ -215,8 +215,9 @@ signs time.
   for 8 felts against 1.3 ms in starknet.js), which took a stamp from 7.3 ms.
   Through a keeper that referees the game, a step reaches the other seat's
   stream in about 11 ms (from 28 ms), with the keeper and both clients in one
-  process on one machine. The file store's full rewrite on each save adds
-  about 5 ms by step 400.
+  process on one machine. A save writes only the new step, so that stays flat
+  through a game: about 14 ms at step 400 on the file store, which rewrote the
+  whole transcript on each save and took 18 ms there.
 - **`Referee`** (`@referee/sdk`) stamps steps as they arrive, flags, and
   reports the `deadline()` for a timer. Its time resumes at the last stamp when
   it is made, so a restarted referee never charges seats for its own downtime.
@@ -356,6 +357,14 @@ marks and session keys in a backend: `indexedDbBackend` for browsers,
 - `load` re-verifies the transcript (`Session.import`) and re-applies a marked
   step that never reached it.
 - `save` refuses to overwrite a transcript it does not extend.
+- A transcript is stored in pieces: its start (terms, anchor envelope and
+  witness) and each step, keyed by the `seq` and transcript they reach, and a
+  pointer to the start and the end. The transcript commits to the whole history
+  before it, so two branches never share a key and pieces are never rewritten;
+  a save writes only its new steps, then the pointer, which is the only key it
+  overwrites and the one it checks against another tab. `load` follows the
+  steps back from the end. A transcript saved whole by an older SDK still
+  loads, and is saved in pieces from then on.
 - `saveKey` keeps a session key, with the seat's randomness seed, under its
   public key; `keyFor(terms)` finds the seat.
 - The guard is per store. Two devices holding one key do not share marks, so a

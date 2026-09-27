@@ -1,7 +1,7 @@
 // Durable client sessions (`@referee/sdk/store`): transcripts, signing marks
 // and session keys in a small async key-value backend. `memoryBackend` and
 // `indexedDbBackend` are here; the Node file backend is `@referee/sdk/store/file`.
-import { Session, actorOf, contextHash, felt, hex, publicKey } from './index.mjs';
+import { Session, actorOf, contextHash, felt, hex, publicKey, signedStep } from './index.mjs';
 
 const check = (condition, message) => { if (!condition) throw Error(message); };
 
@@ -17,7 +17,16 @@ const check = (condition, message) => { if (!condition) throw Error(message); };
  * Writes resolve once they are durable.
  */
 
-const sessionKey = ids => `session/${hex(ids.chain_id)}/${hex(ids.channel)}/${hex(ids.game_id)}`;
+const gameKey = ids => `${hex(ids.chain_id)}/${hex(ids.channel)}/${hex(ids.game_id)}`;
+const sessionKey = ids => `session/${gameKey(ids)}`;
+// A transcript is stored as immutable pieces and a pointer. The start (terms,
+// anchor envelope and witness) and each step are keyed by the position they
+// reach, `seq` and transcript, which commit to the whole history before them:
+// two branches never share a key, and a save writes only its new steps. The
+// pointer under `sessionKey` names the start and the end, and is the only key
+// a save overwrites.
+const startKey = (ids, seq, transcript) => `start/${gameKey(ids)}/${seq}/${hex(transcript)}`;
+const stepKey = (ids, seq, transcript) => `step/${gameKey(ids)}/${seq}/${hex(transcript)}`;
 const markKey = (context, seat) => `signed/${hex(context)}/${seat}`;
 const secretKey = key => `key/${hex(key)}`;
 // The stored mark wins ties: it is what was durable before a signature left.
@@ -50,9 +59,28 @@ export class SessionStore {
   async load(game, ids) {
     const stored = await this.backend.get(sessionKey(ids));
     if (!stored) return null;
-    const session = Session.import(game, stored.record);
+    // A transcript saved whole, before transcripts were saved in pieces.
+    const record = stored.record ?? await this.#assemble(ids, stored);
+    const session = Session.import(game, record);
     if (await this.#restore(session)) await this.save(session);
     return session;
+  }
+
+  // The exported transcript a pointer names: its start, then its steps, found
+  // backwards from the end through each step's transcript.
+  async #assemble(ids, pointer) {
+    const start = await this.backend.get(startKey(ids, pointer.start.seq, pointer.start.transcript));
+    check(start, 'Stored session is missing its start');
+    const steps = [];
+    let transcript = pointer.transcript;
+    for (let seq = pointer.seq; seq > pointer.start.seq; seq--) {
+      const step = await this.backend.get(stepKey(ids, seq, transcript));
+      check(step, `Stored session is missing its step at seq ${seq - 1}`);
+      steps.push(step.signed);
+      transcript = step.transcript;
+    }
+    check(felt(transcript) === felt(pointer.start.transcript), 'Stored session does not reach its start');
+    return { ...start, steps: steps.reverse() };
   }
 
   /**
@@ -76,10 +104,27 @@ export class SessionStore {
    * not extend (another tab moved on) unless `replace`.
    */
   async save(session, { replace = false } = {}) {
-    const value = { record: session.export(), seq: session.env.seq, transcript: session.env.transcript };
-    await this.backend.update(sessionKey(session.terms), stored => {
-      check(replace || !stored || session.includes(stored), 'Stale session: the store holds a transcript this one does not extend');
-      return value;
+    const ids = session.terms, key = sessionKey(ids), { start, steps, env } = session;
+    const stale = stored => !replace && stored && !session.includes(stored);
+    const stored = await this.backend.get(key);
+    check(!stale(stored), 'Stale session: the store holds a transcript this one does not extend');
+    // Write what the stored pointer does not already reach: only new steps,
+    // unless the start moved (a new anchor) or the store holds another branch.
+    const sameStart = stored?.start && stored.start.seq === start.seq && felt(stored.start.transcript) === felt(start.transcript);
+    if (!sameStart) {
+      const { version, terms, witness } = session.export();
+      await this.backend.put(startKey(ids, start.seq, start.transcript), { version, terms, start, witness, steps: [] });
+    }
+    const from = sameStart && !replace && stored.seq >= start.seq ? stored.seq - start.seq : 0;
+    for (let i = from; i < steps.length; i++) {
+      const after = steps[i + 1]?.transcript ?? env.transcript;
+      await this.backend.put(stepKey(ids, steps[i].seq + 1, after), { transcript: steps[i].transcript, signed: signedStep(steps[i]) });
+    }
+    // The pointer commits the save, and is refused if another tab moved on.
+    const pointer = { start: { seq: start.seq, transcript: start.transcript }, seq: env.seq, transcript: env.transcript };
+    await this.backend.update(key, current => {
+      check(!stale(current), 'Stale session: the store holds a transcript this one does not extend');
+      return pointer;
     });
   }
 

@@ -121,12 +121,40 @@ for (const [name, make] of Object.entries(kinds)) {
     const store = new SessionStore(k.backend);
     const session = await store.open(counter, terms);
     await store.move(session, add(3), keys[0]);
-    const key = (await k.backend.keys('session/'))[0];
+    const key = (await k.backend.keys('step/'))[0];
     await k.backend.update(key, stored => {
-      stored.record.steps[0].signature.s ^= 1n;
+      stored.signed.signature.s ^= 1n;
       return stored;
     });
     await assert.rejects(new SessionStore(k.backend).load(counter, terms), /Invalid session signature/);
+  });
+
+  run('a save writes only the new step, however long the game', async k => {
+    const writes = [];
+    const counted = { ...k.backend, put: (key, value) => { writes.push(key); return k.backend.put(key, value); } };
+    const store = new SessionStore(counted);
+    const session = await store.open(counter, terms);
+    for (let i = 0; i < 6; i++) {
+      writes.length = 0;
+      await store.move(session, add(1), keys[session.due()]);
+      assert.deepEqual(writes.map(key => key.split('/')[0]), ['step'], `move ${i}`);
+    }
+    const loaded = await new SessionStore(k.backend).load(counter, terms);
+    assert.equal(loaded.stateHash(), session.stateHash());
+    assert.equal(loaded.steps.length, 6);
+  });
+
+  run('a transcript saved whole still loads, and is saved in pieces from then on', async k => {
+    const session = new Session(counter, terms);
+    session.move(add(3), keys[0]);
+    const key = `session/${['chain_id', 'channel', 'game_id'].map(f => `0x${terms[f].toString(16)}`).join('/')}`;
+    await k.backend.put(key, { record: session.export(), seq: session.env.seq, transcript: session.env.transcript });
+    const store = new SessionStore(k.backend);
+    const loaded = await store.load(counter, terms);
+    assert.equal(loaded.stateHash(), session.stateHash());
+    await store.move(loaded, add(2), keys[1]);
+    assert.equal((await k.backend.get(key)).record, undefined);
+    assert.equal((await new SessionStore(k.backend).load(counter, terms)).stateHash(), loaded.stateHash());
   });
 
   run('session keys and ids are stored with their BigInts', async k => {
