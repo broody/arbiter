@@ -20,6 +20,9 @@ const mode = process.argv[1];
 if (!Object.hasOwn(MEMORY_MODES, mode)) { console.error('memory must be one of ' + Object.keys(MEMORY_MODES).join(', ')); process.exit(1); }
 console.log(Object.entries(MEMORY_MODES[mode]).map(([k, v]) => k + '=' + v).join(' '));" "$(get "memory??'standard'")") || exit 1
 read -ra memory_env <<<"$memory_env"
+# An unpatched backend ignores the PROVER_* settings and would prove in standard mode.
+[[ " ${memory_env[*]} " != *" PROVER_"* ]] || grep -q '"patches"' "$BUILD_DIR/build.json" 2>/dev/null \
+  || { echo "memory: $(get memory) needs a backend built with prover/patches: rerun prover/build.sh" >&2; exit 1; }
 
 RPC_URL="$(get rpc_url)" CHAIN_ID="$(get chain_id)" PROVER_IP=127.0.0.1 PROVER_PORT="$port" \
 MAX_CONCURRENT_REQUESTS="$(get 'max_concurrent??1')" PREFETCH_STATE="$(get 'prefetch_state??true')" \
