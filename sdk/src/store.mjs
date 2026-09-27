@@ -86,7 +86,9 @@ export class SessionStore {
   /**
    * Sign our step, store it as the seat's mark, apply it and save. Returns the
    * signed record to send. Throws without releasing a signature if the step
-   * breaks the rules or would contradict a step this key already signed.
+   * breaks the rules or would contradict a step this key already signed. In a
+   * timed game the step is marked but not applied: send it to the referee and
+   * `receive` the stamped record it returns.
    */
   async move(session, step, privateKey) {
     const seat = actorOf(session.game, session.env, step);
@@ -103,12 +105,13 @@ export class SessionStore {
       session.lastSigned[seat] = later(before, stored);
       throw error;
     }
+    if (session.timed) return record;
     session.receive(record);
     await this.save(session);
     return record;
   }
 
-  /** Verify and apply a signed step from the other seat, then save. */
+  /** Verify and apply a signed step (the other seat's, or a stamped one from the referee), then save. */
   async receive(session, signed) {
     const record = session.receive(signed);
     await this.save(session);
@@ -138,9 +141,11 @@ export class SessionStore {
   }
 
   // Attach the stored marks, and apply any marked step the transcript lacks.
+  // A timed game's marked step needs the referee's stamp: resend it instead.
   async #restore(session) {
     const marks = await Promise.all([0, 1].map(seat => this.backend.get(markKey(session.context, seat))));
     marks.forEach((mark, seat) => { session.lastSigned[seat] = later(session.lastSigned[seat], mark); });
+    if (session.timed) return false;
     let recovered = false, mark;
     while ((mark = marks.find(m => m?.seq === session.env.seq && felt(m.transcript) === felt(session.env.transcript)))) {
       session.receive(mark);

@@ -133,13 +133,15 @@ test('rebase restarts a session at a committed anchor', () => {
 test('replay calldata carries one final signature per seat', () => {
   const session = played();
   assert.deepEqual(session.steps.map(s => s.seat), [0, 1, 0]);
-  const { steps, signatures } = session.batch();
-  assert.deepEqual(signatures, [session.steps[2].signature, session.steps[1].signature]);
+  const batch = session.batch();
+  assert.deepEqual(batch.signatures, [session.steps[2].signature, session.steps[1].signature]);
+  assert.deepEqual([batch.stamps, batch.attestation], [[], ZERO_SIGNATURE]);
   assert.deepEqual(finalSignatures(session.steps.slice(0, 1)), [session.steps[0].signature, ZERO_SIGNATURE]);
-  const calldata = encodeBatch(counter, { steps, signatures });
-  // 3 steps: Play(ADD 3) = 3 felts, PlayRandom(GAMBLE, entropy) = 4, Reveal(value) = 2; then 2 signatures.
+  const calldata = encodeBatch(counter, batch);
+  // 3 steps: Play(ADD 3) = 3 felts, PlayRandom(GAMBLE, entropy) = 4, Reveal(value) = 2; then no
+  // stamps, 2 signatures and a zero attestation.
   assert.deepEqual(calldata.slice(0, 4), [3n, 0n, BigInt(ADD), 3n]);
-  assert.equal(calldata.length, 1 + 3 + 4 + 2 + 1 + 4);
+  assert.equal(calldata.length, 1 + 3 + 4 + 2 + 1 + 1 + 4 + 2);
 });
 
 test('resignation ends the game for the other seat', () => {
@@ -150,16 +152,18 @@ test('resignation ends the game for the other seat', () => {
 
 test('terms, snapshots and channels decode from Cairo serialization', () => {
   const encoded = encodeTerms(counter, terms);
-  assert.deepEqual(decodeTerms(counter, encoded), { ...terms, response_seconds: 3600, config: { target: 20 } });
+  assert.deepEqual(decodeTerms(counter, encoded), { ...terms, clock: null, response_seconds: 3600, config: { target: 20 } });
   const snapshot = decodeSnapshot(counter, [...encoded, 2n, 0xabcn, 77n]);
   assert.equal(snapshot.epoch, 2);
   assert.equal(snapshot.anchor_hash, 0xabcn);
   assert.equal(snapshot.anchor_block, 77);
   const ref = [0x11n, 5n, 3n, 1n, 1n, 2n, 1n];
   const channel = decodeChannelGame(counter, [
-    9n, 0xa11cen, 0xb0bn, 1n, 2n, 3n, 4n, 0xad0b7e5n, 1n, 20n, 4n, 2n, 0xc0n, 3600n, ...ref, ...ref, 55n, 0n, 1n, 2n, 1n,
+    9n, 0xa11cen, 0xb0bn, 1n, 2n, 3n, 4n, 0xad0b7e5n, 1n, 20n, 4n, 2n, 0xc0n, 3600n, 0x7en, 30000n, 60000n, 2000n,
+    ...ref, ...ref, 55n, 0n, 1n, 2n, 1n,
   ]);
   assert.equal(channel.config.target, 20);
+  assert.deepEqual(channel.time_control, { referee: 0x7en, turn_ms: 30000, bank_ms: 60000, increment_ms: 2000 });
   assert.equal(channel.status, 4);
   assert.deepEqual(channel.anchor.outcome, { finished: true, winner: 2, reason: 1 });
   assert.deepEqual(channel.result, { finished: true, winner: 2, reason: 1 });

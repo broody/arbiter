@@ -6,6 +6,7 @@
   "rpc_url": "http://127.0.0.1:9545/rpc/v0_10",
   "poll_seconds": 15,
   "settle": true,
+  "referee": { "private_key_env": "KEEPER_REFEREE_KEY" },
   "account": {
     "address": "0x0000000000000000000000000000000000000000000000000000000000000000",
     "private_key_env": "KEEPER_PRIVATE_KEY",

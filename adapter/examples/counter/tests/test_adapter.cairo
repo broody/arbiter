@@ -3,8 +3,8 @@
 //! exactly that message as proof facts and relays the end state. Proof facts
 //! are cheated here; a real run attaches a native Stwo proof instead.
 use referee::{
-    Envelope, Move, Signature, Terms, action_hash, actor, apply_steps, context_hash, open,
-    state_hash,
+    Batch, Envelope, Move, Signature, Terms, TimeControl, action_hash, actor, apply_steps,
+    context_hash, open, stamp_hash, state_hash,
 };
 use referee_adapter::{ProofFacts, check_facts, message_hash, payload};
 use referee_counter::{ADD, Action, Config, Counter, CounterRules};
@@ -25,15 +25,34 @@ const OS_PROGRAM: felt252 = 123;
 const GAME: felt252 = 17;
 const PK_A: felt252 = 0x1a2b3c;
 const PK_B: felt252 = 0x4d5e6f;
+const PK_REF: felt252 = 0x7e7e7e;
 const RNG_LEN: u32 = 16;
 
 pub fn terms(channel: ContractAddress, game_id: felt252, prover: ContractAddress) -> Terms<Config> {
+    terms_for(channel, game_id, prover, false)
+}
+
+/// The mock channel's terms; a timed game has a referee (PK_REF) and a 30 s
+/// turn, 60 s bank and 2 s increment.
+pub fn terms_for(
+    channel: ContractAddress, game_id: felt252, prover: ContractAddress, timed: bool,
+) -> Terms<Config> {
+    let clock = if timed {
+        Option::Some(
+            TimeControl {
+                referee: public_key(PK_REF), turn_ms: 30000, bank_ms: 60000, increment_ms: 2000,
+            },
+        )
+    } else {
+        Option::None
+    };
     Terms {
         chain_id: 'SN_SEPOLIA',
         channel: channel.into(),
         game_id,
         prover: prover.into(),
         response_seconds: 3600,
+        clock,
         players: array![4, 5].span(),
         keys: array![public_key(PK_A), public_key(PK_B)].span(),
         rng_tips: array![chain_value(0x5eed0, RNG_LEN), chain_value(0x5eed1, RNG_LEN)].span(),
@@ -42,12 +61,13 @@ pub fn terms(channel: ContractAddress, game_id: felt252, prover: ContractAddress
 }
 
 pub fn opening(terms: @Terms<Config>) -> Envelope<Counter> {
-    open::<CounterRules>(terms.config, *terms.rng_tips)
+    open::<CounterRules>(terms)
 }
 
 #[starknet::interface]
 trait IMockChannel<T> {
     fn configure(ref self: T, prover: ContractAddress);
+    fn set_timed(ref self: T, timed: bool);
     fn snapshot(self: @T, game_id: felt252) -> (Terms<Config>, u32, felt252, u64);
     fn accept_verified(
         ref self: T,
@@ -72,6 +92,7 @@ mod MockChannel {
     #[storage]
     struct Storage {
         prover: ContractAddress,
+        timed: bool,
         accepted: felt252,
     }
 
@@ -81,8 +102,14 @@ mod MockChannel {
             self.prover.write(prover);
         }
 
+        fn set_timed(ref self: ContractState, timed: bool) {
+            self.timed.write(timed);
+        }
+
         fn snapshot(self: @ContractState, game_id: felt252) -> (Terms<Config>, u32, felt252, u64) {
-            let terms = super::terms(get_contract_address(), game_id, self.prover.read());
+            let terms = super::terms_for(
+                get_contract_address(), game_id, self.prover.read(), self.timed.read(),
+            );
             let anchor = state_hash::<CounterRules>(@super::opening(@terms));
             (terms, 0, anchor, 10)
         }
@@ -127,13 +154,20 @@ fn add(amount: u8) -> Move<Action> {
     Move::Play(Action { kind: ADD, amount })
 }
 
-/// Alice reaches 20 first. Returns the steps, each seat's final signature and
-/// the end state.
-fn signed_game(terms: @Terms<Config>) -> (Span<Move<Action>>, Span<Signature>, Envelope<Counter>) {
+/// Alice reaches 20 first, every 10 s in a timed game. Returns the batch
+/// (each seat's final signature, and the stamps and the referee's attestation
+/// in a timed game) and the end state.
+fn signed_game(terms: @Terms<Config>) -> (Batch<Action>, Envelope<Counter>) {
     let steps = array![add(3), add(3), add(3), add(3), add(3), add(3), add(2)].span();
+    let stamps = if terms.clock.is_some() {
+        array![1000, 11000, 21000, 31000, 41000, 51000, 61000].span()
+    } else {
+        array![].span()
+    };
     let context = context_hash::<CounterRules>(terms);
     let mut env = opening(terms);
     let mut finals = no_acks();
+    let mut i = 0;
     for step in steps {
         let seat = actor::<CounterRules>(@env, step);
         let message = action_hash::<CounterRules>(context, env.seq, env.transcript, step);
@@ -143,15 +177,52 @@ fn signed_game(terms: @Terms<Config>) -> (Span<Move<Action>>, Span<Signature>, E
             } else {
                 array![*finals.at(0), sign(message, PK_B)].span()
             };
-        env = apply_steps::<CounterRules>(context, terms.config, env, (), array![*step].span());
+        let stamp = if stamps.len() == 0 {
+            stamps
+        } else {
+            stamps.slice(i, 1)
+        };
+        env = apply_steps::<CounterRules>(context, terms, env, (), array![*step].span(), stamp);
+        i += 1;
     }
-    (steps, finals, env)
+    let attestation = match env.clock {
+        Option::Some(clock) => sign(
+            stamp_hash::<CounterRules>(context, env.seq, env.transcript, @clock), PK_REF,
+        ),
+        Option::None => Signature { r: 0, s: 0 },
+    };
+    (Batch { steps, stamps, signatures: finals, attestation }, env)
+}
+
+/// Run `__execute__` as the OS runs a zero-fee virtual invoke.
+fn execute_virtual(
+    prover: ContractAddress,
+    channel: ContractAddress,
+    start: Envelope<Counter>,
+    batch: Batch<Action>,
+) {
+    start_cheat_caller_address(prover, 0.try_into().unwrap());
+    start_cheat_transaction_version(prover, 3);
+    let free = array![
+        ResourcesBounds { resource: 'L1_GAS', max_amount: 0, max_price_per_unit: 0 },
+        ResourcesBounds { resource: 'L2_GAS', max_amount: 0, max_price_per_unit: 0 },
+        ResourcesBounds { resource: 'L1_DATA', max_amount: 0, max_price_per_unit: 0 },
+    ];
+    cheat_resource_bounds(prover, free.span(), CheatSpan::TargetCalls(1));
+    IVirtualCounterDispatcher { contract_address: prover }
+        .__execute__(channel, GAME, 0, start, batch);
 }
 
 fn transition(
     prover: ContractAddress, channel: ContractAddress, end: @Envelope<Counter>,
 ) -> Array<felt252> {
-    let terms = terms(channel, GAME, prover);
+    transition_for(prover, channel, end, false)
+}
+
+fn transition_for(
+    prover: ContractAddress, channel: ContractAddress, end: @Envelope<Counter>, timed: bool,
+) -> Array<felt252> {
+    let terms = terms_for(channel, GAME, prover, timed);
     payload::<
         CounterRules,
     >(
@@ -191,7 +262,7 @@ fn no_acks() -> Span<Signature> {
 }
 
 fn end_state(prover: ContractAddress, channel: ContractAddress) -> Envelope<Counter> {
-    let (_, _, end) = signed_game(@terms(channel, GAME, prover));
+    let (_, end) = signed_game(@terms(channel, GAME, prover));
     end
 }
 
@@ -199,20 +270,11 @@ fn end_state(prover: ContractAddress, channel: ContractAddress) -> Envelope<Coun
 fn virtual_replay_emits_the_message_settle_accepts() {
     let (prover, mock) = setup();
     let terms = terms(mock.contract_address, GAME, prover.contract_address);
-    let (steps, signatures, end) = signed_game(@terms);
+    let (batch, end) = signed_game(@terms);
 
     // Proving path: the OS runs __execute__ as a zero-fee virtual invoke.
     let mut spy = spy_messages_to_l1();
-    start_cheat_caller_address(prover.contract_address, 0.try_into().unwrap());
-    start_cheat_transaction_version(prover.contract_address, 3);
-    let free = array![
-        ResourcesBounds { resource: 'L1_GAS', max_amount: 0, max_price_per_unit: 0 },
-        ResourcesBounds { resource: 'L2_GAS', max_amount: 0, max_price_per_unit: 0 },
-        ResourcesBounds { resource: 'L1_DATA', max_amount: 0, max_price_per_unit: 0 },
-    ];
-    cheat_resource_bounds(prover.contract_address, free.span(), CheatSpan::TargetCalls(1));
-    let virtual = IVirtualCounterDispatcher { contract_address: prover.contract_address };
-    virtual.__execute__(mock.contract_address, GAME, 0, opening(@terms), steps, signatures);
+    execute_virtual(prover.contract_address, mock.contract_address, opening(@terms), batch);
     let expected = transition(prover.contract_address, mock.contract_address, @end);
     spy
         .assert_sent(
@@ -238,9 +300,47 @@ fn virtual_replay_emits_the_message_settle_accepts() {
 fn execute_is_only_for_virtual_invokes() {
     let (prover, mock) = setup();
     let terms = terms(mock.contract_address, GAME, prover.contract_address);
-    let (steps, signatures, _) = signed_game(@terms);
+    let (batch, _) = signed_game(@terms);
     let virtual = IVirtualCounterDispatcher { contract_address: prover.contract_address };
-    virtual.__execute__(mock.contract_address, GAME, 0, opening(@terms), steps, signatures);
+    virtual.__execute__(mock.contract_address, GAME, 0, opening(@terms), batch);
+}
+
+#[test]
+fn timed_replay_emits_the_attested_transition() {
+    let (prover, mock) = setup();
+    mock.set_timed(true);
+    let terms = terms_for(mock.contract_address, GAME, prover.contract_address, true);
+    let (batch, end) = signed_game(@terms);
+    let mut spy = spy_messages_to_l1();
+    execute_virtual(prover.contract_address, mock.contract_address, opening(@terms), batch);
+    let expected = transition_for(prover.contract_address, mock.contract_address, @end, true);
+    spy
+        .assert_sent(
+            @array![
+                (
+                    prover.contract_address,
+                    MessageToL1 { to_address: 0.try_into().unwrap(), payload: expected },
+                ),
+            ],
+        );
+}
+
+#[test]
+#[should_panic(expected: ('Invalid session signature', 'ENTRYPOINT_FAILED'))]
+fn timed_replay_needs_the_referee() {
+    let (prover, mock) = setup();
+    mock.set_timed(true);
+    let terms = terms_for(mock.contract_address, GAME, prover.contract_address, true);
+    let (batch, end) = signed_game(@terms);
+    let context = context_hash::<CounterRules>(@terms);
+    let clock = end.clock.unwrap();
+    let forged = sign(stamp_hash::<CounterRules>(context, end.seq, end.transcript, @clock), PK_A);
+    execute_virtual(
+        prover.contract_address,
+        mock.contract_address,
+        opening(@terms),
+        Batch { attestation: forged, ..batch },
+    );
 }
 
 #[test]

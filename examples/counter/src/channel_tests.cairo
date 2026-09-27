@@ -7,22 +7,21 @@ use referee::{
     state_ref,
 };
 use crate::fixtures::{CONTEXT, expected, finals, steps, terms};
+use crate::tests::batch;
 use crate::{ADD, Action, Counter, CounterRules};
 
 const WINDOW: u32 = 3600;
 const T0: u64 = 1000;
 
 fn opening() -> Envelope<Counter> {
-    let t = terms();
-    open::<CounterRules>(@t.config, t.rng_tips)
+    open::<CounterRules>(@terms())
 }
 
 /// State after the first `n` signed fixture steps.
 fn after(n: u32) -> StateRef {
-    let t = terms();
     let end = replay::<
         CounterRules,
-    >(CONTEXT, t.keys, @t.config, opening(), (), steps().span().slice(0, n), finals(0, n).span());
+    >(CONTEXT, @terms(), opening(), (), batch(steps().span().slice(0, n), finals(0, n).span()));
     state_ref::<CounterRules>(@end)
 }
 
@@ -150,9 +149,8 @@ fn unfinished_dispute_moves_to_forced_play() {
 #[test]
 fn due_seat_plays_onchain_and_waiting_seat_claims_timeout() {
     // Seat 0 plays its forced step exactly as `protocol::force` computes it.
-    let t = terms();
     let steps = array![Move::Play(Action { kind: ADD, amount: 3 })];
-    let env = force::<CounterRules>(CONTEXT, @t.config, opening(), (), 0, steps.span());
+    let env = force::<CounterRules>(CONTEXT, @terms(), opening(), (), 0, steps.span());
     let end = state_ref::<CounterRules>(@env);
     // Unsigned forced steps extend the transcript exactly like signed ones.
     assert_eq!(end, after(1));

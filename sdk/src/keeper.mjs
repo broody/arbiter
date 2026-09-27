@@ -1,13 +1,13 @@
 // Client for a referee keeper (`@referee/sdk/keeper`): archive a session, send
 // our steps and fetch the other seat's, over the keeper's HTTP API. The keeper
 // cannot forge steps (this client verifies each one it applies) but it can
-// withhold them, so a client keeps its own copy (`@referee/sdk/store`).
-import { Session, felt, hex } from './index.mjs';
+// withhold them, so a client keeps its own copy (`@referee/sdk/store`). A
+// keeper that referees a timed game also stamps each step it receives.
+import { Session, felt, hex, signedStep } from './index.mjs';
 import { parse, stringify } from './store.mjs';
 
 const check = (condition, message) => { if (!condition) throw Error(message); };
 const path = ids => `/games/${hex(ids.channel)}/${hex(ids.game_id)}`;
-const signed = ({ step, signature }) => ({ step, signature });
 
 export class KeeperClient {
   constructor(url, { fetch = globalThis.fetch } = {}) {
@@ -21,8 +21,18 @@ export class KeeperClient {
   /** Send `session`'s steps from seq `from` (default: every step). */
   send(session, from = session.start.seq) {
     from = Math.max(from, session.start.seq);
-    const steps = session.steps.slice(from - session.start.seq).map(signed);
+    const steps = session.steps.slice(from - session.start.seq).map(signedStep);
     return this.#call('POST', `${path(session.terms)}/steps`, { from, steps });
+  }
+
+  /**
+   * In a timed game, send our signed step (`store.move`'s record) to the
+   * keeper that referees the game, then pull it back stamped, with anything
+   * after it, as `pull` does.
+   */
+  async submit(session, record, options = {}) {
+    await this.#call('POST', `${path(session.terms)}/steps`, { from: record.seq, steps: [signedStep(record)] });
+    return this.pull(session, options);
   }
 
   /**
@@ -43,8 +53,8 @@ export class KeeperClient {
     for (const record of steps) {
       check(record.seq === session.env.seq && felt(record.transcript) === session.env.transcript,
         `The keeper holds another branch at seq ${record.seq}`);
-      if (store) await store.receive(session, signed(record));
-      else session.receive(signed(record));
+      if (store) await store.receive(session, signedStep(record));
+      else session.receive(signedStep(record));
     }
     return steps;
   }

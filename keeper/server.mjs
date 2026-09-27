@@ -4,7 +4,9 @@
 // Its trust model is the prover gateway's: it accepts only steps that verify,
 // so it cannot forge a move, and both players keep their own copies, so it can
 // delay or withhold but not rewrite. It never holds player keys; its own
-// account only pays for calls anyone may send.
+// account only pays for calls anyone may send. With a referee key it also
+// referees the timed games that name that key: it stamps their steps and flags
+// a seat whose time runs out, which players trust it to do on time.
 //
 //   node keeper/server.mjs CONFIG_JSON      (see config.example.json)
 //
@@ -13,7 +15,7 @@
 //   GET  /games                             archived game ids
 //   GET  /games/:channel/:game              { record, start, seq, transcript }
 //   GET  /games/:channel/:game/steps        ?from=SEQ&wait=SECONDS (long poll)
-//   POST /games/:channel/:game/steps        { from, steps: [{ step, signature }] }
+//   POST /games/:channel/:game/steps        { from, steps: [{ step, signature, stamp?, attestation? }] }
 //   GET  /games/:channel/:game/evidence     equivocation evidence
 //   GET  /info, GET /health
 import { createServer } from 'node:http';
@@ -57,6 +59,12 @@ export async function loadConfig(raw, { base = process.cwd(), env = process.env 
       prover: g.prover ? { url: g.prover.url, class_hash: BigInt(g.prover.class_hash) } : null,
     });
   }
+  if (config.referee) {
+    const name = config.referee.private_key_env ?? 'KEEPER_REFEREE_KEY';
+    const privateKey = env[name];
+    if (!privateKey) throw Error(`Set ${name} to the referee's private key`);
+    config.referee = { privateKey };
+  }
   if (config.account) {
     const privateKey = env[config.account.private_key_env ?? 'KEEPER_PRIVATE_KEY'];
     if (!privateKey) throw Error(`Set ${config.account.private_key_env ?? 'KEEPER_PRIVATE_KEY'} to the keeper account's private key`);
@@ -72,14 +80,14 @@ export async function loadConfig(raw, { base = process.cwd(), env = process.env 
  * either, a keeper archives unverified terms and does not watch, which suits
  * tests only. Returns { url, archive, watcher, close }.
  */
-export async function startKeeper(config, { backend, chain, log = entry => console.log(JSON.stringify(entry)) } = {}) {
+export async function startKeeper(config, { backend, chain, now = Date.now, log = entry => console.log(JSON.stringify(entry)) } = {}) {
   backend ??= await fileBackend(config.store);
   chain ??= config.rpc_url ? starknetChain({ rpcUrl: config.rpc_url, account: config.account }) : null;
   if (chain?.chainId && (await chain.chainId()) !== config.chain) throw Error(`RPC node is not on ${config.chain_id}`);
   const entries = config.entries;
   const archive = await Archive.open(backend, {
     games: [...entries].map(([channel, entry]) => [channel, entry.game]), chainId: config.chain,
-    maxSteps: config.max_steps, maxGames: config.max_games, log,
+    maxSteps: config.max_steps, maxGames: config.max_games, referee: config.referee ?? null, now, log,
     verify: chain && (async session => {
       const channel = await chain.channel(entries.get(felt(session.terms.channel)), session.terms.game_id);
       if (channel.status === WAITING || felt(channel.context) !== session.context) fail(409, 'The terms differ from the channel onchain');
@@ -103,6 +111,7 @@ export async function startKeeper(config, { backend, chain, log = entry => conso
   };
   const info = () => ({
     chain_id: config.chain_id, watching: watcher !== null, sending: Boolean(chain?.canSend),
+    referee: archive.referee === null ? null : hex(archive.referee),
     games: [...entries.values()].map(e => ({ channel: hex(e.channel), tag: e.game.tag, prover: Boolean(e.prover) })),
     limits: { max_games: config.max_games, max_steps: config.max_steps, max_body_bytes: config.max_body_bytes,
       rate_per_minute: config.rate_per_minute, max_wait_seconds: config.max_wait_seconds },
@@ -182,6 +191,7 @@ export async function startKeeper(config, { backend, chain, log = entry => conso
     url: `http://${address.includes(':') ? `[${address}]` : address}:${port}`, archive, watcher, info,
     close: async () => {
       await watcher?.stop();
+      archive.stop();
       server.closeAllConnections();
       await new Promise(done => server.close(done));
       await backend.close?.();

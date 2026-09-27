@@ -56,8 +56,9 @@ test('proving calldata is the adapter __execute__ layout with final signatures o
   const calldata = provingCalldata(session, 2);
   const envelope = encodeEnvelope(counter, session.start);
   const signatures = [session.steps[2].signature, session.steps[1].signature];
+  // An untimed batch: no stamps, the final signatures and a zero attestation.
   assert.deepEqual(calldata, [terms.channel, terms.game_id, 2n, ...envelope,
-    ...encodeSteps(counter, session.steps.map(s => s.step)), ...encodeSignatures(signatures)]);
+    ...encodeSteps(counter, session.steps.map(s => s.step)), 0n, ...encodeSignatures(signatures), 0n, 0n]);
   const tx = provingTransaction({ session, epoch: 2, nonce: 5 });
   assert.deepEqual(tx.calldata, calldata.map(hex));
   assert.equal(BigInt(tx.sender_address), terms.prover);
@@ -70,12 +71,13 @@ test('submit_history replays from the start against final signatures', async () 
   const call = historyCall(session, 4);
   assert.deepEqual([call.contractAddress, call.entrypoint], [hex(terms.channel), 'submit_history']);
   assert.deepEqual(call.calldata.map(BigInt), [terms.game_id, 4n, ...encodeEnvelope(counter, session.start),
-    ...encodeSteps(counter, session.steps.map(s => s.step)), ...encodeSignatures(signatures),
+    ...encodeSteps(counter, session.steps.map(s => s.step)), 0n, ...encodeSignatures(signatures), 0n, 0n,
     ...encodeSignatures([ZERO_SIGNATURE, ZERO_SIGNATURE])]);
   assert.equal(historyCall(session, 4, { entrypoint: 'submit' }).entrypoint, 'submit');
 
   const ref = [0x11n, 5n, 3n, 1n, 0n, 0n, 0n];
-  const stored = [terms.game_id, 0xa11cen, 0xb0bn, 1n, 2n, 3n, 4n, terms.prover, 1n, 20n, 2n, 3n, 0xc0n, 3600n, ...ref, ...ref, 55n, 900n, 0n, 0n, 0n];
+  const stored = [terms.game_id, 0xa11cen, 0xb0bn, 1n, 2n, 3n, 4n, terms.prover, 1n, 20n, 2n, 3n, 0xc0n, 3600n, 0n, 0n, 0n, 0n,
+    ...ref, ...ref, 55n, 900n, 0n, 0n, 0n];
   const provider = { callContract: async (c, block) => {
     assert.deepEqual([c.contractAddress, c.entrypoint, c.calldata, block], [hex(terms.channel), 'get_channel', [hex(terms.game_id)], 'latest']);
     return stored.map(hex);

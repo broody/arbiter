@@ -1,5 +1,5 @@
 use referee::{
-    Envelope, Move, REASON_RESIGN, Signature, apply_steps, approve_all, checkpoint_hash,
+    Batch, Envelope, Move, REASON_RESIGN, Signature, apply_steps, approve_all, checkpoint_hash,
     context_hash, force, open, replay, rng_next, state_hash,
 };
 use crate::fixtures::{
@@ -9,8 +9,7 @@ use crate::fixtures::{
 use crate::{ADD, Action, Counter, CounterRules, GAMBLE};
 
 fn start() -> Envelope<Counter> {
-    let t = terms();
-    open::<CounterRules>(@t.config, t.rng_tips)
+    open::<CounterRules>(@terms())
 }
 
 /// Chain value at `index` (the tip is at RNG_LEN).
@@ -33,13 +32,16 @@ fn gamble(entropy: felt252) -> Move<Action> {
 }
 
 fn run(steps: Array<Move<Action>>) -> Envelope<Counter> {
-    let t = terms();
-    apply_steps::<CounterRules>(CONTEXT, @t.config, start(), (), steps.span())
+    apply_steps::<CounterRules>(CONTEXT, @terms(), start(), (), steps.span(), array![].span())
+}
+
+/// An untimed batch: no stamps and no attestation.
+pub fn batch(steps: Span<Move<Action>>, signatures: Span<Signature>) -> Batch<Action> {
+    Batch { steps, stamps: array![].span(), signatures, attestation: Signature { r: 0, s: 0 } }
 }
 
 fn replay_all(steps: Span<Move<Action>>, signatures: Array<Signature>) -> Envelope<Counter> {
-    let t = terms();
-    replay::<CounterRules>(CONTEXT, t.keys, @t.config, start(), (), steps, signatures.span())
+    replay::<CounterRules>(CONTEXT, @terms(), start(), (), batch(steps, signatures.span()))
 }
 
 #[test]
@@ -64,20 +66,11 @@ fn checkpoint_approvals_verify() {
 fn replay_splits_at_any_point() {
     // Replaying a prefix and then the suffix from the prefix's end equals one
     // replay: checkpoints do not change the result.
-    let t = terms();
     let all = steps().span();
     let mid = replay_all(all.slice(0, 4), finals(0, 4));
     let end = replay::<
         CounterRules,
-    >(
-        CONTEXT,
-        t.keys,
-        @t.config,
-        mid,
-        (),
-        all.slice(4, all.len() - 4),
-        finals(4, all.len()).span(),
-    );
+    >(CONTEXT, @terms(), mid, (), batch(all.slice(4, all.len() - 4), finals(4, all.len()).span()));
     assert_eq!(end, expected());
 }
 
@@ -130,16 +123,14 @@ fn resign_awards_the_other_seat() {
 #[test]
 #[should_panic(expected: 'Not your step')]
 fn forced_steps_belong_to_the_caller() {
-    let t = terms();
-    force::<CounterRules>(CONTEXT, @t.config, start(), (), 1, array![add(1)].span());
+    force::<CounterRules>(CONTEXT, @terms(), start(), (), 1, array![add(1)].span());
 }
 
 #[test]
 fn forced_resignation_names_its_seat() {
-    let t = terms();
     let end = force::<
         CounterRules,
-    >(CONTEXT, @t.config, start(), (), 1, array![Move::Resign(1)].span());
+    >(CONTEXT, @terms(), start(), (), 1, array![Move::Resign(1)].span());
     assert_eq!(end.outcome.winner, 1);
 }
 
@@ -171,12 +162,11 @@ fn reveal_must_come_from_the_committed_chain() {
 #[should_panic(expected: 'Not your step')]
 fn requester_cannot_reveal_for_the_opponent() {
     // The reveal belongs to seat 1: even its valid value is not seat 0's step.
-    let t = terms();
     force::<
         CounterRules,
     >(
         CONTEXT,
-        @t.config,
+        @terms(),
         start(),
         (),
         0,

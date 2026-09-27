@@ -1,8 +1,9 @@
 # Referee design
 
-Status: **draft, 2026-09-26**. Built and tested: the core crate (protocol and
-channel state machine), the Dojo binding, the JS SDK mirror, and the counter
-example as both a pure game and a Dojo world. Everything marked *planned* is not.
+Status: **draft, 2026-09-27**. Built and tested: the core crate (protocol,
+optional referee clocks and channel state machine), the Dojo binding, the JS
+SDK mirror, and the counter example as both a pure game and a Dojo world.
+Everything marked *planned* is not.
 
 Referee lets two players play a turn-based game offchain with signed moves and
 settle the result on Starknet. There is no transaction per move. A game supplies
@@ -16,12 +17,12 @@ Hashfront (`~/development/hashfront`, a tactics game with combat randomness).
 
 | Layer | Status | Depends on | Purpose |
 |---|---|---|---|
-| `core` (Cairo) | built | nothing | `GameRules`, protocol envelope, hashing, signatures, replay, forced steps, randomness |
+| `core` (Cairo) | built | nothing | `GameRules`, protocol envelope, hashing, signatures, replay, forced steps, randomness, referee clocks |
 | channel state machine (`referee::channel`) | built | `core` | Pure functions: create, join, receive a candidate, dispute, resolve, forced play, timeout, resume, resign |
 | `referee_dojo` (Cairo) | built | `core`, Dojo | `ChannelGame`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint. Games list the models in `build-external-contracts` |
 | `referee_testing` (Cairo) | built | `core` | Test-only STARK-curve signer and hash-chain helper |
 | `referee_adapter` (Cairo 2.18) | built, tested with mocked proof facts | `core` | Generic logic for a SNIP-36 account contract that proves a replay in the virtual OS and relays it to the channel |
-| `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, fixtures; native proving client (`@referee/sdk/proving`); session store and signing guard (`@referee/sdk/store`) |
+| `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, clocks and `Referee`, fixtures; native proving client (`@referee/sdk/proving`); session store and signing guard (`@referee/sdk/store`) |
 | keeper (`keeper/`) | built, tested on Katana | `sdk` | Archives and forwards verified steps, records equivocation, answers disputes, resolves and settles |
 
 `core` has no Dojo or storage dependency and builds on both Cairo 2.13 (Dojo)
@@ -63,7 +64,7 @@ Rules must be deterministic and must panic on illegal actions.
 ## Protocol
 
 **Envelope.** The library wraps the game state:
-`Envelope { seq, transcript, support_turn, last_seat, pending, rng_heads, outcome, game }`.
+`Envelope { seq, transcript, support_turn, last_seat, pending, rng_heads, clock, outcome, game }`.
 
 **Moves.** A step is a `Move<A>`:
 
@@ -74,8 +75,9 @@ Rules must be deterministic and must panic on illegal actions.
 | `Reveal(value)` | the named seat's next chain value | the seat the pending request names |
 | `Recommit(tip)` | a new chain tip | the due seat |
 | `Resign(seat)` | the resigning seat | named, since either seat may resign at any time |
+| `Flag` | nothing | the referee of a timed game (`REFEREE`), once the due seat's time ran out |
 
-Every game gets the last four for free. The seat is implied by the state
+Every game gets the last five for free. The seat is implied by the state
 (`actor`), so only `Resign` carries one, and only `PlayRandom` carries entropy.
 `Play` of an action that requests randomness fails with `'Randomness requested'`,
 and `PlayRandom` of one that doesn't fails with `'Unexpected entropy'`. A
@@ -84,8 +86,8 @@ entropy }` with a fixed-width action, plus a signature per step).
 
 **Messages.** A step's message is
 `signing_hash(TAG, 'REFEREE_ACTION_V1', context, seq, transcript, move)`.
-`PROTOCOL_VERSION` 2 is in the context hash, so v1 signatures never verify
-under v2.
+`PROTOCOL_VERSION` 3 is in the context hash, so older signatures never
+verify under it.
 - It binds the transcript, not the full state. State is determined by the
   anchor plus the transcript, and hashing a large state on every step is costly
   to prove.
@@ -95,8 +97,8 @@ under v2.
   `REFEREE_*_V1` tag, and masked to 250 bits for STARK-curve ECDSA.
 
 **Context.** The context hash covers `Terms<Config>`: chain id, channel, game id,
-prover, response window, and per-seat wallets, session keys and randomness-chain
-tips, plus the game config.
+prover, response window, time control (`None` for an untimed game), and per-seat
+wallets, session keys and randomness-chain tips, plus the game config.
 
 **Final-signature authentication** (from Surround). `replay` takes a batch of
 moves and exactly one signature per seat: that seat's last signature in the
@@ -124,11 +126,60 @@ acknowledged.
 - `Recommit` replaces the due seat's tip before its chain runs out. It is
   impossible while a reveal is pending.
 
+**Clocks** (optional, per game). `Terms.clock` is an
+`Option<TimeControl { referee, turn_ms, bank_ms, increment_ms }>`. Players sign
+moves; the referee signs time.
+- **Stamps.** The referee stamps every offchain step with its own clock, in
+  milliseconds, and after each step signs
+  `signing_hash(TAG, 'REFEREE_STAMP_V1', context, seq, transcript, clock)`.
+  Stamps stay out of the transcript, so a seat's signature never waits on the
+  referee.
+- **Charging.** `Envelope.clock` is `Option<Clock { banks, turn, stamp }>`. A
+  step charges the time since the last stamp to the seat on the clock (`due`):
+  the turn's allowance first, then its bank.
+  - A turn is a run of steps while `GameRules::due` stays the same. When it
+    changes, the finished turn's seat gains `increment_ms` and the next turn
+    starts with `turn_ms`.
+  - A pending reveal is timed on its own, with a fresh `turn_ms`, so
+    withholding a reveal burns the revealer's clock.
+- **Flags.** A step after the seat's time ran out fails with `'Flag fell'`. The
+  referee's `Flag` is valid only then, and the due seat loses with
+  `REASON_TIMEOUT`. Resign, flag and `claim_timeout` share `forfeit`, the one
+  place a protocol with more seats would turn into an elimination.
+- **Replay.** `replay` takes a `Batch { steps, stamps, signatures, attestation }`.
+  The referee's last attestation covers every stamp, since the clocks depend on
+  all of them, so one attestation reaches calldata. An untimed batch has no
+  stamps and a zero attestation. The tests `timed_replay_matches_sdk`,
+  `intermediate_attestation_is_not_a_final_one` and
+  `tampered_stamp_breaks_the_attestation` cover this.
+- **Pauses.** An unstamped step (onchain `force`) pauses the clock, and the next
+  stamp restarts it without charging anyone. A timed game reaches FORCED only
+  when the referee is down, since a live referee flags a staller inside the
+  dispute window. Forced play therefore runs untimed, on the channel's windows.
+- **Channel.** Unchanged: a flag is a finished history like any other, and the
+  flagged seat cannot outrank it without the referee attesting a competing
+  branch.
+- **Trust.** The referee cannot forge, reorder or settle anything. It can skew
+  time or censor, so an honest seat's worst case is losing on time. Two
+  attestations at one seq with different transcripts are evidence of
+  equivocation. Each game opts in: the referee's key is in the terms, which
+  both seats accept by joining.
+- **Settings.** Surround's old per-turn clock is `turn_ms` 60 s and no bank;
+  blitz 3+2 is `bank_ms` 180 s and `increment_ms` 2 s; Hashfront's turn timers
+  are a turn allowance plus a small bank. Each setting is at most 30 days.
+- **Cost.** An untimed game adds 1 felt to the terms and the envelope and 3
+  felts per replay. A timed game adds 1 felt per step, the clock to the
+  envelope, and one ECDSA check per replay or proof.
+- **`Referee`** (`@referee/sdk`) stamps steps as they arrive, flags, and
+  reports the `deadline()` for a timer. Its time resumes at the last stamp when
+  it is made, so a restarted referee never charges seats for its own downtime.
+
 **Replay and force.**
-- `replay` applies moves from an anchor against each seat's final signature.
+- `replay` applies moves from an anchor against each seat's final signature
+  and, in a timed game, the referee's final attestation.
 - `force` applies unsigned moves that must all belong to one seat, for callers
   that authenticate that seat themselves, such as a forced onchain turn checked
-  against the wallet caller.
+  against the wallet caller. Its steps are unstamped.
 - `apply_steps` applies unsigned moves from any seat, for clients and tests
   that already verified every signature.
 - All three extend the transcript identically.
@@ -174,7 +225,10 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 - The game adds `referee_dojo::models::{m_ChannelGame, m_ProverAllowed, e_ChannelUpdated}`
   to `build-external-contracts`, and `sozo` registers them in the game's namespace.
 - `ChannelGame` stores 2 seats (wallet, session key, randomness tip), the prover,
-  the serialized game `Config`, the `Channel` fields and the result.
+  the time control, the serialized game `Config`, the `Channel` fields and the
+  result.
+- `create` takes an `Option<TimeControl>`. A referee key must be a curve point
+  and neither seat's session key.
 - Callers are authenticated by wallet for create, join, cancel, dispute, forced
   play, timeout and resign. `submit_history` and `resolve` are open to anyone, for
   example a keeper. `accept_verified` accepts only the game's prover.
@@ -208,7 +262,7 @@ its constructor.
   raw syscalls (`snapshot`, `accept_verified`), so it works with any
   referee_dojo game system.
 - **Calldata convention.** A game's adapter declares
-  `__execute__(channel, game_id, epoch, start, witness, steps, signatures)`
+  `__execute__(channel, game_id, epoch, start, witness, batch)`
   (no `witness` argument when the game's witness is `()`) and
   `settle(channel, game_id, epoch, end, acks)`, which is what the JS proving
   client builds.
@@ -258,6 +312,10 @@ marks and session keys in a backend: `indexedDbBackend` for browsers,
 - The guard is per store. Two devices holding one key do not share marks, so a
   key is used on one device at a time. The file backend locks its directory to
   one process.
+- In a timed game `move` marks and signs the step but does not apply it: the
+  client sends it to the referee and `receive`s the stamped record. `load`
+  keeps such a mark as the guard and does not re-apply it, since it has no
+  stamp.
 
 ## Keeper
 
@@ -283,9 +341,22 @@ latest verified transcript.
   Forced play and timeouts need a player's wallet, so it leaves them alone.
 - **Channel reads.** A game system exposes `get_channel(game_id)`, which
   returns the `ChannelGame` model, decoded by the SDK's `getChannel`.
+- **Referee.** With a referee key, the keeper referees the timed games whose
+  terms name that key. The relay is where steps first arrive, so it is where
+  they are stamped.
+  - Unstamped steps are stamped on arrival (`Archive.append`), and a timer
+    flags the due seat at its `deadline()`. The watcher then settles the
+    flagged game like any finished one.
+  - A late step is refused (`'Flag fell'`) and the seat flagged.
+  - It never stamps a second step at one seq, so it attests one branch.
+  - On restart it resumes each clock at its last stamp.
+  - A keeper that is not the game's referee accepts only stamped steps.
+  - This role is trusted, unlike the rest of the keeper: a delay costs the
+    delayed seat clock time, and seats cannot route around it.
 - **Tests.** `keeper/katana.sh` runs the keeper on a local Katana with the
   counter world. It answers a stale dispute and resolves it into forced play,
-  and it settles a finished game through the dispute window to SETTLED.
+  settles a finished game through the dispute window to SETTLED, and referees
+  a timed game, flagging the stalling seat and settling the flag.
 
 ## Proving strategy
 
@@ -324,6 +395,13 @@ latest verified transcript.
    resolves and settles (tested on Katana). Still to do: the proof path against
    a live prover, and cooperative checkpoint approvals (`acks`) through the
    keeper.
+9. ~~Referee clocks.~~ Done: optional per-game time controls, referee stamps
+   and flags in core, the SDK (`Referee`) and the keeper (tested on Katana).
+   Still to do: a websocket or SSE transport for bullet time controls, and a
+   referee bond that equivocation evidence can slash.
+10. More than 2 seats: endings as eliminations (`forfeit`), an outcome with
+    teams or placements, randomness that two colluding seats cannot predict,
+    and joining N seats.
 
 ## Development
 

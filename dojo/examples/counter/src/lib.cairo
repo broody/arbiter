@@ -1,6 +1,6 @@
 //! The counter game as a Dojo world. The whole channel system is one line per
 //! entrypoint on top of `referee_dojo::channel`.
-use referee::{Envelope, Move, Signature, Terms};
+use referee::{Batch, Envelope, Move, Signature, Terms, TimeControl};
 use referee_counter::{Action, Config, Counter};
 use referee_dojo::models::ChannelGame;
 use starknet::ContractAddress;
@@ -15,6 +15,7 @@ pub trait ICounterChannel<T> {
         rng_tip: felt252,
         prover: ContractAddress,
         response_seconds: u32,
+        clock: Option<TimeControl>,
     ) -> felt252;
     fn join(ref self: T, game_id: felt252, session_key: felt252, rng_tip: felt252);
     fn cancel(ref self: T, game_id: felt252);
@@ -31,8 +32,7 @@ pub trait ICounterChannel<T> {
         game_id: felt252,
         epoch: u32,
         start: Envelope<Counter>,
-        steps: Span<Move<Action>>,
-        signatures: Span<Signature>,
+        batch: Batch<Action>,
         acks: Span<Signature>,
     );
     fn open_dispute(ref self: T, game_id: felt252, epoch: u32);
@@ -57,7 +57,7 @@ pub trait ICounterChannel<T> {
 #[dojo::contract]
 pub mod channel {
     use dojo::world::WorldStorage;
-    use referee::{Envelope, Move, Signature, Terms};
+    use referee::{Batch, Envelope, Move, Signature, Terms, TimeControl};
     use referee_counter::{Action, Config, Counter, CounterRules};
     use referee_dojo::channel as binding;
     use referee_dojo::models::ChannelGame;
@@ -73,11 +73,21 @@ pub mod channel {
             rng_tip: felt252,
             prover: ContractAddress,
             response_seconds: u32,
+            clock: Option<TimeControl>,
         ) -> felt252 {
             let mut world = self.world_default();
             binding::create::<
                 CounterRules,
-            >(ref world, Config { target }, invited, session_key, rng_tip, prover, response_seconds)
+            >(
+                ref world,
+                Config { target },
+                invited,
+                session_key,
+                rng_tip,
+                prover,
+                response_seconds,
+                clock,
+            )
         }
 
         fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip: felt252) {
@@ -109,14 +119,13 @@ pub mod channel {
             game_id: felt252,
             epoch: u32,
             start: Envelope<Counter>,
-            steps: Span<Move<Action>>,
-            signatures: Span<Signature>,
+            batch: Batch<Action>,
             acks: Span<Signature>,
         ) {
             let mut world = self.world_default();
             binding::submit_history::<
                 CounterRules,
-            >(ref world, game_id, epoch, start, (), steps, signatures, acks);
+            >(ref world, game_id, epoch, start, (), batch, acks);
         }
 
         fn open_dispute(ref self: ContractState, game_id: felt252, epoch: u32) {

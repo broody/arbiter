@@ -1,7 +1,7 @@
 //! Proof adapter for the counter game: a thin account contract over
 //! `referee_adapter`. Deploy one instance per Starknet OS program and
 //! allowlist its class in the game's channel.
-use referee::{Envelope, Move, Signature};
+use referee::{Batch, Envelope, Signature};
 use referee_counter::{Action, Counter};
 use starknet::ContractAddress;
 
@@ -26,8 +26,7 @@ pub trait IVirtualCounter<T> {
         game_id: felt252,
         epoch: u32,
         start: Envelope<Counter>,
-        steps: Span<Move<Action>>,
-        signatures: Span<Signature>,
+        batch: Batch<Action>,
     ) -> felt252;
     fn __execute__(
         ref self: T,
@@ -35,14 +34,13 @@ pub trait IVirtualCounter<T> {
         game_id: felt252,
         epoch: u32,
         start: Envelope<Counter>,
-        steps: Span<Move<Action>>,
-        signatures: Span<Signature>,
+        batch: Batch<Action>,
     );
 }
 
 #[starknet::contract(account)]
 pub mod CounterProver {
-    use referee::{Envelope, Move, Signature};
+    use referee::{Batch, Envelope, Signature};
     use referee_adapter::prover;
     use referee_counter::{Action, Counter, CounterRules};
     use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
@@ -89,8 +87,7 @@ pub mod CounterProver {
             game_id: felt252,
             epoch: u32,
             start: Envelope<Counter>,
-            steps: Span<Move<Action>>,
-            signatures: Span<Signature>,
+            batch: Batch<Action>,
         ) -> felt252 {
             prover::assert_virtual();
             VALIDATED
@@ -102,10 +99,9 @@ pub mod CounterProver {
             game_id: felt252,
             epoch: u32,
             start: Envelope<Counter>,
-            steps: Span<Move<Action>>,
-            signatures: Span<Signature>,
+            batch: Batch<Action>,
         ) {
-            prover::execute::<CounterRules>(channel, game_id, epoch, start, (), steps, signatures);
+            prover::execute::<CounterRules>(channel, game_id, epoch, start, (), batch);
         }
     }
 }

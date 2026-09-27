@@ -1,5 +1,5 @@
-use referee::Outcome;
 use referee::channel::{Channel, StateRef};
+use referee::{Outcome, TimeControl};
 use starknet::ContractAddress;
 
 /// `ChannelUpdated.kind` values.
@@ -30,6 +30,15 @@ pub struct StoredRef {
     pub outcome: StoredOutcome,
 }
 
+/// A game's `Option<TimeControl>`: `referee` is zero for an untimed game.
+#[derive(Copy, Drop, Serde, Introspect, DojoStore, PartialEq, Debug)]
+pub struct StoredTimeControl {
+    pub referee: felt252,
+    pub turn_ms: u64,
+    pub bank_ms: u64,
+    pub increment_ms: u64,
+}
+
 /// One referee channel. Seat 0 is the creator, seat 1 the joiner. `config` is
 /// the game's `Config`, serialized.
 #[derive(Copy, Drop, Serde)]
@@ -49,6 +58,7 @@ pub struct ChannelGame {
     pub epoch: u32,
     pub context: felt252,
     pub response_seconds: u32,
+    pub time_control: StoredTimeControl,
     pub anchor: StoredRef,
     pub candidate: StoredRef,
     pub anchor_block: u64,
@@ -112,6 +122,39 @@ pub impl StoredIntoRef of Into<StoredRef, StateRef> {
             support_turn: self.support_turn,
             due: self.due,
             outcome: self.outcome.into(),
+        }
+    }
+}
+
+pub impl TimeControlIntoStored of Into<Option<TimeControl>, StoredTimeControl> {
+    fn into(self: Option<TimeControl>) -> StoredTimeControl {
+        match self {
+            Option::Some(t) => StoredTimeControl {
+                referee: t.referee,
+                turn_ms: t.turn_ms,
+                bank_ms: t.bank_ms,
+                increment_ms: t.increment_ms,
+            },
+            Option::None => StoredTimeControl {
+                referee: 0, turn_ms: 0, bank_ms: 0, increment_ms: 0,
+            },
+        }
+    }
+}
+
+pub impl StoredIntoTimeControl of Into<StoredTimeControl, Option<TimeControl>> {
+    fn into(self: StoredTimeControl) -> Option<TimeControl> {
+        if self.referee == 0 {
+            Option::None
+        } else {
+            Option::Some(
+                TimeControl {
+                    referee: self.referee,
+                    turn_ms: self.turn_ms,
+                    bank_ms: self.bank_ms,
+                    increment_ms: self.increment_ms,
+                },
+            )
         }
     }
 }

@@ -103,6 +103,10 @@ test('config loads game codecs and needs the account key from the environment', 
   await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [GAME], account }, { base, env: {} }), /Set TEST_KEEPER_KEY/);
   const signing = await loadConfig({ chain_id: 'SN_TEST', games: [GAME], account }, { base, env: { TEST_KEEPER_KEY: '0x1' } });
   assert.deepEqual(signing.account, { address: '0xabc', privateKey: '0x1', maxFee: 1000n });
+  const referee = { private_key_env: 'TEST_REFEREE_KEY' };
+  await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [GAME], referee }, { base, env: {} }), /Set TEST_REFEREE_KEY/);
+  assert.deepEqual((await loadConfig({ chain_id: 'SN_TEST', games: [GAME], referee }, { base, env: { TEST_REFEREE_KEY: '0x7e' } })).referee,
+    { privateKey: '0x7e' });
   await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [{ ...GAME, export: 'nope' }] }, { base }), /no game codec named nope/);
   await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [] }, { base }), /at least one/);
 });

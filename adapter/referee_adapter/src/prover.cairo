@@ -1,6 +1,6 @@
 use core::num::traits::Zero;
 use core::poseidon::poseidon_hash_span;
-use referee::{Envelope, GameRules, Move, Signature, Terms, context_hash, replay, state_hash};
+use referee::{Batch, Envelope, GameRules, Signature, Terms, context_hash, replay, state_hash};
 use starknet::syscalls::{
     call_contract_syscall, get_class_hash_at_syscall, get_execution_info_v3_syscall,
     send_message_to_l1_syscall,
@@ -44,7 +44,8 @@ pub fn message_hash(prover: felt252, payload: Span<felt252>) -> felt252 {
 }
 
 /// Virtual `__execute__`: replay steps from the anchor against each seat's
-/// final signature and emit the transition message for the prover to prove.
+/// final signature (and, in a timed game, the referee's attestation of the
+/// stamps) and emit the transition message for the prover to prove.
 pub fn execute<
     impl R: GameRules,
     +Serde<R::Config>,
@@ -63,14 +64,13 @@ pub fn execute<
     epoch: u32,
     start: Envelope<R::State>,
     witness: R::Witness,
-    steps: Span<Move<R::Action>>,
-    signatures: Span<Signature>,
+    batch: Batch<R::Action>,
 ) {
     assert_virtual();
     let (terms, anchor_hash, _) = checked_snapshot::<R>(channel, game_id, epoch);
     assert(state_hash::<R>(@start) == anchor_hash, 'Wrong proof anchor');
     let context = context_hash::<R>(@terms);
-    let end = replay::<R>(context, terms.keys, @terms.config, start, witness, steps, signatures);
+    let end = replay::<R>(context, @terms, start, witness, batch);
     let message = own_payload::<R>(@terms, context, epoch, anchor_hash, state_hash::<R>(@end));
     send_message_to_l1_syscall(0, message.span()).unwrap_syscall();
 }

@@ -4,7 +4,12 @@
 // it keeps the one the channel would rank higher (support_turn, then seq), and
 // it stores two different steps one seat signed at the same seq as
 // equivocation evidence.
-import { Session, actionHash, felt, hex, stateHash, verify } from '../sdk/src/index.mjs';
+//
+// With a referee key, it is also the referee of every timed game whose terms
+// name that key: it stamps each step as it arrives and flags a seat whose time
+// runs out. It never stamps a step at a seq it has already stamped, so it
+// attests one branch only.
+import { Referee, Session, actionHash, felt, hex, publicKey, signedStep, stateHash, verify } from '../sdk/src/index.mjs';
 import { SessionStore } from '../sdk/src/store.mjs';
 
 export class KeeperError extends Error {
@@ -18,26 +23,32 @@ export const outranks = (a, b) =>
 
 export const gameKey = ids => `${hex(ids.channel)}/${hex(ids.game_id)}`;
 const EVIDENCE = 'keeper/evidence/', CLOSED = 'keeper/closed/';
-const signed = ({ step, signature }) => ({ step, signature });
 const summary = session => ({ start: session.start.seq, seq: session.env.seq, transcript: session.env.transcript });
 const position = session => ({ seq: session.start.seq, transcript: session.start.transcript });
 
 /**
  * `games` maps channel addresses to game codecs. `verify(session)` checks a new
  * game's terms against its channel; `anchorHash(ids)` reads the channel's
- * anchor. Both throw a KeeperError to refuse.
+ * anchor. Both throw a KeeperError to refuse. `referee` (`{ privateKey }`)
+ * makes the archive the referee of the timed games that name its key; `now()`
+ * is its wall clock in milliseconds.
  */
 export class Archive {
   #loaded = new Map(); // key -> Session
   #locks = new Map(); // key -> promise tail
   #listeners = new Map(); // key -> Set of wake functions
+  #referees = new Map(); // key -> Referee, for the timed games this archive referees
+  #timers = new Map(); // key -> timeout that flags the due seat
 
-  constructor(backend, { games, chainId, verify: verifyTerms, anchorHash, maxSteps = 4096, maxGames = 10000, log = () => {} }) {
+  constructor(backend, { games, chainId, verify: verifyTerms, anchorHash, maxSteps = 4096, maxGames = 10000, referee = null,
+    now = Date.now, log = () => {} }) {
     this.backend = backend;
     this.store = new SessionStore(backend);
     this.games = new Map([...games].map(([channel, game]) => [felt(channel), game]));
     this.chainId = felt(chainId);
-    Object.assign(this, { verifyTerms, anchorHash, maxSteps, maxGames, log });
+    Object.assign(this, { verifyTerms, anchorHash, maxSteps, maxGames, now, log });
+    this.refereeKey = referee ? felt(referee.privateKey) : null;
+    this.referee = referee ? publicKey(referee.privateKey) : null;
     this.known = new Map(); // key -> ids
     this.closed = new Set();
   }
@@ -48,6 +59,8 @@ export class Archive {
       if (ids.chain_id === archive.chainId && archive.games.has(ids.channel)) archive.known.set(gameKey(ids), ids);
     }
     for (const key of await backend.keys(CLOSED)) archive.closed.add(key.slice(CLOSED.length));
+    // A referee resumes the clocks of the games it referees.
+    if (archive.referee !== null) for (const ids of archive.open()) await archive.session(ids);
     return archive;
   }
 
@@ -85,7 +98,7 @@ export class Archive {
         await this.verifyTerms?.(incoming);
         await this.store.save(incoming);
         this.known.set(key, ids);
-        this.#loaded.set(key, incoming);
+        this.#adopt(key, incoming);
         this.#wake(key);
         this.log({ game: key, event: 'registered', seq: incoming.env.seq });
         return { ...summary(incoming), created: true };
@@ -93,21 +106,25 @@ export class Archive {
       if (incoming.context !== current.context) fail(409, 'The game is archived with other terms');
       // Merge where one transcript's start lies in the other's history.
       if (incoming.start.seq >= current.start.seq && current.includes(position(incoming)))
-        return this.#merge(key, current, incoming.start.seq, incoming.steps.map(signed));
+        return this.#merge(key, current, incoming.start.seq, incoming.steps.map(signedStep));
       if (incoming.start.seq < current.start.seq && incoming.includes(position(current)))
-        return this.#merge(key, current, current.start.seq, incoming.steps.slice(current.start.seq - incoming.start.seq).map(signed));
+        return this.#merge(key, current, current.start.seq, incoming.steps.slice(current.start.seq - incoming.start.seq).map(signedStep));
       // Disjoint histories: only the channel's current anchor replaces the archive.
       if (!this.anchorHash || felt(await this.anchorHash(ids)) !== stateHash(game, incoming.start))
         fail(409, 'The session neither overlaps the archived transcript nor starts at the channel anchor');
       await this.store.save(incoming, { replace: true });
-      this.#loaded.set(key, incoming);
+      this.#adopt(key, incoming);
       this.#wake(key);
       this.log({ game: key, event: 'reanchored', start: incoming.start.seq, seq: incoming.env.seq });
       return { ...summary(incoming), reanchored: true };
     });
   }
 
-  /** Append signed steps (`{ step, signature }`) that start at seq `from`. */
+  /**
+   * Append signed steps (`{ step, signature }`, plus `stamp` and `attestation`
+   * in a timed game) that start at seq `from`. As the referee of a timed game,
+   * stamp each unstamped step as it arrives.
+   */
   async append(ids, from, records) {
     if (!Number.isSafeInteger(from) || !Array.isArray(records)) fail(400, 'Expected { from, steps }');
     const key = gameKey(ids);
@@ -128,8 +145,16 @@ export class Archive {
   async close(ids, status) {
     const key = gameKey(ids);
     this.closed.add(key);
+    this.#disarm(key);
+    this.#referees.delete(key);
     await this.backend.put(`${CLOSED}${key}`, { status });
   }
+
+  /** Whether this archive referees the game `ids` (once loaded). */
+  referees(ids) { return this.#referees.has(gameKey(ids)); }
+
+  /** Cancel every flag timer. */
+  stop() { for (const key of [...this.#timers.keys()]) this.#disarm(key); }
 
   /**
    * Resolves once the transcript grows past `seq` or changes branch, or after
@@ -159,8 +184,46 @@ export class Archive {
     if (this.#loaded.has(key)) return this.#loaded.get(key);
     if (!this.known.has(key)) return null;
     const session = await this.store.load(this.gameFor(ids.channel), ids);
-    this.#loaded.set(key, session);
+    this.#adopt(key, session);
     return session;
+  }
+
+  // Keep `session` as the game's transcript and, for a timed game that names
+  // our key, referee it from here. Its clock resumes where the last stamp left
+  // it, so time the archive spent without this session is not charged.
+  #adopt(key, session) {
+    this.#loaded.set(key, session);
+    this.#referees.delete(key);
+    if (this.referee !== null && session.timed && felt(session.terms.clock.referee) === this.referee && !this.closed.has(key))
+      this.#referees.set(key, new Referee(session, this.refereeKey, { now: this.now() }));
+    this.#arm(key);
+  }
+
+  // Flag the due seat when its time runs out.
+  #arm(key) {
+    this.#disarm(key);
+    const deadline = this.#referees.get(key)?.deadline() ?? null;
+    if (deadline === null) return;
+    const timer = setTimeout(() => this.#exclusive(key, () => this.#flag(key)).catch(e =>
+      this.log({ game: key, event: 'flag', outcome: 'failed', error: e.message })), Math.max(0, deadline - this.now()));
+    timer.unref?.();
+    this.#timers.set(key, timer);
+  }
+
+  #disarm(key) {
+    clearTimeout(this.#timers.get(key));
+    this.#timers.delete(key);
+  }
+
+  async #flag(key) {
+    const referee = this.#referees.get(key);
+    const record = referee?.flag(this.now());
+    if (record) {
+      await this.store.save(referee.session);
+      this.#wake(key);
+      this.log({ game: key, event: 'flagged', seq: record.seq });
+    }
+    this.#arm(key);
   }
 
   async #merge(key, current, from, records) {
@@ -176,16 +239,28 @@ export class Archive {
     for (; i < records.length && from + i < current.env.seq; i++) {
       if (!same(records[i], from + i)) return this.#fork(key, current, from + i, records.slice(i));
     }
-    let accepted = 0, error = null;
+    // As the referee, stamp each step as it arrives, and flag a seat whose
+    // time ran out before its step did.
+    const referee = this.#referees.get(key);
+    let accepted = 0, error = null, at = current.env.seq, flagged = false;
     for (const record of records.slice(i)) {
+      at = current.env.seq;
       if (current.steps.length >= this.maxSteps) { error = `Transcripts are limited to ${this.maxSteps} steps`; break; }
-      try { current.receive(record); accepted++; } catch (e) { error = e.message; break; }
+      try {
+        if (referee && record.stamp == null) {
+          const now = this.now();
+          if ((flagged = referee.flag(now) !== null)) { error = 'Flag fell: the seat\'s time ran out first'; break; }
+          referee.stamp(record, now);
+        } else current.receive(record);
+        accepted++;
+      } catch (e) { error = e.message; break; }
     }
-    if (accepted) {
+    if (accepted || flagged) {
       await this.store.save(current);
       this.#wake(key);
+      this.#arm(key);
     }
-    if (error) fail(400, `Step ${current.env.seq} rejected: ${error}`, { ...summary(current), accepted });
+    if (error) fail(400, `Step ${at} rejected: ${error}`, { ...summary(current), accepted });
     return { ...summary(current), accepted };
   }
 
@@ -196,16 +271,16 @@ export class Archive {
     const seat = terms.keys.findIndex(k => verify(message, records[0].signature, k));
     if (seat < 0) fail(400, `Invalid session signature at seq ${at}`);
     const equivocated = seat === kept.seat;
-    if (equivocated) await this.#record(key, kept, { seq: at, transcript: kept.transcript, message, seat, ...signed(records[0]) });
+    if (equivocated) await this.#record(key, kept, { seq: at, transcript: kept.transcript, message, seat, ...signedStep(records[0]) });
     // Replay the other branch from the shared prefix, as far as it verifies.
-    const branch = Session.import(game, { ...current.export(), steps: current.steps.slice(0, at - current.start.seq).map(signed) });
+    const branch = Session.import(game, { ...current.export(), steps: current.steps.slice(0, at - current.start.seq).map(signedStep) });
     for (const record of records) {
       try { branch.receive(record); } catch { break; }
     }
     if (branch.env.seq === at || !outranks(branch.env, current.env))
       fail(409, `Conflicts with the archived step at seq ${at}`, { ...summary(current), archived: kept, equivocation: equivocated });
     await this.store.save(branch, { replace: true });
-    this.#loaded.set(key, branch);
+    this.#adopt(key, branch);
     this.#wake(key);
     this.log({ game: key, event: 'switched', at, seq: branch.env.seq, equivocation: equivocated });
     return { ...summary(branch), accepted: branch.env.seq - at, switched: at };

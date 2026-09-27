@@ -8,8 +8,9 @@ use dojo::event::EventStorage;
 use dojo::model::ModelStorage;
 use dojo::world::{IWorldDispatcherTrait, WorldStorage};
 use referee::{
-    Envelope, GameRules, Move, Outcome, Signature, Terms, approve_all, channel as machine,
-    checkpoint_hash, context_hash, open, reopen_hash, replay, state_ref,
+    Batch, Envelope, GameRules, Move, Outcome, Signature, Terms, TimeControl, approve_all,
+    channel as machine, check_time_control, checkpoint_hash, context_hash, open, reopen_hash,
+    replay, state_ref,
 };
 use starknet::syscalls::get_class_hash_at_syscall;
 use starknet::{
@@ -21,7 +22,9 @@ use crate::models::{
     RECEIVED, RESIGNED, RESOLVED, RESUMED, TIMED_OUT, channel_of, with_channel,
 };
 
-/// Open a channel as seat 0. `invited` may be zero for an open game.
+/// Open a channel as seat 0. `invited` may be zero for an open game. `clock`
+/// makes the game timed, with a referee that stamps every step (`None` for an
+/// untimed game).
 pub fn create<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Drop<R::State>>(
     ref world: WorldStorage,
     config: R::Config,
@@ -30,8 +33,14 @@ pub fn create<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Drop<R::S
     rng_tip: felt252,
     prover: ContractAddress,
     response_seconds: u32,
+    clock: Option<TimeControl>,
 ) -> felt252 {
     valid_key(session_key);
+    check_time_control(@clock);
+    if let Option::Some(time) = clock {
+        valid_key(time.referee);
+        assert(time.referee != session_key, 'Referee is a seat');
+    }
     assert(rng_tip != 0, 'Invalid tip');
     valid_prover(@world, prover);
     let creator = get_caller_address();
@@ -56,6 +65,7 @@ pub fn create<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Drop<R::S
         epoch: 0,
         context: 0,
         response_seconds: 0,
+        time_control: clock.into(),
         anchor: channel.anchor.into(),
         candidate: channel.candidate.into(),
         anchor_block: 0,
@@ -79,13 +89,14 @@ pub fn join<
     assert(game.player_1.is_zero() || game.player_1 == joiner, 'Not invited');
     valid_key(session_key);
     assert(session_key != game.key_0, 'Shared session key');
+    assert(session_key != game.time_control.referee, 'Referee is a seat');
     assert(rng_tip != 0 && rng_tip != game.tip_0, 'Invalid tip');
     valid_prover(@world, game.prover);
     game.player_1 = joiner;
     game.key_1 = session_key;
     game.tip_1 = rng_tip;
     let terms = terms::<R>(@game);
-    let opening = open::<R>(@terms.config, terms.rng_tips);
+    let opening = open::<R>(@terms);
     let channel = machine::join(
         channel_of(@game), context_hash::<R>(@terms), state_ref::<R>(@opening), get_block_number(),
     );
@@ -116,7 +127,8 @@ pub fn accept_verified<impl R: GameRules, +Serde<R::State>, +Drop<R::State>>(
 }
 
 /// Replay steps onchain from the anchor, without a prover, against each seat's
-/// final signature (zero for a seat with no step).
+/// final signature (zero for a seat with no step) and, in a timed game, the
+/// steps' stamps and the referee's attestation.
 pub fn submit_history<
     impl R: GameRules,
     +Serde<R::Config>,
@@ -135,16 +147,13 @@ pub fn submit_history<
     epoch: u32,
     start: Envelope<R::State>,
     witness: R::Witness,
-    steps: Span<Move<R::Action>>,
-    signatures: Span<Signature>,
+    batch: Batch<R::Action>,
     acks: Span<Signature>,
 ) {
     let game = read(@world, game_id);
     assert(state_ref::<R>(@start).hash == game.anchor.hash, 'Wrong anchor state');
     let terms = terms::<R>(@game);
-    let end = replay::<
-        R,
-    >(game.context, terms.keys, @terms.config, start, witness, steps, signatures);
+    let end = replay::<R>(game.context, @terms, start, witness, batch);
     receive::<R>(ref world, game, epoch, end, acks);
 }
 
@@ -165,6 +174,7 @@ pub fn resolve(ref world: WorldStorage, game_id: felt252, epoch: u32) {
 
 /// The due seat plays its steps onchain during forced play. Every step must be
 /// the caller's own; the wallet call authenticates them instead of signatures.
+/// They carry no stamps, so a timed game's clock pauses.
 pub fn force<
     impl R: GameRules,
     +Serde<R::Config>,
@@ -188,8 +198,8 @@ pub fn force<
     let game = read(@world, game_id);
     let seat = seat_of(@game, get_caller_address());
     assert(state_ref::<R>(@start).hash == game.anchor.hash, 'Wrong anchor state');
-    let config = config::<R>(@game);
-    let end = referee::force::<R>(game.context, @config, start, witness, seat, steps);
+    let terms = terms::<R>(@game);
+    let end = referee::force::<R>(game.context, @terms, start, witness, seat, steps);
     let channel = machine::forced(
         channel_of(@game),
         epoch,
@@ -246,6 +256,7 @@ pub fn terms<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>>(
         game_id: *game.id,
         prover: (*game.prover).into(),
         response_seconds: *game.response_seconds,
+        clock: (*game.time_control).into(),
         players: array![(*game.player_0).into(), (*game.player_1).into()].span(),
         keys: keys(game),
         rng_tips: array![*game.tip_0, *game.tip_1].span(),

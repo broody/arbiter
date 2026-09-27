@@ -66,6 +66,22 @@ Neither player can predict the roll, and neither can bias it, because both
 chains were committed at join. Refusing to reveal only stalls the game, and a
 stall ends in a forced reveal or a timeout loss.
 
+**Clocks (optional).** Two players can't prove time to each other, so a timed
+game names a **referee** in its terms, a third key that witnesses time:
+- The referee stamps every step with its own clock and signs the resulting
+  clocks. Only its last signature reaches the settlement.
+- Each turn has an allowance (`turn_ms`), then a bank (`bank_ms`) that gains an
+  increment (`increment_ms`) at the end of each turn. This covers per-turn
+  timers, blitz clocks, and anything in between.
+- A seat whose time runs out is flagged by the referee and loses on time. The
+  flag settles like any finished game.
+- The referee can't forge moves or results. It can only skew time, so an
+  honest player's worst case is losing on time. If it disappears, the game
+  falls back to the untimed dispute path.
+
+A [keeper](keeper/README.md) can act as the referee: it already relays every
+step.
+
 ## What a game writes
 
 One Cairo trait:
@@ -109,20 +125,20 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 
 | Package | Path | What it does |
 |---|---|---|
-| `referee` | `core/` | The protocol and the channel's dispute logic as pure functions: step hashing and signatures, transcript replay, forced steps, hash-chain randomness, checkpoint approvals. No Dojo. Builds on Cairo 2.13 and 2.18 |
+| `referee` | `core/` | The protocol and the channel's dispute logic as pure functions: step hashing and signatures, transcript replay, forced steps, hash-chain randomness, referee clocks, checkpoint approvals. No Dojo. Builds on Cairo 2.13 and 2.18 |
 | `referee_dojo` | `dojo/referee_dojo/` | Dojo models (`ChannelGame`, `ProverAllowed`), the `ChannelUpdated` event, and one helper per entrypoint (create, join, submit, dispute, resolve, force, resume, timeout, resign, prover allowlist) |
 | `referee_adapter` | `adapter/referee_adapter/` | Proof adapter logic: the virtual replay that gets proved (`__execute__`) and `settle`, which checks the proof facts and relays the result. Cairo 2.18. A game's adapter contract is about 40 lines |
 | `referee_testing` | `testing/` | Test-only Cairo signer, so tests can sign messages that bind deployed addresses |
-| `@referee/sdk` | `sdk/` | JS copy of the protocol: hashing, signing, replay, a `Session` per client, channel calldata codecs and proof payloads. Fixtures keep it byte-identical to the Cairo. `@referee/sdk/proving` requests a native proof of a session and builds the `settle` call. `@referee/sdk/store` persists sessions (IndexedDB or files) and refuses to sign a step that would equivocate. `@referee/sdk/keeper` talks to a keeper. Install from git: `npm install github:broody/referee#<rev>` |
+| `@referee/sdk` | `sdk/` | JS copy of the protocol: hashing, signing, replay, a `Session` per client, a `Referee` for timed games, channel calldata codecs and proof payloads. Fixtures keep it byte-identical to the Cairo. `@referee/sdk/proving` requests a native proof of a session and builds the `settle` call. `@referee/sdk/store` persists sessions (IndexedDB or files) and refuses to sign a step that would equivocate. `@referee/sdk/keeper` talks to a keeper. Install from git: `npm install github:broody/referee#<rev>` |
 
 ### Status
 
 | | |
 |---|---|
-| Built and tested | Protocol core, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS hashing and replay, counter example (pure, as a Dojo world, and with an adapter) |
+| Built and tested | Protocol core, referee clocks, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS hashing and replay, counter example (pure, as a Dojo world, and with an adapter) |
 | Proven on Sepolia | Surround (Go) settles full games with one native SNIP-36 proof through `referee_adapter`; see [Surround's results](https://github.com/broody/surround/blob/main/offchain/RESULTS.md) |
 | Self-hosted proving | [`prover/`](prover/README.md): StarkWare's transaction prover built from source (PROOF1) behind a gateway that proves only allowlisted referee adapters. Settled a Surround game on Sepolia; its proofs are byte-identical to the hosted prover's |
-| Keeper | [`keeper/`](keeper/README.md): archives and forwards each game's verified steps, records equivocation, answers disputes, resolves and settles. Tested end to end on a local Katana |
+| Keeper | [`keeper/`](keeper/README.md): archives and forwards each game's verified steps, records equivocation, answers disputes, resolves and settles, and referees timed games. Tested end to end on a local Katana |
 | Not yet | PROOF2 large-path proving (network support expected ~2026-10-10), more than 2 seats |
 
 See [DESIGN.md](DESIGN.md) for the protocol details, the proving strategy and

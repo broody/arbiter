@@ -7,6 +7,7 @@ One service that keeps referee games moving when players can't or won't:
 | archive | Keeps each game's signed transcript ([`archive.mjs`](archive.mjs)). Clients register a session and send steps. The keeper stores only steps that `Session.receive` verifies. |
 | transport | Forwards steps between the seats. A client long-polls for the other seat's steps. A player who refreshes, switches device or comes back online restores the game from here. |
 | watcher | Reads every open game's channel ([`watch.mjs`](watch.mjs)). It answers stale disputes, resolves expired ones and settles finished games, from the keeper's own account ([`chain.mjs`](chain.mjs)). |
+| referee | Optional. With a referee key, it stamps the steps of timed games that name that key, and flags a seat whose time runs out. |
 
 ```bash
 KEEPER_PRIVATE_KEY=0x... node keeper/server.mjs keeper/config.local.json   # see config.example.json
@@ -23,6 +24,14 @@ await keeper.pull(session, { wait: 30, store });         // the other seat's, ve
 const restored = await keeper.load(game, terms);         // a new device
 ```
 
+In a timed game, `store.move` signs the step without applying it. The keeper
+that referees the game stamps it, and the client applies it from there:
+
+```js
+const record = await store.move(session, step, key);     // signed, not yet applied
+await keeper.submit(session, record, { store });         // stamped by the keeper, then pulled back
+```
+
 **Trust.** The keeper's trust model is the prover gateway's:
 - It can't forge a step, because it keeps only steps whose signatures verify.
   Every client verifies again whatever it pulls.
@@ -31,6 +40,12 @@ const restored = await keeper.load(game, terms);         // a new device
 - It holds no player keys. Its account pays only for `submit_history`,
   `resolve` and the adapter's `settle`, which anyone may send.
 - Anyone can run one.
+- **Except as a referee.** Players trust the keeper named in a timed game's
+  terms with time: a delayed step costs its seat clock time, and seats can't
+  route around the referee. It still can't forge moves or results, so an
+  honest player's worst case is losing on time. Players opt in per game by
+  accepting the referee's key in the terms. Use a key for refereeing that is
+  kept apart from the keeper's account key.
 
 ## Archive
 
@@ -52,6 +67,23 @@ const restored = await keeper.load(game, terms);         // a new device
   history is merged. A session with a disjoint history, for example one
   resumed after forced play onchain, replaces the archive only if it starts at
   the channel's current anchor.
+
+## Referee
+
+A keeper started with a referee key referees every timed game whose terms name
+that key (`clock.referee`):
+- **Stamps.** Each unstamped step is stamped when it arrives, before it is
+  archived and forwarded. A step arriving after its seat's time ran out is
+  refused (`Flag fell`) and the seat is flagged.
+- **Flags.** A timer per game fires at the due seat's `deadline()` and appends
+  the referee's `flag`. The watcher then settles the flagged game like any
+  finished one.
+- **One branch.** It never stamps a second step at one seq. A seat that signs
+  another step there is recorded as equivocating, and nothing is stamped.
+- **Restarts.** On start it loads every open game it referees and resumes each
+  clock at its last stamp, so seats are not charged for the keeper's downtime.
+- **Other keepers.** A keeper that is not a game's referee archives and
+  forwards only stamped steps, and settles and answers disputes as usual.
 
 ## Watcher
 
@@ -83,9 +115,9 @@ The API speaks JSON, with BigInts encoded as `{ "$n": "<decimal>" }`
 | `GET /games` | | open games |
 | `GET /games/:channel/:game` | | `{ record, start, seq, transcript }` |
 | `GET /games/:channel/:game/steps` | `?from=SEQ&wait=SECONDS` | `{ start, seq, transcript, steps }`: step records from `from`, long-polling up to `max_wait_seconds` |
-| `POST /games/:channel/:game/steps` | `{ from, steps: [{ step, signature }] }` | `{ seq, accepted, switched? }` |
+| `POST /games/:channel/:game/steps` | `{ from, steps: [{ step, signature, stamp?, attestation? }] }` | `{ seq, accepted, switched? }` |
 | `GET /games/:channel/:game/evidence` | | `{ evidence }` |
-| `GET /info`, `GET /health` | | |
+| `GET /info`, `GET /health` | | `/info` includes the `referee` public key, or null |
 
 POSTs are rate-limited per client (`rate_per_minute`) and capped at
 `max_body_bytes`. Waiting clients are capped at `max_waiters`. Games and
@@ -103,13 +135,17 @@ transcripts are capped at `max_games` and `max_steps`.
 - `store`: the file store directory (`@referee/sdk/store/file`, one process
   per directory).
 - `settle: false` stops the keeper from submitting finished games itself.
+- `referee.private_key_env` (default `KEEPER_REFEREE_KEY`) names the
+  environment variable holding the referee's private key. Without `referee`,
+  the keeper referees nothing.
 
 ## Tests
 
-- `node --test keeper/test/*.test.mjs`: the archive, the watcher and the HTTP
-  API against a fake chain.
+- `node --test keeper/test/*.test.mjs`: the archive, the watcher, the referee
+  and the HTTP API against a fake chain.
 - `keeper/katana.sh`: starts a Katana, deploys the counter Dojo world and runs
   [`katana.mjs`](katana.mjs) with real transactions. The keeper answers a stale
-  dispute and resolves it into forced play, then settles a finished game and
-  resolves it to SETTLED. It passed with katana 1.7.1 and sozo 1.8.0 in about a
-  minute. sozo 1.8.5 fails to deploy the world on katana 1.7.1.
+  dispute and resolves it into forced play, settles a finished game and
+  resolves it to SETTLED, and referees a timed game: it flags the stalling seat
+  and settles the flag with reason TIMEOUT. It passed with katana 1.7.1 and
+  sozo 1.8.0 in about a minute. sozo 1.8.5 fails to deploy the world on katana 1.7.1.

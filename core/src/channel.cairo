@@ -3,7 +3,7 @@
 //! and signature checks belong to the binding (e.g. a Dojo system): it passes
 //! the caller's seat, the block time and number, and whether a submission
 //! carried every seat's approval.
-use crate::protocol::{due, state_hash};
+use crate::protocol::{due, forfeit, state_hash};
 use crate::rules::GameRules;
 use crate::types::{Envelope, Outcome, REASON_RESIGN, REASON_TIMEOUT};
 
@@ -195,17 +195,16 @@ pub fn claim_timeout(mut channel: Channel, epoch: u32, seat: u8, now: u64) -> Ch
     assert(seat != channel.anchor.due, 'Only waiting seat');
     channel.epoch += 1;
     channel.deadline = 0;
-    settle(ref channel, Outcome { finished: true, winner: seat + 1, reason: REASON_TIMEOUT });
+    settle(ref channel, forfeit(channel.anchor.due, REASON_TIMEOUT));
     channel
 }
 
 /// A seat concedes onchain, in any live status and without a proof.
 pub fn resign(mut channel: Channel, seat: u8) -> Channel {
     assert(is_live(@channel), 'Channel not live');
-    // Two seats: the other seat (index 1 - seat) wins; winner is seat + 1.
     channel.epoch += 1;
     channel.deadline = 0;
-    settle(ref channel, Outcome { finished: true, winner: 2 - seat, reason: REASON_RESIGN });
+    settle(ref channel, forfeit(seat, REASON_RESIGN));
     channel
 }
 

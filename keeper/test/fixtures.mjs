@@ -1,5 +1,5 @@
 // Counter games and a fake chain for the keeper tests. No network access.
-import { Session, contextHash, due, play, publicKey, resign, stateHash, tag } from '../../sdk/src/index.mjs';
+import { Session, contextHash, due, play, publicKey, resign, signedStep, stateHash, tag } from '../../sdk/src/index.mjs';
 import { ADD, counter } from '../../sdk/examples/counter.mjs';
 import { ACTIVE } from '../watch.mjs';
 
@@ -24,7 +24,7 @@ export const prefix = (session, n) => {
   const record = structuredClone(session.export());
   return Session.import(counter, { ...record, steps: record.steps.slice(0, n) });
 };
-export const signed = (session, from = 0) => session.steps.slice(from).map(({ step, signature }) => ({ step, signature }));
+export const signed = (session, from = 0) => session.steps.slice(from).map(signedStep);
 
 /** A channel's stored reference to an envelope (`StateRef`). */
 export const ref = env => ({ hash: stateHash(counter, env), seq: env.seq, support_turn: env.support_turn, due: due(counter, env), outcome: env.outcome });

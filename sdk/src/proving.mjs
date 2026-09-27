@@ -4,8 +4,8 @@
 // comes from the session. Import as `@referee/sdk/proving`.
 //
 // Adapter convention (referee_adapter::prover): `__execute__(channel, game_id,
-// epoch, start, witness, steps, signatures)`, with no witness argument for a
-// game whose witness is `()`, and `settle(channel, game_id, epoch, end, acks)`.
+// epoch, start, witness, batch)`, with no witness argument for a game whose
+// witness is `()`, and `settle(channel, game_id, epoch, end, acks)`.
 // The game's channel exposes `snapshot(game_id)` (referee_dojo::channel::snapshot).
 import { RpcProvider } from 'starknet';
 import {
@@ -80,7 +80,8 @@ export function provingTransaction({ session, epoch, nonce, l2GasLimit = 10_000_
 /**
  * The channel's `submit_history` call: replay `session` onchain from its start,
  * which must be the channel's anchor (see `rebase`), against each seat's final
- * signature. Without `acks` the end state becomes a dispute candidate.
+ * signature and, in a timed game, the referee's final attestation. Without
+ * `acks` the end state becomes a dispute candidate.
  */
 export const historyCall = (session, epoch, { acks = NO_ACKS, entrypoint = 'submit_history' } = {}) => {
   const { game, terms } = session;
