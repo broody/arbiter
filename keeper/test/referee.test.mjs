@@ -3,7 +3,7 @@
 // charge seats for its own downtime. Node's mock timers drive its clock.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MOVE_FLAG, REASON_TIMEOUT, hex, publicKey, signedStep } from '../../sdk/src/index.mjs';
+import { MOVE_FLAG, REASON_TIMEOUT, hex, publicKey, recommit, signedStep } from '../../sdk/src/index.mjs';
 import { KeeperClient } from '../../sdk/src/keeper.mjs';
 import { SessionStore, memoryBackend } from '../../sdk/src/store.mjs';
 import { Archive, KeeperError } from '../archive.mjs';
@@ -131,10 +131,18 @@ test('clients submit a timed step and pull it back stamped', async () => {
     await client.register(alice);
     const record = await aliceStore.move(alice, add(3), keys[0]);
     assert.equal(alice.env.seq, 0);
-    const applied = await client.submit(alice, record, { store: aliceStore });
+    const applied = await client.submit(alice, { store: aliceStore });
     assert.equal(applied.length, 1);
     assert.ok(alice.steps[0].stamp > 0);
     await client.pull(bob, { store: bobStore });
     assert.equal(bob.stateHash(), alice.stateHash());
+
+    // Bob signs a whole turn ahead, recommitting his chain and then playing.
+    await bobStore.move(bob, recommit(0x33n), keys[1]);
+    await bobStore.move(bob, add(2), keys[1]);
+    assert.equal((await client.submit(bob, { store: bobStore })).length, 2);
+    assert.deepEqual([bob.pending, bob.env.seq], [[], 3]);
+    await client.pull(alice, { store: aliceStore });
+    assert.equal(alice.stateHash(), bob.stateHash());
   } finally { await k.close(); }
 });

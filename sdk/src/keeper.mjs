@@ -26,12 +26,15 @@ export class KeeperClient {
   }
 
   /**
-   * In a timed game, send our signed step (`store.move`'s record) to the
-   * keeper that referees the game, then pull it back stamped, with anything
-   * after it, as `pull` does.
+   * In a timed game, send our steps awaiting a stamp (`session.pending`) to
+   * the keeper that referees the game, then pull them back stamped, with
+   * anything after them, as `pull` does. Sending again is harmless.
    */
-  async submit(session, record, options = {}) {
-    await this.#call('POST', `${path(session.terms)}/steps`, { from: record.seq, steps: [signedStep(record)] });
+  async submit(session, options = {}) {
+    const pending = session.pending;
+    if (pending.length) {
+      await this.#call('POST', `${path(session.terms)}/steps`, { from: pending[0].seq, steps: pending.map(signedStep) });
+    }
     return this.pull(session, options);
   }
 

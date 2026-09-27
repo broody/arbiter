@@ -133,7 +133,8 @@ moves; the referee signs time.
   milliseconds, and after each step signs
   `signing_hash(TAG, 'REFEREE_STAMP_V1', context, seq, transcript, clock)`.
   Stamps stay out of the transcript, so a seat's signature never waits on the
-  referee.
+  referee: a seat signs the rest of its turn from its `tip` while earlier steps
+  wait in `pending` for their stamps.
 - **Charging.** `Envelope.clock` is `Option<Clock { banks, turn, stamp }>`. A
   step charges the time since the last stamp to the seat on the clock (`due`):
   the turn's allowance first, then its bank.
@@ -312,10 +313,13 @@ marks and session keys in a backend: `indexedDbBackend` for browsers,
 - The guard is per store. Two devices holding one key do not share marks, so a
   key is used on one device at a time. The file backend locks its directory to
   one process.
-- In a timed game `move` marks and signs the step but does not apply it: the
-  client sends it to the referee and `receive`s the stamped record. `load`
-  keeps such a mark as the guard and does not re-apply it, since it has no
-  stamp.
+- In a timed game `move` signs the step without applying it: it joins
+  `session.pending` until the referee's stamped record comes back through
+  `receive`. The mark keeps the whole pending chain, so `load` restores it for
+  the client to resend (`KeeperClient.submit`). A different step landing first
+  at a pending step's seq (a flag, or the other seat resigning) drops the
+  chain. A failed write discards the step it signed, so that signature never
+  leaves.
 
 ## Keeper
 

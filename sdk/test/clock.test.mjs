@@ -4,8 +4,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  REASON_TIMEOUT, REFEREE, Referee, Session, ZERO_SIGNATURE, decodeTerms, encodeBatch, encodeTerms, flag, play,
-  playRandom, publicKey, reveal, rngChain, tag, timeLeft,
+  REASON_RESIGN, REASON_TIMEOUT, REFEREE, Referee, Session, ZERO_SIGNATURE, decodeTerms, encodeBatch, encodeTerms,
+  flag, play, playRandom, publicKey, recommit, resign, reveal, rngChain, signedStep, tag, timeLeft,
 } from '../src/index.mjs';
 import { SessionStore, memoryBackend } from '../src/store.mjs';
 import { ADD, GAMBLE, counter } from '../examples/counter.mjs';
@@ -111,8 +111,10 @@ test('seats apply their own steps only once stamped', async () => {
   const stored = await store.open(counter, terms);
   const signed = await store.move(stored, add(3), keys[0]);
   assert.equal(stored.env.seq, 0);
-  // A different step at the same seq would be equivocation.
-  await assert.rejects(store.move(stored, add(2), keys[0]), /Would equivocate/);
+  // Signing again starts from the tip, where the turn has passed...
+  await assert.rejects(store.move(stored, add(2), keys[0]), /Wrong signing key/);
+  // ...and a copy without the pending step still refuses another step at its seq.
+  assert.throws(() => new Session(counter, terms, { lastSigned: stored.lastSigned }).sign(add(2), keys[0]), /Would equivocate/);
   await store.receive(stored, referee.stamp(signed, T0));
   assert.equal(stored.env.seq, 1);
   assert.equal((await store.load(counter, terms)).env.seq, 1);
@@ -155,4 +157,60 @@ test('time left counts down the due seat only', () => {
   assert.deepEqual(timeLeft(counter, terms, seat.env, T0 + 40000), [62000, 50000]);
   assert.deepEqual(timeLeft(counter, terms, seat.env, T0 + 200000), [62000, 0]);
   assert.equal(timeLeft(counter, { ...terms, clock: null }, new Session(counter, { ...terms, clock: null }).env, T0), null);
+});
+
+// Seat 0 may recommit its hash chain and then play in one turn: two steps.
+const newTip = rngChain(0x5eed2n, 8)[8];
+
+test('a seat signs ahead through its turn and the stamps catch up', () => {
+  const { referee, seat } = table();
+  const first = seat.sign(recommit(newTip), keys[0]);
+  const second = seat.sign(add(3), keys[0]);
+  assert.deepEqual(seat.pending.map(r => r.seq), [0, 1]);
+  assert.deepEqual([seat.env.seq, seat.tip.seq], [0, 2]);
+  // At the tip the turn has passed to seat 1.
+  assert.throws(() => seat.sign(add(1), keys[0]), /Wrong signing key/);
+  seat.receive(referee.stamp(first, T0));
+  assert.deepEqual(seat.pending.map(r => r.seq), [1]);
+  seat.receive(referee.stamp(second, T0 + 300));
+  assert.deepEqual(seat.pending, []);
+  assert.equal(seat.stateHash(), referee.session.stateHash());
+});
+
+test('another step landing first drops the steps signed ahead', () => {
+  const { referee, seat } = table();
+  seat.sign(recommit(newTip), keys[0]);
+  seat.sign(add(3), keys[0]);
+  // Seat 1 resigns before seat 0's steps reach the referee.
+  const bob = new Session(counter, terms);
+  seat.receive(referee.stamp(bob.sign(resign(1), keys[1]), T0));
+  assert.deepEqual(seat.pending, []);
+  assert.equal(seat.env.outcome.reason, REASON_RESIGN);
+});
+
+test('a store keeps steps signed ahead across a restart', async () => {
+  const backend = memoryBackend();
+  const store = new SessionStore(backend);
+  const session = await store.open(counter, terms);
+  await store.move(session, recommit(newTip), keys[0]);
+  await store.move(session, add(3), keys[0]);
+  // A new tab or a restart restores both, ready to resend.
+  const restored = await new SessionStore(backend).load(counter, terms);
+  assert.deepEqual(restored.pending.map(r => r.seq), [0, 1]);
+  const { referee } = table();
+  const stamped = restored.pending.map((r, i) => referee.stamp(signedStep(r), T0 + i));
+  await store.receive(restored, signedStep(stamped[0]));
+  assert.deepEqual(restored.pending.map(r => r.seq), [1]);
+  await store.receive(restored, signedStep(stamped[1]));
+  assert.deepEqual([restored.pending, restored.env.seq], [[], 2]);
+});
+
+test('a failed write never releases the step it signed', async () => {
+  const backend = memoryBackend();
+  const store = new SessionStore(backend);
+  const session = await store.open(counter, terms);
+  const update = backend.update;
+  backend.update = async (key, fn) => { if (key.startsWith('signed/')) { fn(undefined); throw Error('disk full'); } return update(key, fn); };
+  await assert.rejects(store.move(session, add(3), keys[0]), /disk full/);
+  assert.deepEqual(session.pending, []);
 });

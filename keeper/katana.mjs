@@ -105,7 +105,8 @@ try {
   // Bob stalls, so the keeper flags him and settles the flag onchain.
   const c = await newGame(0x5eedcn, { referee: publicKey(REFEREE_KEY), turn_ms: 2000, bank_ms: 0, increment_ms: 0 });
   await client.register(c.session);
-  await client.submit(c.session, c.session.sign(play({ kind: ADD, amount: 3 }), sessionKeys[0]));
+  c.session.sign(play({ kind: ADD, amount: 3 }), sessionKeys[0]);
+  await client.submit(c.session);
   assert.ok(c.session.steps[0].stamp > 0);
   const flagged = await until('the keeper to flag and submit', channelWhere(c.id, x => x.status === DISPUTE && x.candidate.seq === 2));
   await client.pull(c.session);

@@ -87,8 +87,9 @@ export class SessionStore {
    * Sign our step, store it as the seat's mark, apply it and save. Returns the
    * signed record to send. Throws without releasing a signature if the step
    * breaks the rules or would contradict a step this key already signed. In a
-   * timed game the step is marked but not applied: send it to the referee and
-   * `receive` the stamped record it returns.
+   * timed game the step is marked but not applied: it joins `session.pending`,
+   * which the mark keeps too, until the referee's stamped record comes back
+   * through `receive`.
    */
   async move(session, step, privateKey) {
     const seat = actorOf(session.game, session.env, step);
@@ -99,10 +100,12 @@ export class SessionStore {
       await this.backend.update(markKey(session.context, seat), mark => {
         stored = mark;
         session.lastSigned[seat] = later(before, mark);
-        return (record = session.sign(step, privateKey));
+        record = session.sign(step, privateKey);
+        return session.timed ? { ...record, pending: session.pending } : record;
       });
     } catch (error) {
       session.lastSigned[seat] = later(before, stored);
+      if (record) session.discard(record);
       throw error;
     }
     if (session.timed) return record;
@@ -141,11 +144,15 @@ export class SessionStore {
   }
 
   // Attach the stored marks, and apply any marked step the transcript lacks.
-  // A timed game's marked step needs the referee's stamp: resend it instead.
+  // A timed game's marked steps need the referee's stamp: they go back into
+  // `pending`, to resend.
   async #restore(session) {
     const marks = await Promise.all([0, 1].map(seat => this.backend.get(markKey(session.context, seat))));
     marks.forEach((mark, seat) => { session.lastSigned[seat] = later(session.lastSigned[seat], mark); });
-    if (session.timed) return false;
+    if (session.timed) {
+      for (const mark of marks) if (mark?.pending) session.resume(mark.pending);
+      return false;
+    }
     let recovered = false, mark;
     while ((mark = marks.find(m => m?.seq === session.env.seq && felt(m.transcript) === felt(session.env.transcript)))) {
       session.receive(mark);

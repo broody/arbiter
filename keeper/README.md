@@ -29,7 +29,7 @@ that referees the game stamps it, and the client applies it from there:
 
 ```js
 const record = await store.move(session, step, key);     // signed, not yet applied
-await keeper.submit(session, record, { store });         // stamped by the keeper, then pulled back
+await keeper.submit(session, { store });                 // every pending step, stamped by the keeper
 ```
 
 **Trust.** The keeper's trust model is the prover gateway's:

@@ -364,13 +364,15 @@ export function replay(game, terms, start, witness, signed) {
  * the position the step was signed at, its message, the signed step and its
  * seat. In a timed game records also carry the referee's `stamp` and
  * `attestation`, and the referee's `flag` records have seat REFEREE and a zero
- * signature. `lastSigned[seat]` is the record of the last step this client signed
+ * signature. Our own timed steps wait in `pending` until they come back
+ * stamped, and we can sign ahead of them within our turn. `lastSigned[seat]` is the record of the last step this client signed
  * for that seat, or null; `sign` refuses to sign anything that would
  * contradict it. Persist it apart from the transcript (`@referee/sdk/store`
  * does) and pass it back in when restoring.
  */
 export class Session {
   #staged = null;
+  #pending = []; // our timed steps awaiting a stamp: { env, scratch, record } after each
 
   constructor(game, terms, { start, witness, lastSigned } = {}) {
     this.game = game;
@@ -386,6 +388,12 @@ export class Session {
 
   /** Whether the game is timed: every step then needs the referee's stamp. */
   get timed() { return this.terms.clock != null; }
+
+  /** Our signed steps awaiting the referee's stamp (timed games), oldest first. */
+  get pending() { return this.#pending.map(p => p.record); }
+
+  /** The state after our pending steps, which we sign from: `env` when none wait. */
+  get tip() { return this.#tip().env; }
 
   /**
    * Verify and apply a signed step, the other seat's or ours. In a timed game
@@ -423,16 +431,41 @@ export class Session {
    * both). Refuses to sign unless this session extends `lastSigned[seat]`,
    * because two different steps signed at one seq are equivocation: the other
    * seat could settle whichever branch suits it. Updates `lastSigned[seat]`.
+   *
+   * In a timed game the step joins `pending` until the referee's stamped
+   * record comes back through `receive`. Stamps stay out of the transcript, so
+   * the next step can be signed from the `tip` right away, through the rest of
+   * our turn.
    */
   sign(step, privateKey) {
-    const seat = actorOf(this.game, this.env, step);
+    const base = this.#tip();
+    const seat = actorOf(this.game, base.env, step);
     check(seat === 0 || seat === 1, 'Invalid seat');
     check(publicKey(privateKey) === felt(this.terms.keys[seat]), 'Wrong signing key');
-    const message = actionHash(this.game, this.context, this.env.seq, this.env.transcript, step);
+    const message = actionHash(this.game, this.context, base.env.seq, base.env.transcript, step);
     this.#guard(this.lastSigned[seat], message);
-    this.#staged = this.#stage(step, sign(message, privateKey), message);
-    this.lastSigned[seat] = this.#staged.record;
-    return this.#staged.record;
+    const staged = this.#stage(step, sign(message, privateKey), message, null, base);
+    this.lastSigned[seat] = staged.record;
+    if (this.timed) this.#pending.push(staged);
+    else this.#staged = staged;
+    return staged.record;
+  }
+
+  /**
+   * Stage our own signed steps that still await the referee's stamp, e.g.
+   * from a store after a restart, skipping any the history already holds.
+   * Stops at the first that does not follow the tip.
+   */
+  resume(records) {
+    for (const record of records) {
+      const base = this.#tip();
+      if (record.seq < base.env.seq) continue;
+      if (record.seq !== base.env.seq || felt(record.transcript) !== felt(base.env.transcript)) break;
+      const seat = actorOf(this.game, base.env, record.step);
+      const message = actionHash(this.game, this.context, base.env.seq, base.env.transcript, record.step);
+      check(seat !== REFEREE && verify(message, record.signature, this.terms.keys[seat]), 'Invalid session signature');
+      this.#pending.push(this.#stage(record.step, record.signature, message, null, base));
+    }
   }
 
   /**
@@ -455,27 +488,49 @@ export class Session {
     return seq < this.start.seq || (at !== undefined && felt(at) === felt(transcript));
   }
 
+  /**
+   * Forget our pending step `record` and any after it, as if never signed:
+   * for a store whose write of it failed, so the signature never leaves.
+   */
+  discard(record) {
+    const at = this.#pending.findIndex(p => p.record === record);
+    if (at >= 0) this.#pending = this.#pending.slice(0, at);
+  }
+
+  // The history we sign from runs through our pending steps.
   #guard(mark, message) {
     if (!mark || mark.seq < this.start.seq) return; // a later anchor supersedes it
-    check(mark.seq <= this.env.seq, `Session is behind seq ${mark.seq}, which this key signed`);
-    const at = mark.seq === this.env.seq ? { transcript: this.env.transcript, message } : this.steps[mark.seq - this.start.seq];
+    const tip = this.#tip().env;
+    check(mark.seq <= tip.seq, `Session is behind seq ${mark.seq}, which this key signed`);
+    const at = mark.seq === tip.seq ? { transcript: tip.transcript, message }
+      : [...this.steps, ...this.pending][mark.seq - this.start.seq];
     check(felt(at.transcript) === felt(mark.transcript) && at.message === felt(mark.message),
       `Would equivocate: this key signed a different step at seq ${mark.seq}`);
   }
 
+  #tip() { return this.#pending.at(-1) ?? { env: this.env, scratch: this.scratch }; }
+
   // Apply a step to copies of the state, so a rejected step changes nothing.
-  #stage(step, signature, message, stamp = null) {
-    const scratch = cloneScratch(this.game, this.scratch);
-    const { env, seat } = applyStep(this.game, this.context, this.terms, this.env, step, scratch, stamp);
-    const record = { seq: this.env.seq, transcript: this.env.transcript, message, step, signature: normSignature(signature), seat };
+  #stage(step, signature, message, stamp = null, base = { env: this.env, scratch: this.scratch }) {
+    const scratch = cloneScratch(this.game, base.scratch);
+    const { env, seat } = applyStep(this.game, this.context, this.terms, base.env, step, scratch, stamp);
+    const record = { seq: base.env.seq, transcript: base.env.transcript, message, step, signature: normSignature(signature), seat };
     if (stamp != null) record.stamp = stamp;
-    return { base: this.env, env, scratch, record };
+    return { base: base.env, env, scratch, record };
   }
 
   #commit({ env, scratch, record }) {
     this.env = env;
     this.scratch = scratch;
     this.steps.push(record);
+    // Our oldest pending step came back stamped. Any other step at its seq (a
+    // flag, or the other seat resigning) leaves every pending step off the
+    // history.
+    const oldest = this.#pending[0];
+    if (oldest) {
+      if (oldest.record.seq === record.seq && oldest.record.message === record.message) this.#pending.shift();
+      else this.#pending = [];
+    }
     return record;
   }
 
