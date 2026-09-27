@@ -1,0 +1,135 @@
+diff --git a/crates/privacy_prove/src/lib.rs b/crates/privacy_prove/src/lib.rs
+index d2c3ac5..d03257b 100644
+--- a/crates/privacy_prove/src/lib.rs
++++ b/crates/privacy_prove/src/lib.rs
+@@ -1,3 +1,6 @@
++mod low_memory;
++pub use low_memory::{privacy_recursive_prove_low_memory, LowMemoryOptions};
++
+ pub mod consts;
+ #[cfg(test)]
+ mod tests;
+diff --git a/crates/privacy_prove/src/low_memory.rs b/crates/privacy_prove/src/low_memory.rs
+new file mode 100644
+index 0000000..bb13ddb
+--- /dev/null
++++ b/crates/privacy_prove/src/low_memory.rs
+@@ -0,0 +1,118 @@
++//! One-shot proving with phase-local commitment trees and buffer pools.
++//!
++//! Shared service precomputes remain available through the existing API. This
++//! entry point trades precompute reuse for a smaller live working set. It keeps
++//! the pinned proof format, blinding and all security parameters unchanged.
++use super::*;
++
++/// Allocation/runtime choices only. All cryptographic parameters remain pinned.
++#[derive(Clone, Copy)]
++pub struct LowMemoryOptions {
++    pub cache_cairo_coefficients: bool,
++    pub recompute_cairo_commitments: bool,
++    pub bounded_cairo_columns: Option<usize>,
++    pub bounded_circuit_columns: Option<usize>,
++}
++impl Default for LowMemoryOptions {
++    fn default() -> Self { Self { cache_cairo_coefficients: true, recompute_cairo_commitments: false, bounded_cairo_columns: None, bounded_circuit_columns: None } }
++}
++
++pub fn privacy_recursive_prove_low_memory(pie: CairoPie, options: LowMemoryOptions) -> Result<PrivacyProofOutput, Box<dyn Error>> {
++    let _span = span!(Level::INFO, "privacy_recursive_prove_low_memory").entered();
++
++    info!("Run privacy bootloader and get the prover input and output preimage");
++    let (prover_input, output_preimage) = run_privacy_bootloader(pie)?;
++
++    let mut cairo_params = CAIRO_PROVER_PARAMS;
++    cairo_params.store_polynomials_coefficients = options.cache_cairo_coefficients || options.bounded_cairo_columns.is_some();
++    // Only twiddles survive both proof stages. Each stage owns its tree and pool.
++    let cairo_lifting = CAIRO_PCS_CONFIG.lifting_log_size
++        .ok_or("Missing Cairo lifting size")?;
++    let circuit_lifting = CIRCUIT_PCS_CONFIG.lifting_log_size
++        .ok_or("Missing circuit lifting size")?;
++    let twiddles = SimdBackend::precompute_twiddles(
++        CanonicCoset::new(max(cairo_lifting, circuit_lifting)).circle_domain().half_coset);
++    info!("Prepare only the Cairo stage");
++    let cairo_proof = {
++        let pool = BaseColumnPool::<SimdBackend>::new();
++        let trace = Arc::new(CAIRO_PROVER_PARAMS.preprocessed_trace.to_preprocessed_trace());
++        let polys = SimdBackend::interpolate_columns(gen_trace(trace.clone()), &twiddles);
++        let tree = CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new(
++            polys, CAIRO_PCS_CONFIG.fri_config.log_blowup_factor, &twiddles,
++            cairo_params.store_polynomials_coefficients, Some(cairo_lifting), &pool);
++        info!("Generate the cairo proof");
++        stwo_cairo_prover::prover::prove_cairo_with_precompute_bounded_memory(&pool, &twiddles, trace,
++            MaybeOwned::Owned(tree), prover_input, cairo_params, options.recompute_cairo_commitments, options.bounded_cairo_columns)?
++    };
++    info!("Cairo stage tree and buffer pool released");
++    let cairo_verifier_config = get_cairo_verifier_config()?;
++    let circuit_config = get_recursive_circuit_config();
++    let proof_config = get_proof_config();
++    // TODO(Leo): remove once we have the log sizes from prepare_cairo_proof_for_circuit_verifier.
++    let FlatClaim {
++        component_enable_bits,
++        component_log_sizes,
++        public_data: _,
++    } = cairo_proof.claim.flatten_claim();
++    info!("Prepare the cairo proof for the cairo-circuit verifier");
++    let (proof, public_data) = prepare_cairo_proof_for_circuit_verifier(
++        &cairo_proof,
++        &cairo_verifier_config.proof_config,
++        &component_enable_bits,
++    );
++
++    info!("Build the cairo-circuit verifier context");
++    let (mut public_claim, _outputs, _program) = public_data.pack_into_u32s();
++    public_claim.extend(component_log_sizes);
++    let outputs = compute_privacy_bootloader_output(&output_preimage);
++    let mut context = build_fixed_cairo_circuit(
++        &cairo_verifier_config,
++        proof,
++        public_claim,
++        vec![outputs],
++    );
++    if !context.is_circuit_valid() {
++        return Err("Circuit is not valid".into());
++    };
++    let zk_blinding_seed = cairo_proof.extended_stark_proof.proof.commitments.0[1].0;
++    add_zk_blinding(
++        &mut context,
++        zk_blinding_seed,
++        circuit_config.config.fri_config.n_queries,
++    );
++    finalize_context(&mut context);
++    let context_values = context.values();
++
++    // Serialized Cairo proof is already in the context; keep no duplicate proof alive.
++    drop(cairo_proof);
++    info!("Prepare only the recursive circuit stage");
++    let circuit_proof = {
++        let pool = BaseColumnPool::<SimdBackend>::new();
++        let preprocessed_circuit = get_cairo_preprocessed_circuit(&cairo_verifier_config);
++        let polys = SimdBackend::interpolate_columns(
++            preprocessed_circuit.preprocessed_trace.get_trace::<SimdBackend>(), &twiddles);
++        let tree = CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new(
++            polys, CIRCUIT_FRI_CONFIG.log_blowup_factor, &twiddles,
++            CIRCUIT_STORE_POLYNOMIALS_COEFFICIENTS || options.bounded_circuit_columns.is_some(),
++            circuit_config.config.lifting_log_size, &pool);
++        info!("Prove the cairo-circuit verifier");
++        circuit_prover::prover::prove_circuit_with_precompute_bounded(&pool, &twiddles, &preprocessed_circuit,
++            MaybeOwned::Owned(tree), context_values, circuit_config.config, options.bounded_circuit_columns)?
++    };
++    info!("Recursive stage tree and buffer pool released");
++
++    info!("Prepare the circuit proof for the circuit verifier");
++    let (proof_qm31s, _public_data) =
++        prepare_circuit_proof_for_circuit_verifier(circuit_proof, &proof_config);
++
++    info!("Serialize and compress the proof");
++    let mut proof_bytes: Vec<u8> = vec![];
++    proof_qm31s.serialize(&mut proof_bytes);
++    let compressed = compress_proof(&proof_bytes)?;
++    let proof = prepend_version(compressed);
++
++    Ok(PrivacyProofOutput {
++        proof,
++        output_preimage,
++    })
++}

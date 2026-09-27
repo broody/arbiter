@@ -1,0 +1,385 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index dd459f4..bb3ee75 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -4260,7 +4260,6 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
+ [[package]]
+ name = "cairo-air"
+ version = "1.2.2"
+-source = "git+https://github.com/starkware-libs/stwo-cairo?rev=9b6be271#9b6be2710e4d7124bc93fe80a5af36556d42ed29"
+ dependencies = [
+  "bincode 1.3.3",
+  "bzip2",
+@@ -4941,7 +4940,6 @@ dependencies = [
+ [[package]]
+ name = "cairo-program-runner-lib"
+ version = "1.2.2"
+-source = "git+https://github.com/starkware-libs/proving-utils?tag=v0.14.3-rust-bump#3035dd00421daa541894297bd754db6e2787807b"
+ dependencies = [
+  "anyhow",
+  "cairo-lang-casm",
+@@ -5182,7 +5180,6 @@ dependencies = [
+ [[package]]
+ name = "circuit-cairo-verifier"
+ version = "0.1.0"
+-source = "git+https://github.com/starkware-libs/stwo-circuits?rev=5ef951a1#5ef951a12727e3489a2ee991c580a5b925c59c69"
+ dependencies = [
+  "cairo-air",
+  "circuit-common",
+@@ -5200,7 +5197,6 @@ dependencies = [
+ [[package]]
+ name = "circuit-common"
+ version = "0.1.0"
+-source = "git+https://github.com/starkware-libs/stwo-circuits?rev=5ef951a1#5ef951a12727e3489a2ee991c580a5b925c59c69"
+ dependencies = [
+  "circuits",
+  "circuits-stark-verifier",
+@@ -5214,7 +5210,6 @@ dependencies = [
+ [[package]]
+ name = "circuit-prover"
+ version = "0.1.0"
+-source = "git+https://github.com/starkware-libs/stwo-circuits?rev=5ef951a1#5ef951a12727e3489a2ee991c580a5b925c59c69"
+ dependencies = [
+  "circuit-common",
+  "circuit-verifier",
+@@ -5235,7 +5230,6 @@ dependencies = [
+ [[package]]
+ name = "circuit-serialize"
+ version = "0.1.0"
+-source = "git+https://github.com/starkware-libs/stwo-circuits?rev=5ef951a1#5ef951a12727e3489a2ee991c580a5b925c59c69"
+ dependencies = [
+  "circuits",
+  "circuits-stark-verifier",
+@@ -5245,7 +5239,6 @@ dependencies = [
+ [[package]]
+ name = "circuit-verifier"
+ version = "0.1.0"
+-source = "git+https://github.com/starkware-libs/stwo-circuits?rev=5ef951a1#5ef951a12727e3489a2ee991c580a5b925c59c69"
+ dependencies = [
+  "circuit-common",
+  "circuits",
+@@ -5260,7 +5253,6 @@ dependencies = [
+ [[package]]
+ name = "circuits"
+ version = "0.1.0"
+-source = "git+https://github.com/starkware-libs/stwo-circuits?rev=5ef951a1#5ef951a12727e3489a2ee991c580a5b925c59c69"
+ dependencies = [
+  "blake2",
+  "hashbrown 0.17.1",
+@@ -5274,7 +5266,6 @@ dependencies = [
+ [[package]]
+ name = "circuits-stark-verifier"
+ version = "0.1.0"
+-source = "git+https://github.com/starkware-libs/stwo-circuits?rev=5ef951a1#5ef951a12727e3489a2ee991c580a5b925c59c69"
+ dependencies = [
+  "circuits",
+  "hashbrown 0.17.1",
+@@ -10463,6 +10454,35 @@ dependencies = [
+  "uint 0.9.5",
+ ]
+ 
++[[package]]
++name = "privacy-circuit-verify"
++version = "1.2.2"
++dependencies = [
++ "anyhow",
++ "cairo-air",
++ "cairo-vm",
++ "circuit-cairo-verifier",
++ "circuit-common",
++ "circuit-serialize",
++ "circuit-verifier",
++ "circuits",
++ "circuits-stark-verifier",
++ "clap",
++ "itertools 0.12.1",
++ "log",
++ "num-traits",
++ "serde",
++ "serde_json",
++ "sonic-rs",
++ "starknet-ff",
++ "starknet-types-core",
++ "stwo",
++ "stwo-cairo-common",
++ "stwo-cairo-serialize",
++ "tracing",
++ "zstd",
++]
++
+ [[package]]
+ name = "privacy-circuit-verify"
+ version = "1.2.2"
+@@ -10496,7 +10516,6 @@ dependencies = [
+ [[package]]
+ name = "privacy-prove"
+ version = "1.2.2"
+-source = "git+https://github.com/starkware-libs/proving-utils?tag=v0.14.3-rust-bump#3035dd00421daa541894297bd754db6e2787807b"
+ dependencies = [
+  "anyhow",
+  "cairo-air",
+@@ -10512,7 +10531,7 @@ dependencies = [
+  "clap",
+  "itertools 0.12.1",
+  "log",
+- "privacy-circuit-verify",
++ "privacy-circuit-verify 1.2.2",
+  "serde",
+  "serde_json",
+  "sonic-rs",
+@@ -13122,7 +13141,7 @@ name = "starknet_proof_verifier"
+ version = "0.19.0-rc.2"
+ dependencies = [
+  "apollo_sizeof",
+- "privacy-circuit-verify",
++ "privacy-circuit-verify 1.2.2 (git+https://github.com/starkware-libs/proving-utils?tag=v0.14.3-rust-bump)",
+  "rstest",
+  "serde",
+  "starknet-types-core",
+@@ -13157,7 +13176,7 @@ dependencies = [
+  "jsonrpsee",
+  "jsonschema",
+  "mockito",
+- "privacy-circuit-verify",
++ "privacy-circuit-verify 1.2.2 (git+https://github.com/starkware-libs/proving-utils?tag=v0.14.3-rust-bump)",
+  "privacy-prove",
+  "reqwest 0.12.24",
+  "rstest",
+@@ -13239,7 +13258,6 @@ dependencies = [
+ [[package]]
+ name = "stwo"
+ version = "2.2.0"
+-source = "git+https://github.com/starkware-libs/stwo?rev=489a0f3e#489a0f3ee44a59e03944ad9aa4f3e5a91a3d3f08"
+ dependencies = [
+  "blake2",
+  "blake3",
+@@ -13290,7 +13308,6 @@ dependencies = [
+ [[package]]
+ name = "stwo-cairo-adapter"
+ version = "1.2.2"
+-source = "git+https://github.com/starkware-libs/stwo-cairo?rev=9b6be271#9b6be2710e4d7124bc93fe80a5af36556d42ed29"
+ dependencies = [
+  "anyhow",
+  "bincode 2.0.1",
+@@ -13315,7 +13332,6 @@ dependencies = [
+ [[package]]
+ name = "stwo-cairo-common"
+ version = "1.2.2"
+-source = "git+https://github.com/starkware-libs/stwo-cairo?rev=9b6be271#9b6be2710e4d7124bc93fe80a5af36556d42ed29"
+ dependencies = [
+  "bytemuck",
+  "itertools 0.12.1",
+@@ -13334,7 +13350,6 @@ dependencies = [
+ [[package]]
+ name = "stwo-cairo-prover"
+ version = "1.2.2"
+-source = "git+https://github.com/starkware-libs/stwo-cairo?rev=9b6be271#9b6be2710e4d7124bc93fe80a5af36556d42ed29"
+ dependencies = [
+  "anyhow",
+  "bytemuck",
+@@ -13367,7 +13382,6 @@ dependencies = [
+ [[package]]
+ name = "stwo-cairo-serialize"
+ version = "1.2.2"
+-source = "git+https://github.com/starkware-libs/stwo-cairo?rev=9b6be271#9b6be2710e4d7124bc93fe80a5af36556d42ed29"
+ dependencies = [
+  "starknet-ff",
+  "stwo",
+@@ -13377,7 +13391,6 @@ dependencies = [
+ [[package]]
+ name = "stwo-cairo-serialize-derive"
+ version = "1.2.2"
+-source = "git+https://github.com/starkware-libs/stwo-cairo?rev=9b6be271#9b6be2710e4d7124bc93fe80a5af36556d42ed29"
+ dependencies = [
+  "quote",
+  "syn 2.0.110",
+@@ -13386,7 +13399,6 @@ dependencies = [
+ [[package]]
+ name = "stwo-constraint-framework"
+ version = "2.2.0"
+-source = "git+https://github.com/starkware-libs/stwo?rev=489a0f3e#489a0f3ee44a59e03944ad9aa4f3e5a91a3d3f08"
+ dependencies = [
+  "hashbrown 0.17.1",
+  "itertools 0.12.1",
+diff --git a/Cargo.toml b/Cargo.toml
+index 8e92f4b..7074458 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -447,3 +447,28 @@ strip = "none"
+ as_conversions = "warn"
+ await_holding_lock = "warn"
+ await_holding_refcell_ref = "warn"
++
++# referee: bounded-memory proving (prover/patches in the referee repository).
++[patch."https://github.com/starkware-libs/proving-utils"]
++privacy-prove = { path = "../proving-utils/crates/privacy_prove" }
++
++[patch."https://github.com/starkware-libs/stwo"]
++stwo-constraint-framework = { path = "../stwo/crates/constraint-framework" }
++stwo = { path = "../stwo/crates/stwo" }
++
++[patch."https://github.com/starkware-libs/stwo-cairo"]
++stwo-cairo-prover = { path = "../stwo-cairo/stwo_cairo_prover/crates/prover" }
++cairo-air = { path = "../stwo-cairo/stwo_cairo_prover/crates/cairo-air" }
++stwo-cairo-adapter = { path = "../stwo-cairo/stwo_cairo_prover/crates/adapter" }
++stwo-cairo-common = { path = "../stwo-cairo/stwo_cairo_prover/crates/common" }
++stwo-cairo-serialize = { path = "../stwo-cairo/stwo_cairo_prover/crates/cairo-serialize" }
++stwo-cairo-serialize-derive = { path = "../stwo-cairo/stwo_cairo_prover/crates/cairo-serialize-derive" }
++
++[patch."https://github.com/starkware-libs/stwo-circuits"]
++circuit-cairo-verifier = { path = "../stwo-circuits/crates/cairo_verifier" }
++circuit-common = { path = "../stwo-circuits/crates/circuit_common" }
++circuit-prover = { path = "../stwo-circuits/crates/circuit_prover" }
++circuit-serialize = { path = "../stwo-circuits/crates/circuit_serialize" }
++circuit-verifier = { path = "../stwo-circuits/crates/circuit_verifier" }
++circuits = { path = "../stwo-circuits/crates/circuits" }
++circuits-stark-verifier = { path = "../stwo-circuits/crates/stark_verifier" }
+diff --git a/crates/starknet_transaction_prover/src/proving/prover.rs b/crates/starknet_transaction_prover/src/proving/prover.rs
+index a6f457f..caed134 100644
+--- a/crates/starknet_transaction_prover/src/proving/prover.rs
++++ b/crates/starknet_transaction_prover/src/proving/prover.rs
+@@ -5,12 +5,79 @@
+ use std::sync::Arc;
+ 
+ use cairo_vm::vm::runners::cairo_pie::CairoPie;
+-use privacy_prove::{privacy_recursive_prove, RecursiveProverPrecomputes};
++use privacy_prove::{privacy_recursive_prove, privacy_recursive_prove_low_memory, LowMemoryOptions};
+ use starknet_api::transaction::fields::Proof;
+ use starknet_proof_verifier::ProgramOutput;
++use tracing::info;
+ 
+ use crate::errors::ProvingError;
+ 
++/// What the prover keeps between and during proofs, chosen once at startup from the
++/// environment. Every mode produces the same proof bytes; only memory and time differ.
++///
++/// - `PROVER_LOW_MEMORY=1`: no precomputes stay resident. Each proof builds its preprocessed
++///   trees, and each stage (Cairo, then the recursive circuit) releases its tree and buffer
++///   pool before the next starts.
++///   - `PROVER_RECOMPUTE_CAIRO_COMMITMENTS` (default 1): keep only Merkle roots and rebuild a
++///     tree when opening it.
++///   - `PROVER_CAIRO_COEFFICIENTS` (default 1): keep Cairo polynomial coefficients.
++///   - `PROVER_BOUNDED_CAIRO_COLUMNS`, `PROVER_BOUNDED_CIRCUIT_COLUMNS` (default 0, off): for
++///     `N > 0`, keep coefficients instead of expanded evaluations and compute FRI quotients
++///     `N` columns at a time.
++/// - Otherwise (default): upstream behavior, with precomputes built once and shared.
++pub(crate) enum RecursiveProverPrecomputes {
++    Cached(Arc<privacy_prove::RecursiveProverPrecomputes>),
++    LowMemory(LowMemoryOptions),
++}
++
++pub(crate) fn prepare_recursive_prover_precomputes()
++-> Result<Arc<RecursiveProverPrecomputes>, Box<dyn std::error::Error>> {
++    let flag = |name: &str, default: bool| -> Result<bool, Box<dyn std::error::Error>> {
++        match std::env::var(name).as_deref() {
++            Ok("0") => Ok(false),
++            Ok("1") => Ok(true),
++            Err(std::env::VarError::NotPresent) => Ok(default),
++            _ => Err(format!("{name} must be 0 or 1").into()),
++        }
++    };
++    let columns = |name: &str| -> Result<Option<usize>, Box<dyn std::error::Error>> {
++        let value = match std::env::var(name) {
++            Ok(value) => {
++                value.parse::<usize>().map_err(|_| format!("{name} must be a nonnegative integer"))?
++            }
++            Err(std::env::VarError::NotPresent) => 0,
++            Err(error) => return Err(error.into()),
++        };
++        Ok((value > 0).then_some(value))
++    };
++    let bounded_cairo_columns = columns("PROVER_BOUNDED_CAIRO_COLUMNS")?;
++    let bounded_circuit_columns = columns("PROVER_BOUNDED_CIRCUIT_COLUMNS")?;
++    if !flag("PROVER_LOW_MEMORY", false)? {
++        if bounded_cairo_columns.is_some() || bounded_circuit_columns.is_some() {
++            return Err("PROVER_BOUNDED_*_COLUMNS require PROVER_LOW_MEMORY=1".into());
++        }
++        info!("Prover memory mode: cached precomputes");
++        return Ok(Arc::new(RecursiveProverPrecomputes::Cached(
++            privacy_prove::prepare_recursive_prover_precomputes()?,
++        )));
++    }
++    let options = LowMemoryOptions {
++        cache_cairo_coefficients: flag("PROVER_CAIRO_COEFFICIENTS", true)?,
++        recompute_cairo_commitments: flag("PROVER_RECOMPUTE_CAIRO_COMMITMENTS", true)?,
++        bounded_cairo_columns,
++        bounded_circuit_columns,
++    };
++    info!(
++        "Prover memory mode: low memory (cairo coefficients {}, recompute cairo commitments {}, \
++         bounded cairo columns {:?}, bounded circuit columns {:?})",
++        options.cache_cairo_coefficients,
++        options.recompute_cairo_commitments,
++        options.bounded_cairo_columns,
++        options.bounded_circuit_columns
++    );
++    Ok(Arc::new(RecursiveProverPrecomputes::LowMemory(options)))
++}
++
+ /// Output from the prover containing the proof and associated program output.
+ #[derive(Debug, Clone)]
+ pub(crate) struct ProverOutput {
+@@ -22,13 +89,22 @@ pub(crate) struct ProverOutput {
+ 
+ /// Proves a Cairo PIE using the privacy recursive prover.
+ ///
+-/// Calls `privacy_recursive_prove` with the CairoPie and precomputed data on a blocking thread.
++/// Calls `privacy_recursive_prove` (or its low-memory variant) with the CairoPie on a blocking
++/// thread.
+ pub(crate) async fn prove(
+     cairo_pie: CairoPie,
+     precomputes: Arc<RecursiveProverPrecomputes>,
+ ) -> Result<ProverOutput, ProvingError> {
+     let proof_output = tokio::task::spawn_blocking(move || {
+-        privacy_recursive_prove(cairo_pie, precomputes).map_err(|e| e.to_string())
++        match precomputes.as_ref() {
++            RecursiveProverPrecomputes::Cached(shared) => {
++                privacy_recursive_prove(cairo_pie, shared.clone())
++            }
++            RecursiveProverPrecomputes::LowMemory(options) => {
++                privacy_recursive_prove_low_memory(cairo_pie, *options)
++            }
++        }
++        .map_err(|e| e.to_string())
+     })
+     .await
+     .map_err(ProvingError::TaskJoin)?
+diff --git a/crates/starknet_transaction_prover/src/proving/prover_test.rs b/crates/starknet_transaction_prover/src/proving/prover_test.rs
+index 1fb1e8a..bfb7690 100644
+--- a/crates/starknet_transaction_prover/src/proving/prover_test.rs
++++ b/crates/starknet_transaction_prover/src/proving/prover_test.rs
+@@ -4,11 +4,10 @@ use std::sync::Arc;
+ use apollo_infra_utils::path::resolve_project_relative_path;
+ use cairo_vm::vm::runners::cairo_pie::CairoPie;
+ use privacy_circuit_verify_v1::{verify_recursive_circuit, PrivacyProofOutput};
+-use privacy_prove::{prepare_recursive_prover_precomputes, RecursiveProverPrecomputes};
+ use starknet_api::transaction::fields::VIRTUAL_SNOS;
+ use starknet_proof_verifier::ProgramOutput;
+ 
+-use crate::proving::prover::prove;
++use crate::proving::prover::{prepare_recursive_prover_precomputes, prove, RecursiveProverPrecomputes};
+ 
+ /// Test resource file names.
+ const CAIRO_PIE_FILE: &str = "cairo_pie_10_transfers.zip";
+diff --git a/crates/starknet_transaction_prover/src/proving/virtual_snos_prover.rs b/crates/starknet_transaction_prover/src/proving/virtual_snos_prover.rs
+index cab35ca..22ac123 100644
+--- a/crates/starknet_transaction_prover/src/proving/virtual_snos_prover.rs
++++ b/crates/starknet_transaction_prover/src/proving/virtual_snos_prover.rs
+@@ -10,8 +10,6 @@ use std::time::Instant;
+ use blockifier::state::contract_class_manager::ContractClassManager;
+ use blockifier_reexecution::state_reader::rpc_objects::BlockId;
+ use blockifier_reexecution::utils::get_chain_info;
+-#[cfg(feature = "stwo_proving")]
+-use privacy_prove::{prepare_recursive_prover_precomputes, RecursiveProverPrecomputes};
+ use serde::{Deserialize, Serialize};
+ use serde_json::{Map, Value};
+ use starknet_api::block::GasPrice;
+@@ -25,6 +23,8 @@ use url::Url;
+ use crate::blocking_check::{BlockingCheckClient, BlockingCheckResult};
+ use crate::config::ProverConfig;
+ use crate::errors::VirtualSnosProverError;
++#[cfg(feature = "stwo_proving")]
++use crate::proving::prover::{prepare_recursive_prover_precomputes, RecursiveProverPrecomputes};
+ use crate::running::runner::{RpcRunnerFactory, RunnerOutput, VirtualSnosRunner};
+ 
+ /// Result of a successful prove transaction operation.

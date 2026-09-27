@@ -4,6 +4,28 @@
     "revision": "625929ac645c399f2481fb2b65ffdd14702aa525",
     "note": "starkware-libs/sequencer e6b6fd2e plus one visibility commit; the revision whose virtual OS Sepolia proof facts attest"
   },
+  "patches": {
+    "note": "Bounded-memory proving (patches/), from Templar's prover-memory, cairo-memory and bounded-memory experiments. Each dependency is the revision the sequencer's Cargo.lock pins, overridden by a patched path copy. Off unless PROVER_LOW_MEMORY=1.",
+    "dependencies": {
+      "proving-utils": {
+        "repository": "https://github.com/starkware-libs/proving-utils.git",
+        "revision": "3035dd00421daa541894297bd754db6e2787807b",
+        "note": "tag v0.14.3-rust-bump"
+      },
+      "stwo": {
+        "repository": "https://github.com/starkware-libs/stwo.git",
+        "revision": "489a0f3ee44a59e03944ad9aa4f3e5a91a3d3f08"
+      },
+      "stwo-cairo": {
+        "repository": "https://github.com/starkware-libs/stwo-cairo.git",
+        "revision": "9b6be2710e4d7124bc93fe80a5af36556d42ed29"
+      },
+      "stwo-circuits": {
+        "repository": "https://github.com/starkware-libs/stwo-circuits.git",
+        "revision": "5ef951a12727e3489a2ee991c580a5b925c59c69"
+      }
+    }
+  },
   "toolchain": "nightly-2026-01-15",
   "cairo_lang": "0.14.3a3",
   "virtual_os_program": "0x53f6c9fcfd31d27279ff7d7e422b44623550a732b59fe193354a7316a96daa1",
