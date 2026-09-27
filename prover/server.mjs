@@ -29,7 +29,21 @@ const OS_PROGRAM_SELECTOR = hash.getSelectorFromName('os_program');
 
 const DEFAULTS = {
   host: '127.0.0.1', port: 3100, max_concurrent: 1, max_queued: 8, max_calldata: 20000,
-  max_body_bytes: 1 << 20, rate_per_minute: 12, backend_timeout_ms: 600000,
+  max_body_bytes: 1 << 20, rate_per_minute: 12, backend_timeout_ms: 600000, memory: 'standard',
+};
+
+/**
+ * The backend's memory modes (config `memory`) and the environment run.sh starts
+ * it with. Both produce the same proofs: `bounded` needs about 45% less memory
+ * per proof and proves about 2x slower (README). Both give glibc a fixed 1 MiB
+ * mmap threshold, so proving buffers return to the system after each proof
+ * instead of accumulating in the heap across proofs.
+ */
+const RELEASE_BUFFERS = { MALLOC_MMAP_THRESHOLD_: '1048576' };
+export const MEMORY_MODES = {
+  standard: { ...RELEASE_BUFFERS },
+  bounded: { ...RELEASE_BUFFERS, PROVER_LOW_MEMORY: '1', PROVER_BOUNDED_CAIRO_COLUMNS: '16',
+    PROVER_BOUNDED_CIRCUIT_COLUMNS: '16' },
 };
 
 class RpcError extends Error {
@@ -49,6 +63,8 @@ export function loadConfig(raw) {
     throw Error('Config needs at least one adapter class in adapter_classes');
   config.adapter_classes = new Set(config.adapter_classes.map(c => BigInt(c)));
   config.virtual_os_program = BigInt(config.virtual_os_program);
+  if (!Object.hasOwn(MEMORY_MODES, config.memory))
+    throw Error(`Config memory must be one of ${Object.keys(MEMORY_MODES).join(', ')}`);
   return config;
 }
 
@@ -107,6 +123,7 @@ export async function startGateway(rawConfig, { log = entry => console.log(JSON.
   const info = () => ({
     chain_id: config.chain_id, virtual_os_program: hex(config.virtual_os_program),
     adapter_classes: [...config.adapter_classes].map(hex), proof_paths: ['PROOF1'], backend_spec_version: backendVersion,
+    memory: config.memory,
     limits: { max_concurrent: config.max_concurrent, max_queued: config.max_queued, max_calldata: config.max_calldata,
       rate_per_minute: config.rate_per_minute },
   });

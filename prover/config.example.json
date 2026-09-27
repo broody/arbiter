@@ -9,6 +9,7 @@
     "0x0000000000000000000000000000000000000000000000000000000000000000"
   ],
   "max_concurrent": 1,
+  "memory": "standard",
   "max_queued": 8,
   "max_calldata": 20000,
   "rate_per_minute": 12,

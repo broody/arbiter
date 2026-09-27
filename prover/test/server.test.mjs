@@ -8,7 +8,7 @@ import { hex, tag } from '../../sdk/src/index.mjs';
 import { rpc } from '../../sdk/src/proving.mjs';
 import {
   BLOCK_NOT_FOUND, EXCEEDS_PROOF1, INVALID_PARAMS, INVALID_TRANSACTION, METHOD_NOT_FOUND, NOT_ALLOWED, RATE_LIMITED,
-  SERVICE_BUSY, WRONG_OS_PROGRAM, startGateway,
+  SERVICE_BUSY, WRONG_OS_PROGRAM, loadConfig, startGateway,
 } from '../server.mjs';
 
 const OS = 0x53f6c9fcfd31d27279ff7d7e422b44623550a732b59fe193354a7316a96daa1n;
@@ -88,6 +88,7 @@ test('an allowlisted adapter reaches the backend and gets its proof', async () =
     const info = await rpc(s.gateway.url, 'referee_info', []);
     assert.deepEqual(info.adapter_classes, [hex(CLASS)]);
     assert.deepEqual(info.proof_paths, ['PROOF1']);
+    assert.equal(info.memory, 'standard');
     assert.equal(s.logs.at(-1).outcome, 'proved');
   } finally { await s.close(); }
 });
@@ -159,6 +160,15 @@ test('clients are rate limited', async () => {
     await prove(s.gateway.url, params); await prove(s.gateway.url, params);
     await assert.rejects(prove(s.gateway.url, params), code(RATE_LIMITED));
   } finally { await s.close(); }
+});
+
+test('the memory mode must be one the backend has', () => {
+  const base = { rpc_url: 'http://node', backend_url: 'http://backend', chain_id: 'SN_SEPOLIA',
+    virtual_os_program: hex(OS), adapter_classes: [hex(CLASS)] };
+  assert.equal(loadConfig(base).memory, 'standard');
+  assert.equal(loadConfig({ ...base, memory: 'bounded' }).memory, 'bounded');
+  assert.throws(() => loadConfig({ ...base, memory: 'tiny' }), /memory must be one of standard, bounded/);
+  assert.throws(() => loadConfig({ ...base, memory: 'toString' }), /memory must be one of/);
 });
 
 test('startup refuses the wrong chain or an undeclared adapter class', async () => {
