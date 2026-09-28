@@ -109,3 +109,14 @@ test('an unreadable channel is logged and the round goes on', async () => {
   await round();
   assert.equal(chain.sent.length, 1);
 });
+
+test('an unanchored game is never looked up onchain', async () => {
+  const chain = fakeChain();
+  let reads = 0;
+  chain.channel = async () => { reads += 1; throw Error('No channel'); };
+  const { archive, logs, round } = await watching(chain, { anchored: false });
+  await archive.register(played(FINISHED).export());
+  await round();
+  assert.equal(reads, 0);
+  assert.deepEqual([chain.sent, logs], [[], []]);
+});

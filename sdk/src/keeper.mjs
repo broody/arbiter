@@ -16,8 +16,14 @@ export class KeeperClient {
     this.fetch = fetch;
   }
 
-  /** Archive `session`, or merge it into the keeper's copy. */
-  register(session) { return this.#call('POST', '/games', { record: session.export() }); }
+  /**
+   * Archive `session`, or merge it into the keeper's copy. A game that no
+   * channel anchors needs, the first time, each seat's wallet signature over
+   * `termsTypedData(game, terms)`, in seat order.
+   */
+  register(session, { authorizations } = {}) {
+    return this.#call('POST', '/games', { record: session.export(), ...(authorizations ? { authorizations } : {}) });
+  }
 
   /** Send `session`'s steps from seq `from` (default: every step). */
   send(session, from = session.start.seq) {

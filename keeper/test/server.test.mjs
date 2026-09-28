@@ -4,11 +4,13 @@ import assert from 'node:assert/strict';
 import { dirname } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { hex } from '../../sdk/src/index.mjs';
+import { Session, hex, termsTypedData } from '../../sdk/src/index.mjs';
 import { KeeperClient } from '../../sdk/src/keeper.mjs';
-import { SessionStore, memoryBackend, stringify } from '../../sdk/src/store.mjs';
+import { SessionStore, memoryBackend, parse, stringify } from '../../sdk/src/store.mjs';
 import { loadConfig, startKeeper } from '../server.mjs';
-import { CHANNEL, add, channelOf, counter, copy, fakeChain, keys, played, prefix, terms } from './fixtures.mjs';
+import {
+  CHANNEL, add, channelOf, counter, copy, fakeChain, keys, played, prefix, terms, walletAddress, walletSign, wallets,
+} from './fixtures.mjs';
 
 const base = dirname(fileURLToPath(import.meta.url));
 const GAME = { channel: hex(CHANNEL), module: '../../sdk/examples/counter.mjs', export: 'counter' };
@@ -80,7 +82,7 @@ test('requests are checked, limited and answered with CORS', async () => {
     const preflight = await raw('/games', { method: 'OPTIONS' });
     assert.deepEqual([preflight.status, preflight.headers.get('access-control-allow-origin')], [204, '*']);
     assert.equal(await (await raw('/health')).text(), 'ok');
-    assert.deepEqual((await (await raw('/info')).json()).games, [{ channel: hex(CHANNEL), tag: 'COUNTER', prover: false }]);
+    assert.deepEqual((await (await raw('/info')).json()).games, [{ channel: hex(CHANNEL), tag: 'COUNTER', anchored: true, prover: false }]);
 
     // Terms the channel does not hold are refused.
     chain.channels.set(7n, { ...chain.channels.get(7n), context: 1n });
@@ -90,6 +92,32 @@ test('requests are checked, limited and answered with CORS', async () => {
     assert.equal((await raw('/games', { method: 'POST', body: '{' })).status, 400);
     const limited = await raw('/games', { method: 'POST', body: '{}' });
     assert.deepEqual([limited.status, (await limited.json()).error.message], [429, 'Too many requests; retry later']);
+  } finally { await k.close(); }
+});
+
+test('an unanchored game needs each seat\'s wallet to sign its terms', async () => {
+  // Casual games open on no channel: the keeper checks the wallets instead.
+  const CASUAL = { ...GAME, channel: '0x0', anchored: false };
+  const k = await keeper({ games: [GAME, CASUAL] });
+  try {
+    const casual = { ...terms(9n), channel: 0n, players: wallets.map(walletAddress) };
+    const session = new Session(counter, casual);
+    session.move(add(3), keys[0]);
+    const message = termsTypedData(counter, casual);
+    const [alice, bob] = wallets.map(key => walletSign(key, message));
+    await assert.rejects(k.client.register(session), /each seat's wallet signature over its terms/);
+    await assert.rejects(k.client.register(session, { authorizations: [alice, alice] }), /Seat 1's wallet did not sign/);
+    // Signatures over other terms do not carry over.
+    const other = termsTypedData(counter, { ...casual, game_id: 10n });
+    await assert.rejects(k.client.register(session, { authorizations: [walletSign(wallets[0], other), bob] }),
+      /Seat 0's wallet did not sign/);
+    // No channel onchain is read: the fake chain knows none for game 9.
+    assert.equal((await k.client.register(session, { authorizations: [alice, bob] })).created, true);
+    const kept = parse(await (await fetch(`${k.url}/games/0x0/${hex(9n)}`)).text());
+    assert.deepEqual(kept.authorizations, [alice, bob]);
+    assert.equal(kept.seq, 1);
+    const info = await (await fetch(`${k.url}/info`)).json();
+    assert.deepEqual(info.games.map(g => g.anchored), [true, false]);
   } finally { await k.close(); }
 });
 
@@ -109,4 +137,6 @@ test('config loads game codecs and needs the account key from the environment', 
     { privateKey: '0x7e' });
   await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [{ ...GAME, export: 'nope' }] }, { base }), /no game codec named nope/);
   await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [] }, { base }), /at least one/);
+  await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [{ ...GAME, anchored: false, prover: { url: 'x', class_hash: '0x1' } }] }, { base }),
+    /no channel to settle on/);
 });

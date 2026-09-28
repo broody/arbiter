@@ -102,6 +102,29 @@ export const stampHash = (game, context, env) =>
   signingHash([tag(game.tag), tag('REFEREE_STAMP_V1'), felt(context), BigInt(env.seq), felt(env.transcript), ...encodeClock(game, env.clock)]);
 
 /**
+ * What each seat's wallet signs to play a game that no channel anchors
+ * onchain: SNIP-12 typed data naming the game and its terms' context hash.
+ * The context binds every term, so the signature binds the wallet
+ * (`terms.players[seat]`) to its session key (`terms.keys[seat]`), as creating
+ * and joining a channel does onchain. Sign it with the wallet
+ * (`account.signMessage`); a keeper checks it against the account contract.
+ */
+export function termsTypedData(game, terms) {
+  return {
+    types: {
+      StarknetDomain: [
+        { name: 'name', type: 'shortstring' }, { name: 'version', type: 'shortstring' },
+        { name: 'chainId', type: 'shortstring' }, { name: 'revision', type: 'shortstring' },
+      ],
+      Game: [{ name: 'game', type: 'shortstring' }, { name: 'game_id', type: 'felt' }, { name: 'context', type: 'felt' }],
+    },
+    primaryType: 'Game',
+    domain: { name: 'referee', version: '1', chainId: shortString.decodeShortString(hex(terms.chain_id)), revision: '1' },
+    message: { game: game.tag, game_id: hex(terms.game_id), context: hex(contextHash(game, terms)) },
+  };
+}
+
+/**
  * A timed game's clock (`Clock`): `{ seats, used, stamp }`, each seat's clocks
  * as the game's time rules keep them, the time used in the current turn, and
  * the last stamp, in milliseconds.

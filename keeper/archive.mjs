@@ -22,7 +22,7 @@ export const outranks = (a, b) =>
   a.support_turn > b.support_turn || (a.support_turn === b.support_turn && a.seq > b.seq);
 
 export const gameKey = ids => `${hex(ids.channel)}/${hex(ids.game_id)}`;
-const EVIDENCE = 'keeper/evidence/', CLOSED = 'keeper/closed/';
+const EVIDENCE = 'keeper/evidence/', CLOSED = 'keeper/closed/', AUTHORIZED = 'keeper/authorized/';
 const summary = session => ({ start: session.start.seq, seq: session.env.seq, transcript: session.env.transcript });
 const position = session => ({ seq: session.start.seq, transcript: session.start.transcript });
 
@@ -81,8 +81,15 @@ export class Archive {
     return { ...summary(session), steps: session.steps.slice(Math.max(0, from - session.start.seq)) };
   }
 
-  /** Archive an exported session, or merge it into the archived copy. */
-  async register(record) {
+  /** The wallet signatures an unanchored game was admitted with, or null. */
+  async authorizations(ids) { return (await this.backend.get(`${AUTHORIZED}${gameKey(ids)}`)) ?? null; }
+
+  /**
+   * Archive an exported session, or merge it into the archived copy. A new
+   * game's terms must pass `verify`, with `authorizations` for a game no
+   * channel anchors, which are kept with it.
+   */
+  async register(record, authorizations) {
     if (!record?.terms || !Array.isArray(record.steps)) fail(400, 'Expected { record: session.export() }');
     try { ['chain_id', 'channel', 'game_id'].forEach(k => felt(record.terms[k])); } catch { fail(400, 'Invalid terms'); }
     const game = this.gameFor(record.terms.channel);
@@ -95,7 +102,8 @@ export class Archive {
       const current = await this.#load(ids);
       if (!current) {
         if (this.known.size >= this.maxGames) fail(503, 'The keeper is full');
-        await this.verifyTerms?.(incoming);
+        await this.verifyTerms?.(incoming, authorizations);
+        if (authorizations) await this.backend.put(`${AUTHORIZED}${key}`, authorizations);
         await this.store.save(incoming);
         this.known.set(key, ids);
         this.#adopt(key, incoming);
@@ -110,7 +118,8 @@ export class Archive {
       if (incoming.start.seq < current.start.seq && incoming.includes(position(current)))
         return this.#merge(key, current, current.start.seq, incoming.steps.slice(current.start.seq - incoming.start.seq).map(signedStep));
       // Disjoint histories: only the channel's current anchor replaces the archive.
-      if (!this.anchorHash || felt(await this.anchorHash(ids)) !== stateHash(game, incoming.start))
+      const anchor = this.anchorHash ? await this.anchorHash(ids) : null;
+      if (anchor == null || felt(anchor) !== stateHash(game, incoming.start))
         fail(409, 'The session neither overlaps the archived transcript nor starts at the channel anchor');
       await this.store.save(incoming, { replace: true });
       this.#adopt(key, incoming);

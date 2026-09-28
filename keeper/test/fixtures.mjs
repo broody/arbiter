@@ -1,4 +1,5 @@
 // Counter games and a fake chain for the keeper tests. No network access.
+import { ec, typedData } from 'starknet';
 import { Session, contextHash, due, play, publicKey, resign, signedStep, stateHash, tag } from '../../sdk/src/index.mjs';
 import { ADD, counter } from '../../sdk/examples/counter.mjs';
 import { ACTIVE } from '../watch.mjs';
@@ -35,11 +36,30 @@ export function channelOf(session, { status = ACTIVE, epoch = 0, anchor = sessio
     candidate: ref(candidate), deadline, anchor_block: 0 };
 }
 
+/**
+ * Test wallets: each account's address is its key's Stark public key, and it
+ * signs SNIP-12 messages as an OpenZeppelin account does, `[r, s]` over the
+ * message hash.
+ */
+export const wallets = [0x5eed1n, 0x5eed2n];
+const keyHex = key => `0x${key.toString(16)}`;
+export const walletAddress = key => BigInt(ec.starkCurve.getStarkKey(keyHex(key)));
+export function walletSign(key, message) {
+  const signature = ec.starkCurve.sign(typedData.getMessageHash(message, walletAddress(key)), keyHex(key));
+  return [signature.r, signature.s];
+}
+
 /** The watcher's chain interface over settable channels, recording every send. */
 export function fakeChain({ canSend = true } = {}) {
   const channels = new Map(), sent = [];
+  const accounts = new Map(wallets.map(key => [walletAddress(key), ec.starkCurve.getPublicKey(keyHex(key))]));
   return {
     channels, sent, time: 1000, canSend,
+    async verifyMessage(address, message, [r, s]) {
+      const key = accounts.get(BigInt(address));
+      return Boolean(key) && ec.starkCurve.verify(new ec.starkCurve.Signature(BigInt(r), BigInt(s)),
+        typedData.getMessageHash(message, BigInt(address)), key);
+    },
     async now() { return this.time; },
     async channel(entry, gameId) {
       const channel = channels.get(BigInt(gameId));

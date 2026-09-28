@@ -61,8 +61,11 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
   }
 
   async function visit(ids, now) {
-    const key = gameKey(ids), entry = entries.get(ids.channel), session = await archive.session(ids);
-    if (!entry || !session) return;
+    const key = gameKey(ids), entry = entries.get(ids.channel);
+    // An unanchored game has no channel to watch.
+    if (!entry || entry.anchored === false) return;
+    const session = await archive.session(ids);
+    if (!session) return;
     const channel = await chain.channel(entry, ids.game_id);
     const decision = decide(channel, session, now, { settle, baseFor: baseFor(key, session) });
     if (decision.action === 'close') {

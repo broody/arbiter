@@ -1,6 +1,12 @@
 // referee keeper: archives and forwards each game's signed steps, and watches
 // the channel to answer disputes, resolve them and settle finished games.
 //
+// A game entry is anchored (the default) when its games open on a channel
+// onchain: the keeper checks their terms against it and watches it. An
+// unanchored entry keeps games that never touch the chain, such as casual
+// ones; each seat's wallet instead signs the terms (`termsTypedData`), which
+// the keeper checks against the seat's account contract.
+//
 // Its trust model is the prover gateway's: it accepts only steps that verify,
 // so it cannot forge a move, and both players keep their own copies, so it can
 // delay or withhold but not rewrite. It never holds player keys; its own
@@ -11,7 +17,7 @@
 //   node keeper/server.mjs CONFIG_JSON      (see config.example.json)
 //
 // HTTP API (JSON; BigInts as { "$n": "<decimal>" }, see @referee/sdk/store):
-//   POST /games                             { record: session.export() }
+//   POST /games                             { record: session.export(), authorizations? }
 //   GET  /games                             archived game ids
 //   GET  /games/:channel/:game              { record, start, seq, transcript }
 //   GET  /games/:channel/:game/steps        ?from=SEQ&wait=SECONDS (long poll)
@@ -23,7 +29,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { felt, hex, tag } from '../sdk/src/index.mjs';
+import { felt, hex, tag, termsTypedData } from '../sdk/src/index.mjs';
 import { parse, stringify } from '../sdk/src/store.mjs';
 import { fileBackend } from '../sdk/src/store-file.mjs';
 import { Archive, KeeperError, fail } from './archive.mjs';
@@ -53,9 +59,10 @@ export async function loadConfig(raw, { base = process.cwd(), env = process.env 
     const url = g.module.startsWith('.') ? pathToFileURL(resolve(base, g.module)).href : g.module;
     const game = (await import(url))[g.export];
     if (!game?.tag) throw Error(`${g.module} exports no game codec named ${g.export}`);
-    const channel = felt(g.channel);
+    const channel = felt(g.channel), anchored = g.anchored ?? true;
+    if (!anchored && g.prover) throw Error('An unanchored game has no channel to settle on: remove its prover');
     config.entries.set(channel, {
-      channel, game, entrypoints: { ...ENTRYPOINTS, ...g.entrypoints },
+      channel, game, anchored, entrypoints: { ...ENTRYPOINTS, ...g.entrypoints },
       max_history_steps: g.max_history_steps ?? config.max_history_steps,
       prover: g.prover ? { url: g.prover.url, class_hash: BigInt(g.prover.class_hash) } : null,
     });
@@ -76,6 +83,21 @@ export async function loadConfig(raw, { base = process.cwd(), env = process.env 
 }
 
 /**
+ * Check that each seat's wallet signed an unanchored game's terms: one
+ * signature per player, in seat order, valid for `termsTypedData`.
+ */
+async function verifyAuthorizations(chain, game, terms, authorizations) {
+  if (!Array.isArray(authorizations) || authorizations.length !== terms.players.length)
+    fail(403, 'An unanchored game needs each seat\'s wallet signature over its terms');
+  const typedData = termsTypedData(game, terms);
+  for (const [seat, player] of terms.players.entries()) {
+    let valid = false;
+    try { valid = await chain.verifyMessage(player, typedData, authorizations[seat]); } catch {}
+    if (!valid) fail(403, `Seat ${seat}'s wallet did not sign these terms`);
+  }
+}
+
+/**
  * Start a keeper. `backend` defaults to a file store at `config.store`, and
  * `chain` to Starknet at `config.rpc_url` (see keeper/chain.mjs); without
  * either, a keeper archives unverified terms and does not watch, which suits
@@ -89,11 +111,16 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
   const archive = await Archive.open(backend, {
     games: [...entries].map(([channel, entry]) => [channel, entry.game]), chainId: config.chain,
     maxSteps: config.max_steps, maxGames: config.max_games, referee: config.referee ?? null, now, log,
-    verify: chain && (async session => {
-      const channel = await chain.channel(entries.get(felt(session.terms.channel)), session.terms.game_id);
+    verify: chain && (async (session, authorizations) => {
+      const entry = entries.get(felt(session.terms.channel));
+      if (!entry.anchored) return verifyAuthorizations(chain, entry.game, session.terms, authorizations);
+      const channel = await chain.channel(entry, session.terms.game_id);
       if (channel.status === WAITING || felt(channel.context) !== session.context) fail(409, 'The terms differ from the channel onchain');
     }),
-    anchorHash: chain && (async ids => (await chain.channel(entries.get(ids.channel), ids.game_id)).anchor.hash),
+    anchorHash: chain && (async ids => {
+      const entry = entries.get(ids.channel);
+      return entry.anchored ? (await chain.channel(entry, ids.game_id)).anchor.hash : null;
+    }),
   });
   const watcher = chain && config.poll_seconds > 0
     ? startWatcher({ archive, chain, entries, intervalMs: config.poll_seconds * 1000, settle: config.settle, log })
@@ -113,7 +140,7 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
   const info = () => ({
     chain_id: config.chain_id, watching: watcher !== null, sending: Boolean(chain?.canSend),
     referee: archive.referee === null ? null : hex(archive.referee),
-    games: [...entries.values()].map(e => ({ channel: hex(e.channel), tag: e.game.tag, prover: Boolean(e.prover) })),
+    games: [...entries.values()].map(e => ({ channel: hex(e.channel), tag: e.game.tag, anchored: e.anchored, prover: Boolean(e.prover) })),
     limits: { max_games: config.max_games, max_steps: config.max_steps, max_body_bytes: config.max_body_bytes,
       rate_per_minute: config.rate_per_minute, max_wait_seconds: config.max_wait_seconds, max_waiters: config.max_waiters },
   });
@@ -125,14 +152,16 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
     const [root, channel, game, leaf, ...rest] = parts;
     if (root !== 'games' || rest.length) fail(404, 'Not found');
     if (!channel) {
-      if (method === 'POST') return archive.register(body?.record);
+      if (method === 'POST') return archive.register(body?.record, body?.authorizations);
       if (method === 'GET') return { games: archive.open().map(ids => ({ channel: hex(ids.channel), game_id: hex(ids.game_id) })) };
       fail(405, 'Method not allowed');
     }
     const ids = idsOf(channel, game);
     if (!leaf && method === 'GET') {
       const session = await archive.session(ids) ?? fail(404, 'Unknown game');
-      return { record: session.export(), start: session.start.seq, seq: session.env.seq, transcript: session.env.transcript };
+      const authorizations = await archive.authorizations(ids);
+      return { record: session.export(), start: session.start.seq, seq: session.env.seq, transcript: session.env.transcript,
+        ...(authorizations ? { authorizations } : {}) };
     }
     if (leaf === 'evidence' && method === 'GET') return { evidence: await archive.evidence(ids) };
     if (leaf !== 'steps') fail(404, 'Not found');

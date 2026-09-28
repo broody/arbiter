@@ -41,6 +41,8 @@ export function starknetChain({ rpcUrl, provider = new RpcProvider({ nodeUrl: rp
     async chainId() { return BigInt(await provider.getChainId()); },
     async now() { return Number((await provider.getBlockWithTxHashes('latest')).timestamp); },
     channel: (entry, gameId) => getChannel(provider, entry.game, entry.channel, gameId, { entrypoint: names(entry).get_channel }),
+    /** Whether `address`'s account contract accepts `signature` over SNIP-12 `typedData`. */
+    verifyMessage: (address, typedData, signature) => provider.verifyMessageInStarknet(typedData, signature, address),
     submitHistory: (entry, session, epoch) => send([historyCall(session, epoch, { entrypoint: names(entry).submit_history })]),
     resolve: (entry, gameId, epoch) => send([contractCall(entry.channel, names(entry).resolve, [gameId, epoch])]),
     async settle(entry, session, epoch) {

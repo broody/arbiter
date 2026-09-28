@@ -57,6 +57,18 @@ await keeper.submit(session, { store });                 // every pending step, 
   pass `Session.import`, and match the context the channel stores onchain,
   which binds every term. Squatting a game id with other terms therefore
   fails.
+- **Unanchored games.** A game entry with `anchored: false` keeps games that
+  never touch the chain, such as free casual ones: no channel holds their
+  terms, and the watcher leaves them alone. Instead, each seat's wallet signs
+  the terms (`termsTypedData(game, terms)` in `@referee/sdk`, SNIP-12), and
+  `register` sends the signatures in seat order. The keeper checks each
+  against the seat's account contract (`is_valid_signature`, through
+  `rpc_url`) and keeps them
+  with the game. The terms' context binds every term, session keys included,
+  so the signatures bind each wallet to its key, as creating and joining a
+  channel do onchain. The terms name the entry's channel value, which is no
+  real channel, so their signatures can never settle anywhere. Clients pick
+  random game ids.
 - **Branches.** Steps that overlap the archive are checked position by position.
   When a step differs from the stored one:
   - the other branch replaces the archive only if it ranks higher, as the
@@ -111,13 +123,13 @@ Without an `account`, the keeper only watches and logs what it would send.
 
 The API speaks JSON, with BigInts encoded as `{ "$n": "<decimal>" }`
 (`stringify`/`parse` in `@referee/sdk/store`). Errors look like
-`{ error: { message, data } }` and carry status 400, 404, 409, 413, 429 or 503.
+`{ error: { message, data } }` and carry status 400, 403, 404, 409, 413, 429 or 503.
 
 | Request | Body / query | Answer |
 | --- | --- | --- |
-| `POST /games` | `{ record: session.export() }` | `{ start, seq, transcript, created \| accepted \| reanchored }` |
+| `POST /games` | `{ record: session.export(), authorizations? }` | `{ start, seq, transcript, created \| accepted \| reanchored }` |
 | `GET /games` | | open games |
-| `GET /games/:channel/:game` | | `{ record, start, seq, transcript }` |
+| `GET /games/:channel/:game` | | `{ record, start, seq, transcript, authorizations? }` |
 | `GET /games/:channel/:game/steps` | `?from=SEQ&wait=SECONDS` | `{ start, seq, transcript, steps }`: step records from `from`, long-polling up to `max_wait_seconds` |
 | `POST /games/:channel/:game/steps` | `{ from, steps: [{ step, signature, stamp?, attestation? }] }` | `{ seq, accepted, switched? }` |
 | `GET /games/:channel/:game/evidence` | | `{ evidence }` |
@@ -138,6 +150,9 @@ capped at `max_waiters`. Games and transcripts are capped at `max_games` and
     `resolve_dispute` and `get_channel`.
   - The game system must expose `get_channel(game_id) -> ChannelGame`. The
     counter's does.
+  - `anchored: false` makes it an unanchored entry (see Archive): `channel`
+    is then any value the entry's terms name, `0x0` for instance, and it takes
+    no `prover`.
 - `store`: the file store directory (`@referee/sdk/store/file`, one process
   per directory).
 - `settle: false` stops the keeper from submitting finished games itself.
