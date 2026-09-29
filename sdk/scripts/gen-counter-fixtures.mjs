@@ -1,14 +1,16 @@
 // Plays scripted counter games through the JS SDK, one untimed and three timed
 // (stamped by a referee and ending in a flag): on the standard time rules,
-// with byo-yomi, and on the hourglass rules of examples/counter/src/hourglass.
+// with byo-yomi, and on the hourglass rules of examples/counter/src/hourglass,
+// whose clock the referee starts before the first move.
 // Writes the signed transcripts and expected results as Cairo fixtures for
 // examples/counter.
 // Usage (from the repo root): node sdk/scripts/gen-counter-fixtures.mjs
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  MOVE_FLAG, MOVE_PLAY, MOVE_PLAY_RANDOM, MOVE_RECOMMIT, MOVE_REVEAL, Session, applyStep, checkpointHash, contextHash,
-  flag, hex, open, play, playRandom, publicKey, recommit, reveal, rngChain, sign, stateHash, tag, verify,
+  MOVE_FLAG, MOVE_PLAY, MOVE_PLAY_RANDOM, MOVE_RECOMMIT, MOVE_REVEAL, MOVE_START, Session, applyStep, checkpointHash,
+  contextHash, flag, hex, liveHash, open, play, playRandom, publicKey, recommit, refereeResumeHash, reveal, rngChain, sign,
+  start, stateHash, tag, verify,
 } from '../src/index.mjs';
 
 import { ADD, GAMBLE, counter, hourglassCounter } from '../examples/counter.mjs';
@@ -59,7 +61,8 @@ function timedGame(game_id, settings, script, game = counter) {
   let now = 1_000_000;
   for (const [move, after] of script) {
     now += after;
-    const signed = move.kind === MOVE_FLAG ? { step: move } : session.sign(move, privateKeys[session.due()]);
+    const referee = move.kind === MOVE_FLAG || move.kind === MOVE_START;
+    const signed = referee ? { step: move } : session.sign(move, privateKeys[session.due()]);
     session.stamp(signed, now, refereeKey);
   }
   return session;
@@ -84,13 +87,15 @@ const byoyomi = timedGame(3n, { turn_ms: 0, bank_ms: 10000, increment_ms: 0, byo
   [play({ kind: ADD, amount: 1 }), 3000], // seat 0, inside a period
   [flag(), 10001], // seat 1 outlasts both of its last periods
 ]);
-// Hourglass: 10 s each, and the time a seat uses flows to its opponent.
+// Hourglass: 10 s each, and the time a seat uses flows to its opponent. The
+// referee starts the clock, so seat 0's first move is timed too.
 const hourglass = timedGame(4n, { bank_ms: 10000 }, [
-  [play({ kind: ADD, amount: 3 }), 0], // seat 0
-  [play({ kind: ADD, amount: 3 }), 4000], // seat 1: 6 s left, seat 0 now has 14 s
-  [play({ kind: ADD, amount: 3 }), 9000], // seat 0: 5 s left, seat 1 has 15 s
-  [play({ kind: ADD, amount: 3 }), 1000], // seat 1: 14 s left, seat 0 has 6 s
-  [flag(), 6001], // seat 0 runs dry
+  [start(), 0], // the referee
+  [play({ kind: ADD, amount: 3 }), 2000], // seat 0: 8 s left, seat 1 now has 12 s
+  [play({ kind: ADD, amount: 3 }), 4000], // seat 1: 8 s left, seat 0 has 12 s
+  [play({ kind: ADD, amount: 3 }), 9000], // seat 0: 3 s left, seat 1 has 17 s
+  [play({ kind: ADD, amount: 3 }), 1000], // seat 1: 16 s left, seat 0 has 4 s
+  [flag(), 4001], // seat 0 runs dry
 ], hourglassCounter);
 
 // ---- emit Cairo ----
@@ -106,6 +111,7 @@ function moveCairo(m) {
     case MOVE_REVEAL: return `Move::Reveal(${h(m.value)})`;
     case MOVE_RECOMMIT: return `Move::Recommit(${h(m.tip)})`;
     case MOVE_FLAG: return 'Move::Flag';
+    case MOVE_START: return 'Move::Start';
     default: return `Move::Resign(${m.seat})`;
   }
 }
@@ -140,6 +146,7 @@ const envelopeCairo = (e, game = counter) => `Envelope {
         last_seat: ${e.last_seat},
         pending: Pending { active: ${bool(e.pending.active)}, seat: ${e.pending.seat}, seq: ${e.pending.seq}, entropy: ${h(e.pending.entropy)} },
         rng_heads: ${spanOf(e.rng_heads)},
+        rng_fresh: array![${e.rng_fresh.map(bool).join(', ')}].span(),
         clock: ${clockCairo(game, e.clock)},
         outcome: Outcome { finished: ${bool(e.outcome.finished)}, winner: ${e.outcome.winner}, reason: ${e.outcome.reason} },
         game: Counter { total: ${e.game.total}, next: ${e.game.next}, gamble: ${bool(e.game.gamble)}, winner: ${e.game.winner}, target: ${e.game.target} },
@@ -198,6 +205,10 @@ use crate::{Action, Config, Counter};
 pub const CONTEXT: felt252 = ${h(context)};
 pub const STATE_HASH: felt252 = ${h(finalHash)};
 pub const CHECKPOINT: felt252 = ${h(checkpoint)};
+/// \`live_hash\` at epoch 3 and deadline 12345, and \`referee_resume_hash\` at
+/// epoch 2 from the final state.
+pub const LIVE_HASH: felt252 = ${h(liveHash(counter, context, 3, 12345))};
+pub const REFEREE_RESUME_HASH: felt252 = ${h(refereeResumeHash(counter, context, 2, finalHash))};
 pub const RNG_LEN: u32 = ${RNG_LEN};
 pub const SEED_0: felt252 = ${h(chains[0][0])};
 pub const SEED_1: felt252 = ${h(chains[1][0])};

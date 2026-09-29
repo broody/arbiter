@@ -7,9 +7,11 @@ use crate::types::{
     Signature, Terms, TimeControl,
 };
 
-/// Version 3: optional referee clocks. Version 2 made steps seat-implicit
-/// `Move`s and replays take one final signature per seat.
-pub const PROTOCOL_VERSION: felt252 = 3;
+/// Version 4: `Move::Start`, recommits only after a reveal, a transcript cap
+/// (`GameRules::max_steps`), and disputes a live referee returns to offchain
+/// play. Version 3 added optional referee clocks; version 2 made steps
+/// seat-implicit `Move`s and replays take one final signature per seat.
+pub const PROTOCOL_VERSION: felt252 = 4;
 
 // Stark signatures require a message below 2^251. Use an explicit 250-bit mask
 // in every language; never reinterpret a field hash as an unrestricted message.
@@ -56,6 +58,20 @@ pub fn checkpoint_hash<impl R: GameRules>(context: felt252, epoch: u32, state: f
 
 pub fn reopen_hash<impl R: GameRules>(context: felt252, epoch: u32, state: felt252) -> felt252 {
     signing_hash(array![R::TAG, 'REFEREE_REOPEN_V1', context, epoch.into(), state].span())
+}
+
+/// Message the referee of a timed game signs to show it is live during a
+/// dispute (`channel::acknowledge`): the dispute's epoch and deadline.
+pub fn live_hash<impl R: GameRules>(context: felt252, epoch: u32, deadline: u64) -> felt252 {
+    signing_hash(array![R::TAG, 'REFEREE_LIVE_V1', context, epoch.into(), deadline.into()].span())
+}
+
+/// Message the referee of a timed game signs to return it from forced play to
+/// offchain play on its own (`channel::resume`), from the anchor `state`.
+pub fn referee_resume_hash<impl R: GameRules>(
+    context: felt252, epoch: u32, state: felt252,
+) -> felt252 {
+    signing_hash(array![R::TAG, 'REFEREE_RESUME_V1', context, epoch.into(), state].span())
 }
 
 /// Message the referee of a timed game signs after each step: the transcript
@@ -150,6 +166,10 @@ pub fn open<impl R: GameRules, +Drop<R::State>>(terms: @Terms<R::Config>) -> Env
         ),
         Option::None => Option::None,
     };
+    let mut rng_fresh = array![];
+    while rng_fresh.len() < R::SEATS.into() {
+        rng_fresh.append(true);
+    }
     Envelope {
         seq: 0,
         transcript: 0,
@@ -157,6 +177,7 @@ pub fn open<impl R: GameRules, +Drop<R::State>>(terms: @Terms<R::Config>) -> Env
         last_seat: NO_SEAT,
         pending: idle(),
         rng_heads: rng_tips,
+        rng_fresh: rng_fresh.span(),
         clock,
         outcome: Outcome { finished: false, winner: 0, reason: 0 },
         game: R::init(terms.config),
@@ -173,12 +194,13 @@ pub fn due<impl R: GameRules>(env: @Envelope<R::State>) -> u8 {
 }
 
 /// The seat a step belongs to: `Resign` names it; `Reveal` belongs to the
-/// pending seat; `Flag` to the referee (`REFEREE`); every other move to the
-/// seat whose turn it is.
+/// pending seat; `Flag` and `Start` to the referee (`REFEREE`); every other
+/// move to the seat whose turn it is.
 pub fn actor<impl R: GameRules>(env: @Envelope<R::State>, step: @Move<R::Action>) -> u8 {
     match step {
         Move::Resign(seat) => *seat,
         Move::Flag => REFEREE,
+        Move::Start => REFEREE,
         Move::Reveal(_) => {
             assert(*env.pending.active, 'No reveal due');
             *env.pending.seat
@@ -313,7 +335,8 @@ pub fn apply_steps<
 
 /// Apply unsigned steps that must all belong to `seat`, e.g. a forced onchain
 /// turn whose seat the wallet caller authenticates. They carry no stamps, so a
-/// timed game's clock pauses: forced play runs on the channel's windows.
+/// timed game's clock pauses: forced play runs on the channel's windows. The
+/// referee's steps (`Flag`, `Start`) are never a seat's.
 pub fn force<
     impl R: GameRules,
     +Copy<R::State>,
@@ -370,7 +393,11 @@ fn advance<
     // The seat on the clock, and the seat whose turn it is.
     let payer = due::<R>(@env);
     let turn_seat = R::due(@env.game);
-    let flag = seat == REFEREE;
+    let referee_step = match step {
+        Move::Flag => Option::Some(true),
+        Move::Start => Option::Some(false),
+        _ => Option::None,
+    };
     match time {
         Option::Some(settings) => {
             let clock = env.clock.expect('Untimed state');
@@ -378,12 +405,16 @@ fn advance<
             env
                 .clock =
                     Option::Some(
-                        charge::<R>(*settings, clock, payer, reveal, stamp, flag, @env.game),
+                        charge::<
+                            R,
+                        >(*settings, clock, payer, reveal, stamp, referee_step, @env.game),
                     );
         },
         Option::None => {
             assert(env.clock.is_none(), 'Timed state');
-            assert(stamp.is_none() && !flag, 'Untimed game');
+            // Replay authenticates referee steps only through a timed game's
+            // attestation, so an untimed game never takes one.
+            assert(stamp.is_none() && referee_step.is_none(), 'Untimed game');
         },
     }
     match step {
@@ -400,17 +431,22 @@ fn advance<
             let from = request.expect('Unexpected entropy');
             assert(from != seat && from < R::SEATS, 'Invalid reveal seat');
             env.rng_heads = take_reveal(env.rng_heads, seat, entropy);
+            env.rng_fresh = set_at(env.rng_fresh, seat, false);
             env.pending = Pending { active: true, seat: from, seq: env.seq, entropy };
         },
         Move::Reveal(value) => {
             env.rng_heads = take_reveal(env.rng_heads, seat, value);
+            env.rng_fresh = set_at(env.rng_fresh, seat, false);
             let seed = seed::<R>(context, env.pending.seq, env.pending.entropy, value);
             env.pending = idle();
             env.game = R::resolve(config, ref scratch, env.game, seed);
         },
         Move::Recommit(tip) => {
             assert(tip != 0, 'Invalid tip');
+            // Once per reveal: otherwise a seat could add steps at will.
+            assert(!*env.rng_fresh.at(seat.into()), 'Nothing revealed to recommit');
             env.rng_heads = set_at(env.rng_heads, seat, tip);
+            env.rng_fresh = set_at(env.rng_fresh, seat, true);
         },
         Move::Resign(_) => {
             env.pending = idle();
@@ -420,13 +456,18 @@ fn advance<
             env.pending = idle();
             env.outcome = forfeit(payer, REASON_TIMEOUT);
         },
+        Move::Start => {},
     }
     if !env.outcome.finished {
         if let Option::Some((winner, reason)) = R::outcome(@env.game) {
-            assert(winner <= R::SEATS, 'Invalid winner');
-            assert(reason >= 1 && reason < 128, 'Invalid finish reason');
-            env.outcome = Outcome { finished: true, winner, reason };
+            env.outcome = game_outcome::<R>(winner, reason);
         }
+    }
+    // The transcript cap, once no reveal is pending so a random action is never
+    // cut in half. `seq + 1` is this step's sequence number after it.
+    if !env.outcome.finished && !env.pending.active && env.seq + 1 >= R::max_steps(config) {
+        let (winner, reason) = R::adjudicate(config, @env.game);
+        env.outcome = game_outcome::<R>(winner, reason);
     }
     // A turn ends when the game's due seat changes: settle the time it used,
     // and start the next one from nothing.
@@ -453,24 +494,31 @@ fn advance<
 /// step for the revealer, settled at once. A `Flag` is valid only once the payer
 /// has used more than the game's `ClockRules` allow; any other step is refused
 /// after that. An unstamped step pauses the clock, and the first stamp after a
-/// pause starts it without charging anyone.
+/// pause starts it without charging anyone. A `Start` restarts the clock at its
+/// stamp, paused or not, and charges nobody. `referee_step` is `Some(true)` for
+/// a `Flag`, `Some(false)` for a `Start`.
 fn charge<impl R: GameRules>(
     settings: Span<felt252>,
     clock: Clock,
     payer: u8,
     reveal: bool,
     stamp: Option<u64>,
-    flag: bool,
+    referee_step: Option<bool>,
     state: @R::State,
 ) -> Clock {
     let t = match stamp {
         Option::Some(t) => t,
         Option::None => {
-            assert(!flag, 'Flag needs a stamp');
+            assert(referee_step.is_none(), 'Referee step needs a stamp');
             return Clock { stamp: 0, ..clock };
         },
     };
     assert(t != 0, 'Invalid stamp');
+    let flag = referee_step == Option::Some(true);
+    if referee_step == Option::Some(false) {
+        assert(t >= clock.stamp, 'Stamp out of order');
+        return Clock { stamp: t, ..clock };
+    }
     if clock.stamp == 0 {
         assert(!flag, 'Clock not running');
         return Clock { stamp: t, ..clock };
@@ -501,6 +549,14 @@ fn settings_of(time: @Option<TimeControl>) -> Option<Span<felt252>> {
         Option::Some(time) => Option::Some(*time.settings),
         Option::None => Option::None,
     }
+}
+
+// A finished outcome as a game reports it: `winner` is seat + 1 or `DRAW`,
+// `reason` game-defined (the protocol reserves 128 and up).
+fn game_outcome<impl R: GameRules>(winner: u8, reason: u8) -> Outcome {
+    assert(winner <= R::SEATS, 'Invalid winner');
+    assert(reason >= 1 && reason < 128, 'Invalid finish reason');
+    Outcome { finished: true, winner, reason }
 }
 
 fn idle() -> Pending {

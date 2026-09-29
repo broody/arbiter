@@ -15,8 +15,9 @@ pub struct ProofFacts {
 
 /// Check network-verified proof facts. PROOF1 is the small path and PROOF2 the
 /// large path added in Starknet v0.14.4; both attest the same virtual-OS
-/// facts. The proof must be based on a block at or after the channel anchor,
-/// be at most `MAX_PROOF_AGE` blocks old, and carry exactly `expected`.
+/// facts. The proof must be based on a block at or after the one that set the
+/// state it starts from (the channel's anchor or candidate), be at most
+/// `MAX_PROOF_AGE` blocks old, and carry exactly `expected`.
 pub fn check_facts(
     mut encoded: Span<felt252>, expected: felt252, os_program: felt252, current: u64, anchor: u64,
 ) {

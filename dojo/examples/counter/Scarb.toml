@@ -9,7 +9,8 @@ description = "The counter game as a Dojo world: a referee channel system in a f
 sierra = true
 build-external-contracts = [
     "dojo::world::world_contract::world",
-    "referee_dojo::models::m_ChannelGame",
+    "referee_dojo::models::m_ChannelTerms",
+    "referee_dojo::models::m_ChannelState",
     "referee_dojo::models::m_ProverAllowed",
     "referee_dojo::models::e_ChannelUpdated",
 ]

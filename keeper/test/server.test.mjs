@@ -9,16 +9,16 @@ import { KeeperClient } from '../../sdk/src/keeper.mjs';
 import { SessionStore, memoryBackend, parse, stringify } from '../../sdk/src/store.mjs';
 import { loadConfig, startKeeper } from '../server.mjs';
 import {
-  CHANNEL, add, channelOf, counter, copy, fakeChain, keys, played, prefix, terms, walletAddress, walletSign, wallets,
+  CHANNEL, REFEREE_KEY, add, channelOf, counter, copy, fakeChain, keys, played, prefix, terms, timed, walletAddress, walletSign, wallets,
 } from './fixtures.mjs';
 
 const base = dirname(fileURLToPath(import.meta.url));
 const GAME = { channel: hex(CHANNEL), module: '../../sdk/examples/counter.mjs', export: 'counter' };
 const ids = { channel: CHANNEL, game_id: 7n };
 
-async function keeper(overrides = {}, chain = fakeChain()) {
+async function keeper(overrides = {}, chain = fakeChain(), env = {}) {
   chain.channels.set(7n, channelOf(played([])));
-  const config = await loadConfig({ chain_id: 'SN_TEST', port: 0, poll_seconds: 0, games: [GAME], ...overrides }, { base });
+  const config = await loadConfig({ chain_id: 'SN_TEST', port: 0, poll_seconds: 0, games: [GAME], ...overrides }, { base, env });
   const logs = [];
   const started = await startKeeper(config, { backend: memoryBackend(), chain, log: e => logs.push(e) });
   return { ...started, logs, client: new KeeperClient(started.url) };
@@ -139,4 +139,58 @@ test('config loads game codecs and needs the account key from the environment', 
   await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [] }, { base }), /at least one/);
   await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [{ ...GAME, anchored: false, prover: { url: 'x', class_hash: '0x1' } }] }, { base }),
     /no channel to settle on/);
+});
+
+test('a wallet that fills its unanchored games can\'t keep the referee off an anchored game', async () => {
+  // The attack: a staller fills its per-wallet cap with free unanchored games,
+  // hoping the keeper refuses the rated game it would be refereed in.
+  const CASUAL = { ...GAME, channel: '0x0', anchored: false };
+  const chain = fakeChain();
+  const k = await keeper({ games: [GAME, CASUAL], max_open_per_player: 2, referee: { private_key_env: 'REFEREE' } }, chain,
+    { REFEREE: hex(REFEREE_KEY) });
+  try {
+    const players = wallets.map(walletAddress);
+    const casual = id => {
+      const casualTerms = { ...terms(id), channel: 0n, players };
+      const message = termsTypedData(counter, casualTerms);
+      return [new Session(counter, casualTerms), { authorizations: wallets.map(key => walletSign(key, message)) }];
+    };
+    for (const id of [11n, 12n]) assert.equal((await k.client.register(...casual(id))).created, true);
+    await assert.rejects(k.client.register(...casual(13n)), e => e.status === 429 && /already plays 2 open unanchored games/.test(e.message));
+    // The anchored, joined game that names the keeper's referee key is admitted, and refereed.
+    const rated = new Session(counter, { ...timed(7n), players });
+    chain.channels.set(7n, channelOf(rated));
+    assert.equal((await k.client.register(rated)).created, true);
+    assert.ok(k.archive.referees({ channel: CHANNEL, game_id: 7n }));
+    const info = await (await fetch(`${k.url}/info`)).json();
+    assert.deepEqual(info.capacity, { open: 3, max_open_games: 10000, reserved_games: 0, free: 9997, free_unreserved: 9997 });
+    assert.equal(info.limits.max_open_per_player, 2);
+  } finally { await k.close(); }
+});
+
+test('a game that could outgrow the entry\'s step cap is refused', async () => {
+  const k = await keeper({ games: [{ ...GAME, max_steps: 96 }] });
+  try {
+    await assert.rejects(k.client.register(played([3])), e => e.status === 409 && /can run to 97 steps/.test(e.message));
+  } finally { await k.close(); }
+});
+
+test('config: per-entry settings, old names, and the game module\'s hooks', async () => {
+  const HOOKED = { ...GAME, module: './hooked.mjs', max_steps: 200, proof_max_steps: 300, start_grace_seconds: 60,
+    answer_margin_seconds: 900, world: '0x3031d', namespace: 'counter', from_block: 5 };
+  const config = await loadConfig({ chain_id: 'SN_TEST', max_games: 50, max_history_steps: 32, max_steps: 500,
+    games: [HOOKED, { ...GAME, channel: '0x0', anchored: false }] }, { base });
+  const hooked = config.entries.get(CHANNEL), plain = config.entries.get(0n);
+  assert.deepEqual([config.max_open_games, hooked.max_steps, hooked.replay_max_steps, hooked.proof_max_steps,
+    hooked.start_grace_seconds, hooked.answer_margin_seconds, hooked.world, hooked.namespace, hooked.from_block],
+  [50, 200, 32, 300, 60, 900, 0x3031dn, 'counter', 5]);
+  assert.deepEqual(hooked.afterSettle({ game_id: 7n }), [{ contractAddress: '0xabc', entrypoint: 'rate', calldata: ['0x7'] }]);
+  assert.equal(hooked.admit({}, timed()), 1);
+  assert.deepEqual([plain.max_steps, plain.replay_max_steps, plain.proof_max_steps, plain.start_grace_seconds,
+    plain.answer_margin_seconds, plain.admit, plain.afterSettle, plain.world], [500, 32, null, 120, 600, null, null, null]);
+  assert.deepEqual([hooked.entrypoints.acknowledge, hooked.entrypoints.resume_by_referee, hooked.entrypoints.terms],
+    ['acknowledge', 'resume_by_referee', 'terms']);
+  await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [{ ...GAME, world: '0x1' }] }, { base }), /needs its namespace/);
+  await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [{ ...GAME, export: 'hourglassTime' }] }, { base }),
+    /no game codec named hourglassTime/);
 });

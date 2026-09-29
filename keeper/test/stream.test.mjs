@@ -13,10 +13,10 @@ const REFEREE_KEY = 0x7e7e7en;
 
 async function keeper(overrides = {}) {
   const k = await startKeeper({
-    chain_id: 'SN_TEST', chain: CHAIN, port: 0, host: '127.0.0.1', poll_seconds: 0, max_games: 10, max_steps: 64,
+    chain_id: 'SN_TEST', chain: CHAIN, port: 0, host: '127.0.0.1', poll_seconds: 0, max_open_games: 10, max_steps: 128,
     max_body_bytes: 1 << 20, rate_per_minute: 1000, max_wait_seconds: 5, max_waiters: 10, cors_origin: '*',
     heartbeat_seconds: 0.02, referee: { privateKey: REFEREE_KEY },
-    entries: new Map([[CHANNEL, { channel: CHANNEL, game: counter, entrypoints: {}, max_history_steps: 64, prover: null }]]),
+    entries: new Map([[CHANNEL, { channel: CHANNEL, game: counter, entrypoints: {}, replay_max_steps: 64, prover: null }]]),
     ...overrides,
   }, { backend: memoryBackend(), log: () => {} });
   return { ...k, client: new KeeperClient(k.url) };

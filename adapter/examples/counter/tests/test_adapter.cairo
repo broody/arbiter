@@ -68,7 +68,8 @@ pub fn opening(terms: @Terms<Config>) -> Envelope<Counter> {
 trait IMockChannel<T> {
     fn configure(ref self: T, prover: ContractAddress);
     fn set_timed(ref self: T, timed: bool);
-    fn snapshot(self: @T, game_id: felt252) -> (Terms<Config>, u32, felt252, u64);
+    fn set_candidate(ref self: T, hash: felt252, block: u64);
+    fn snapshot(self: @T, game_id: felt252) -> (Terms<Config>, u32, felt252, u64, felt252, u64);
     fn accept_verified(
         ref self: T,
         game_id: felt252,
@@ -81,7 +82,8 @@ trait IMockChannel<T> {
 }
 
 /// Stands in for a referee_dojo game system: epoch 0, anchored at the opening
-/// state in block 10.
+/// state in block 10, and the same candidate unless `set_candidate` says
+/// otherwise.
 #[starknet::contract]
 mod MockChannel {
     use referee::{Envelope, Signature, Terms, state_hash};
@@ -94,6 +96,8 @@ mod MockChannel {
         prover: ContractAddress,
         timed: bool,
         accepted: felt252,
+        candidate: felt252,
+        candidate_block: u64,
     }
 
     #[abi(embed_v0)]
@@ -106,12 +110,23 @@ mod MockChannel {
             self.timed.write(timed);
         }
 
-        fn snapshot(self: @ContractState, game_id: felt252) -> (Terms<Config>, u32, felt252, u64) {
+        fn set_candidate(ref self: ContractState, hash: felt252, block: u64) {
+            self.candidate.write(hash);
+            self.candidate_block.write(block);
+        }
+
+        fn snapshot(
+            self: @ContractState, game_id: felt252,
+        ) -> (Terms<Config>, u32, felt252, u64, felt252, u64) {
             let terms = super::terms_for(
                 get_contract_address(), game_id, self.prover.read(), self.timed.read(),
             );
             let anchor = state_hash::<CounterRules>(@super::opening(@terms));
-            (terms, 0, anchor, 10)
+            if self.candidate.read() == 0 {
+                (terms, 0, anchor, 10, anchor, 10)
+            } else {
+                (terms, 0, anchor, 10, self.candidate.read(), self.candidate_block.read())
+            }
         }
 
         fn accept_verified(
@@ -164,8 +179,15 @@ fn signed_game(terms: @Terms<Config>) -> (Batch<Action>, Envelope<Counter>) {
     } else {
         array![].span()
     };
+    signed_from(terms, opening(terms), steps, stamps)
+}
+
+/// `steps` signed from `start`, as `signed_game`.
+fn signed_from(
+    terms: @Terms<Config>, start: Envelope<Counter>, steps: Span<Move<Action>>, stamps: Span<u64>,
+) -> (Batch<Action>, Envelope<Counter>) {
     let context = context_hash::<CounterRules>(terms);
-    let mut env = opening(terms);
+    let mut env = start;
     let mut finals = no_acks();
     let mut i = 0;
     for step in steps {
@@ -223,6 +245,17 @@ fn transition_for(
     prover: ContractAddress, channel: ContractAddress, end: @Envelope<Counter>, timed: bool,
 ) -> Array<felt252> {
     let terms = terms_for(channel, GAME, prover, timed);
+    transition_from(prover, channel, state_hash::<CounterRules>(@opening(@terms)), end, timed)
+}
+
+fn transition_from(
+    prover: ContractAddress,
+    channel: ContractAddress,
+    start_hash: felt252,
+    end: @Envelope<Counter>,
+    timed: bool,
+) -> Array<felt252> {
+    let terms = terms_for(channel, GAME, prover, timed);
     payload::<
         CounterRules,
     >(
@@ -233,9 +266,14 @@ fn transition_for(
         GAME,
         context_hash::<CounterRules>(@terms),
         0,
-        state_hash::<CounterRules>(@opening(@terms)),
+        start_hash,
         state_hash::<CounterRules>(end),
     )
+}
+
+/// The mock channel's anchor: the opening state.
+fn anchor(prover: ContractAddress, channel: ContractAddress) -> felt252 {
+    state_hash::<CounterRules>(@opening(@terms(channel, GAME, prover)))
 }
 
 fn facts(message: felt252) -> ProofFacts {
@@ -255,6 +293,10 @@ fn inject(prover: ContractAddress, f: ProofFacts) {
     let mut encoded = array![];
     f.serialize(ref encoded);
     cheat_proof_facts(prover, encoded.span(), CheatSpan::TargetCalls(1));
+}
+
+fn start(prover: ICounterProverDispatcher, mock: IMockChannelDispatcher) -> felt252 {
+    anchor(prover.contract_address, mock.contract_address)
 }
 
 fn no_acks() -> Span<Signature> {
@@ -291,7 +333,7 @@ fn virtual_replay_emits_the_message_settle_accepts() {
         prover.contract_address,
         facts(message_hash(prover.contract_address.into(), expected.span())),
     );
-    prover.settle(mock.contract_address, GAME, 0, end, no_acks());
+    prover.settle(mock.contract_address, GAME, 0, start(prover, mock), end, no_acks());
     assert(mock.accepted() == state_hash::<CounterRules>(@end), 'Wrong callback state');
 }
 
@@ -348,7 +390,7 @@ fn timed_replay_needs_the_referee() {
 fn calldata_alone_cannot_settle() {
     let (prover, mock) = setup();
     let end = end_state(prover.contract_address, mock.contract_address);
-    prover.settle(mock.contract_address, GAME, 0, end, no_acks());
+    prover.settle(mock.contract_address, GAME, 0, start(prover, mock), end, no_acks());
 }
 
 #[test]
@@ -363,7 +405,7 @@ fn changed_end_state_is_rejected() {
     );
     let mut changed = end;
     changed.outcome.winner = 2;
-    prover.settle(mock.contract_address, GAME, 0, changed, no_acks());
+    prover.settle(mock.contract_address, GAME, 0, start(prover, mock), changed, no_acks());
 }
 
 #[test]
@@ -376,7 +418,7 @@ fn proof_for_another_game_is_rejected() {
         prover.contract_address,
         facts(message_hash(prover.contract_address.into(), expected.span())),
     );
-    prover.settle(mock.contract_address, GAME + 1, 0, end, no_acks());
+    prover.settle(mock.contract_address, GAME + 1, 0, start(prover, mock), end, no_acks());
 }
 
 #[test]
@@ -384,7 +426,7 @@ fn proof_for_another_game_is_rejected() {
 fn stale_epoch_is_rejected() {
     let (prover, mock) = setup();
     let end = end_state(prover.contract_address, mock.contract_address);
-    prover.settle(mock.contract_address, GAME, 1, end, no_acks());
+    prover.settle(mock.contract_address, GAME, 1, start(prover, mock), end, no_acks());
 }
 
 #[test]
@@ -395,7 +437,7 @@ fn large_path_proof_is_accepted() {
     let mut f = facts(message_hash(prover.contract_address.into(), expected.span()));
     f.proof_version = 'PROOF2';
     inject(prover.contract_address, f);
-    prover.settle(mock.contract_address, GAME, 0, end, no_acks());
+    prover.settle(mock.contract_address, GAME, 0, start(prover, mock), end, no_acks());
     assert(mock.accepted() == state_hash::<CounterRules>(@end), 'Wrong callback state');
 }
 
@@ -494,4 +536,69 @@ fn trailing_facts_are_rejected() {
 #[should_panic(expected: 'Malformed proof facts')]
 fn malformed_fact_is_rejected() {
     check_facts([1].span(), 42, OS_PROGRAM, 30, 10);
+}
+
+/// The first four moves, which the mock channel holds as its candidate from
+/// block `block`, and the rest of the game from there.
+fn split_game(
+    prover: ICounterProverDispatcher, mock: IMockChannelDispatcher, block: u64,
+) -> (Envelope<Counter>, Batch<Action>, Envelope<Counter>) {
+    let terms = terms(mock.contract_address, GAME, prover.contract_address);
+    let steps = array![add(3), add(3), add(3), add(3), add(3), add(3), add(2)].span();
+    let (_, middle) = signed_from(@terms, opening(@terms), steps.slice(0, 4), array![].span());
+    mock.set_candidate(state_hash::<CounterRules>(@middle), block);
+    let (rest, end) = signed_from(@terms, middle, steps.slice(4, 3), array![].span());
+    (middle, rest, end)
+}
+
+#[test]
+fn a_proof_can_extend_the_candidate() {
+    let (prover, mock) = setup();
+    let (middle, rest, end) = split_game(prover, mock, 15);
+    let middle_hash = state_hash::<CounterRules>(@middle);
+    let mut spy = spy_messages_to_l1();
+    execute_virtual(prover.contract_address, mock.contract_address, middle, rest);
+    let expected = transition_from(
+        prover.contract_address, mock.contract_address, middle_hash, @end, false,
+    );
+    spy
+        .assert_sent(
+            @array![
+                (
+                    prover.contract_address,
+                    MessageToL1 { to_address: 0.try_into().unwrap(), payload: expected.clone() },
+                ),
+            ],
+        );
+    inject(
+        prover.contract_address,
+        facts(message_hash(prover.contract_address.into(), expected.span())),
+    );
+    prover.settle(mock.contract_address, GAME, 0, middle_hash, end, no_acks());
+    assert(mock.accepted() == state_hash::<CounterRules>(@end), 'Wrong callback state');
+}
+
+#[test]
+#[should_panic(expected: ('Proof predates anchor', 'ENTRYPOINT_FAILED'))]
+fn a_proof_based_before_the_candidate_is_rejected() {
+    let (prover, mock) = setup();
+    // The candidate was set in block 25, after the proof's base block 20.
+    let (middle, _, end) = split_game(prover, mock, 25);
+    let middle_hash = state_hash::<CounterRules>(@middle);
+    let expected = transition_from(
+        prover.contract_address, mock.contract_address, middle_hash, @end, false,
+    );
+    inject(
+        prover.contract_address,
+        facts(message_hash(prover.contract_address.into(), expected.span())),
+    );
+    prover.settle(mock.contract_address, GAME, 0, middle_hash, end, no_acks());
+}
+
+#[test]
+#[should_panic(expected: ('Wrong proof anchor', 'ENTRYPOINT_FAILED'))]
+fn a_proof_must_start_from_the_anchor_or_candidate() {
+    let (prover, mock) = setup();
+    let end = end_state(prover.contract_address, mock.contract_address);
+    prover.settle(mock.contract_address, GAME, 0, 0xbad, end, no_acks());
 }

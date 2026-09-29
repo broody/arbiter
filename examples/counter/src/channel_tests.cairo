@@ -1,9 +1,9 @@
 use referee::channel::{
-    ACTIVE, CANCELLED, DISPUTE, FORCED, SETTLED, WAITING, cancel, claim_timeout, create, forced,
-    join, open_dispute, receive, resign, resolve, resume,
+    ACTIVE, CANCELLED, DISPUTE, FORCED, SETTLED, WAITING, acknowledge, cancel, claim_timeout,
+    create, forced, join, open_dispute, receive, resign, resolve, resume,
 };
 use referee::{
-    Channel, Envelope, Move, REASON_RESIGN, REASON_TIMEOUT, StateRef, force, open, replay,
+    Channel, Envelope, Move, REASON_ABANDON, REASON_RESIGN, StateRef, force, open, replay,
     state_ref,
 };
 use crate::fixtures::{CONTEXT, expected, finals, steps, terms};
@@ -36,7 +36,7 @@ fn active() -> Channel {
 /// Dispute opened from the opening anchor and resolved into forced play.
 fn forced_play() -> Channel {
     let channel = open_dispute(active(), 0, T0);
-    resolve(channel, 0, T0 + WINDOW.into(), 20)
+    resolve(channel, 0, T0 + WINDOW.into(), 20, false)
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn unapproved_final_state_settles_after_the_window() {
     assert_eq!(channel.status, DISPUTE);
     assert_eq!(channel.deadline, T0 + WINDOW.into());
     assert_eq!(channel.epoch, 0);
-    let channel = resolve(channel, 0, T0 + WINDOW.into(), 30);
+    let channel = resolve(channel, 0, T0 + WINDOW.into(), 30, false);
     assert_eq!(channel.status, SETTLED);
     assert_eq!(channel.result, expected().outcome);
 }
@@ -98,7 +98,7 @@ fn unapproved_final_state_settles_after_the_window() {
 #[should_panic(expected: 'Dispute window open')]
 fn resolve_waits_for_the_window() {
     let channel = receive(active(), 0, finished(), false, T0, 20);
-    resolve(channel, 0, T0 + WINDOW.into() - 1, 30);
+    resolve(channel, 0, T0 + WINDOW.into() - 1, 30, false);
 }
 
 #[test]
@@ -106,8 +106,10 @@ fn newer_candidate_replaces_without_extending_the_deadline() {
     let channel = receive(active(), 0, after(4), false, T0, 20);
     let channel = receive(channel, 0, after(6), false, T0 + 100, 21);
     assert_eq!(channel.candidate, after(6));
+    assert_eq!(channel.candidate_block, 21);
     assert_eq!(channel.deadline, T0 + WINDOW.into());
     assert_eq!(channel.anchor, state_ref::<CounterRules>(@opening()));
+    assert_eq!(channel.anchor_block, 10);
 }
 
 #[test]
@@ -166,7 +168,8 @@ fn due_seat_plays_onchain_and_waiting_seat_claims_timeout() {
     let channel = claim_timeout(channel, 2, 0, now + WINDOW.into());
     assert_eq!(channel.status, SETTLED);
     assert_eq!(channel.result.winner, 1); // seat 0 + 1
-    assert_eq!(channel.result.reason, REASON_TIMEOUT);
+    // The chain judged it, not a referee.
+    assert_eq!(channel.result.reason, REASON_ABANDON);
 }
 
 #[test]
@@ -223,4 +226,76 @@ fn resign_settles_for_the_other_seat() {
 #[should_panic(expected: 'Channel not live')]
 fn cannot_resign_a_settled_channel() {
     resign(resign(active(), 0), 1);
+}
+
+/// A timed game's dispute that its referee acknowledged.
+fn acknowledged() -> Channel {
+    acknowledge(open_dispute(active(), 0, T0), 0, T0 + 10)
+}
+
+#[test]
+fn acknowledged_timed_dispute_returns_to_offchain_play() {
+    let channel = acknowledged();
+    assert_eq!(channel.acked_epoch, 0);
+    assert_eq!(channel.acked_deadline, T0 + WINDOW.into());
+    let channel = resolve(channel, 0, T0 + WINDOW.into(), 20, true);
+    assert_eq!(channel.status, ACTIVE);
+    assert_eq!(channel.epoch, 1);
+    assert_eq!(channel.deadline, 0);
+    assert_eq!(channel.anchor_block, 20);
+    assert_eq!(channel.candidate_block, 20);
+}
+
+#[test]
+fn acknowledged_dispute_keeps_its_candidate() {
+    let channel = acknowledge(receive(active(), 0, after(4), false, T0, 20), 0, T0 + 10);
+    let channel = resolve(channel, 0, T0 + WINDOW.into(), 30, true);
+    assert_eq!(channel.status, ACTIVE);
+    assert_eq!(channel.anchor, after(4));
+}
+
+#[test]
+fn acknowledged_finished_candidate_settles() {
+    let channel = acknowledge(receive(active(), 0, finished(), false, T0, 20), 0, T0 + 10);
+    assert_eq!(resolve(channel, 0, T0 + WINDOW.into(), 30, true).status, SETTLED);
+}
+
+#[test]
+fn untimed_dispute_ignores_an_acknowledgement() {
+    // Only a game with a referee clock returns to offchain play.
+    assert_eq!(resolve(acknowledged(), 0, T0 + WINDOW.into(), 20, false).status, FORCED);
+}
+
+#[test]
+fn unacknowledged_timed_dispute_moves_to_forced_play() {
+    let channel = open_dispute(active(), 0, T0);
+    assert_eq!(resolve(channel, 0, T0 + WINDOW.into(), 20, true).status, FORCED);
+}
+
+#[test]
+fn an_acknowledgement_covers_only_its_dispute() {
+    // Acknowledged at epoch 0, resolved back to offchain play, then disputed
+    // again at epoch 1: the old acknowledgement doesn't carry over.
+    let channel = resolve(acknowledged(), 0, T0 + WINDOW.into(), 20, true);
+    let later = T0 + 2 * WINDOW.into();
+    let channel = open_dispute(channel, 1, later);
+    assert_eq!(resolve(channel, 1, later + WINDOW.into(), 30, true).status, FORCED);
+}
+
+#[test]
+#[should_panic(expected: 'Dispute window closed')]
+fn acknowledgement_must_land_in_the_window() {
+    acknowledge(open_dispute(active(), 0, T0), 0, T0 + WINDOW.into());
+}
+
+#[test]
+#[should_panic(expected: 'No dispute')]
+fn acknowledgement_needs_a_dispute() {
+    acknowledge(active(), 0, T0);
+}
+
+#[test]
+#[should_panic(expected: 'Stale channel epoch')]
+fn acknowledgement_names_the_epoch() {
+    acknowledge(open_dispute(active(), 0, T0), 1, T0 + 10);
 }

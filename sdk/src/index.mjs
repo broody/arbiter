@@ -3,31 +3,38 @@
 import { ec, shortString } from 'starknet';
 import { poseidonHashMany } from './poseidon.mjs';
 
-export const PROTOCOL_VERSION = 3n;
+export const PROTOCOL_VERSION = 4n;
 export const NO_SEAT = 255;
-/** The actor of a `flag` step: the referee of a timed game, not a seat. */
+/** The actor of a `flag` or `start` step: the referee of a timed game, not a seat. */
 export const REFEREE = 254;
 export const REASON_RESIGN = 128;
+/** The referee flagged the due seat of a timed game. */
 export const REASON_TIMEOUT = 129;
+/** The chain judged that the due seat missed its forced-play window (`claim_timeout`). */
+export const REASON_ABANDON = 130;
 /** Upper bound on each time-control setting (ms): 30 days. */
 export const MAX_CLOCK_MS = 2592000000;
 /** Upper bound on byo-yomi periods. */
 export const MAX_PERIODS = 255;
-export const MOVE_PLAY = 0, MOVE_PLAY_RANDOM = 1, MOVE_REVEAL = 2, MOVE_RECOMMIT = 3, MOVE_RESIGN = 4, MOVE_FLAG = 5;
+export const MOVE_PLAY = 0, MOVE_PLAY_RANDOM = 1, MOVE_REVEAL = 2, MOVE_RECOMMIT = 3, MOVE_RESIGN = 4, MOVE_FLAG = 5,
+  MOVE_START = 6;
 
 /**
  * A step is a `Move`. Only `resign` names its seat; every other move belongs to
- * the seat the state says is due (see `actorOf`), except `flag`, which the
- * referee of a timed game sends.
+ * the seat the state says is due (see `actorOf`), except `flag` and `start`,
+ * which the referee of a timed game sends.
  */
 export const play = action => ({ kind: MOVE_PLAY, action });
 /** A game action that requests randomness, with the actor's next hash-chain value. */
 export const playRandom = (action, entropy) => ({ kind: MOVE_PLAY_RANDOM, action, entropy });
 export const reveal = value => ({ kind: MOVE_REVEAL, value });
+/** Replace the due seat's hash-chain tip: only after it revealed from its current one. */
 export const recommit = tip => ({ kind: MOVE_RECOMMIT, tip });
 export const resign = seat => ({ kind: MOVE_RESIGN, seat });
 /** The due seat's time ran out (timed games; the referee's step). */
 export const flag = () => ({ kind: MOVE_FLAG });
+/** The referee starts or restarts the clock without charging anyone (timed games). */
+export const start = () => ({ kind: MOVE_START });
 
 const PRIME = (1n << 251n) + 17n * (1n << 192n) + 1n;
 const MASK250 = (1n << 250n) - 1n;
@@ -84,6 +91,7 @@ export function encodeStep(game, step) {
     case MOVE_RECOMMIT: return [3n, felt(step.tip)];
     case MOVE_RESIGN: return [4n, BigInt(step.seat)];
     case MOVE_FLAG: return [5n];
+    case MOVE_START: return [6n];
     default: throw Error('Unknown move');
   }
 }
@@ -95,6 +103,12 @@ export const checkpointHash = (game, context, epoch, stateHash) =>
   signingHash([tag(game.tag), tag('REFEREE_CHECKPOINT_V1'), felt(context), BigInt(epoch), felt(stateHash)]);
 export const reopenHash = (game, context, epoch, stateHash) =>
   signingHash([tag(game.tag), tag('REFEREE_REOPEN_V1'), felt(context), BigInt(epoch), felt(stateHash)]);
+/** What the referee of a timed game signs to show it is live during a dispute (`live_hash`). */
+export const liveHash = (game, context, epoch, deadline) =>
+  signingHash([tag(game.tag), tag('REFEREE_LIVE_V1'), felt(context), BigInt(epoch), BigInt(deadline)]);
+/** What the referee of a timed game signs to return it from forced play on its own (`referee_resume_hash`). */
+export const refereeResumeHash = (game, context, epoch, stateHash) =>
+  signingHash([tag(game.tag), tag('REFEREE_RESUME_V1'), felt(context), BigInt(epoch), felt(stateHash)]);
 /**
  * What the referee of a timed game signs after each step (`stamp_hash`): the
  * transcript and the clocks `env` reached. The last attestation covers every
@@ -138,7 +152,7 @@ export function encodeEnvelope(game, env) {
   return [
     BigInt(env.seq), felt(env.transcript), BigInt(env.support_turn), BigInt(env.last_seat),
     p.active ? 1n : 0n, BigInt(p.seat), BigInt(p.seq), felt(p.entropy),
-    ...span(env.rng_heads),
+    ...span(env.rng_heads), BigInt(env.rng_fresh.length), ...env.rng_fresh.map(f => (f ? 1n : 0n)),
     ...option(env.clock, c => encodeClock(game, c)),
     env.outcome.finished ? 1n : 0n, BigInt(env.outcome.winner), BigInt(env.outcome.reason),
     ...game.encodeState(env.game),
@@ -228,6 +242,7 @@ export function open(game, terms) {
     seq: 0, transcript: 0n, support_turn: 0, last_seat: NO_SEAT,
     pending: { active: false, seat: 0, seq: 0, entropy: 0n },
     rng_heads: terms.rng_tips.map(felt),
+    rng_fresh: terms.rng_tips.map(() => true),
     clock: c == null ? null : { seats: timeOf(game).open(c.settings, terms.rng_tips.length), used: 0, stamp: 0 },
     outcome: { finished: false, winner: 0, reason: 0 },
     game: game.init(terms.config),
@@ -236,10 +251,10 @@ export function open(game, terms) {
 
 export const due = (game, env) => env.pending.active ? env.pending.seat : game.due(env.game);
 
-/** The seat a step belongs to (`actor` in protocol.cairo); REFEREE for `flag`. */
+/** The seat a step belongs to (`actor` in protocol.cairo); REFEREE for `flag` and `start`. */
 export function actorOf(game, env, step) {
   if (step.kind === MOVE_RESIGN) return Number(step.seat);
-  if (step.kind === MOVE_FLAG) return REFEREE;
+  if (step.kind === MOVE_FLAG || step.kind === MOVE_START) return REFEREE;
   if (step.kind === MOVE_REVEAL) { check(env.pending.active, 'No reveal due'); return env.pending.seat; }
   check(!env.pending.active, 'Reveal pending');
   return game.due(env.game);
@@ -254,13 +269,19 @@ export const forfeit = (seat, reason) => ({ finished: true, winner: 2 - seat, re
 // protocol.cairo: the turn seat's time adds to the turn's `used`, and a pending
 // reveal is a one-step turn for the revealer, settled at once. An unstamped step
 // pauses the clock, and the first stamp after a pause starts it without
-// charging anyone.
-function charge(time, settings, clock, payer, reveal, stamp, isFlag, state) {
+// charging anyone. A `start` restarts the clock at its stamp and charges
+// nobody. `refereeStep` is MOVE_FLAG, MOVE_START or null.
+function charge(time, settings, clock, payer, reveal, stamp, refereeStep, state) {
   if (stamp == null) {
-    check(!isFlag, 'Flag needs a stamp');
+    check(refereeStep == null, 'Referee step needs a stamp');
     return { ...clock, stamp: 0 };
   }
   check(Number.isSafeInteger(stamp) && stamp > 0, 'Invalid stamp');
+  const isFlag = refereeStep === MOVE_FLAG;
+  if (refereeStep === MOVE_START) {
+    check(stamp >= clock.stamp, 'Stamp out of order');
+    return { ...clock, stamp };
+  }
   if (clock.stamp === 0) {
     check(!isFlag, 'Clock not running');
     return { ...clock, stamp };
@@ -296,16 +317,19 @@ export function applyStep(game, context, terms, env, step, scratch = null, stamp
   const next = structuredClone(env);
   // The seat on the clock, and the seat whose turn it is.
   const payer = due(game, env), turnSeat = game.due(env.game);
+  const refereeStep = step.kind === MOVE_FLAG || step.kind === MOVE_START ? step.kind : null;
   if (timed) {
     check(env.clock != null, 'Untimed state');
-    next.clock = charge(time, terms.clock.settings, env.clock, payer, env.pending.active, stamp, seat === REFEREE, env.game);
+    next.clock = charge(time, terms.clock.settings, env.clock, payer, env.pending.active, stamp, refereeStep, env.game);
   } else {
     check(env.clock == null, 'Timed state');
-    check(stamp == null && seat !== REFEREE, 'Untimed game');
+    // Replay authenticates referee steps only through a timed game's attestation.
+    check(stamp == null && refereeStep == null, 'Untimed game');
   }
   const takeReveal = (s, value) => {
     check(value !== 0n && rngNext(value) === next.rng_heads[s], 'Invalid reveal');
     next.rng_heads[s] = value;
+    next.rng_fresh[s] = false;
   };
   switch (step.kind) {
     case MOVE_PLAY: {
@@ -333,7 +357,10 @@ export function applyStep(game, context, terms, env, step, scratch = null, stamp
     }
     case MOVE_RECOMMIT:
       check(felt(step.tip) !== 0n, 'Invalid tip');
+      // Once per reveal: otherwise a seat could add steps at will.
+      check(!next.rng_fresh[seat], 'Nothing revealed to recommit');
       next.rng_heads[seat] = felt(step.tip);
+      next.rng_fresh[seat] = true;
       break;
     case MOVE_RESIGN:
       next.pending = idle();
@@ -343,11 +370,17 @@ export function applyStep(game, context, terms, env, step, scratch = null, stamp
       next.pending = idle();
       next.outcome = forfeit(payer, REASON_TIMEOUT);
       break;
+    case MOVE_START:
+      break;
     default: throw Error('Unknown move');
   }
   if (!next.outcome.finished) {
     const result = game.outcome(next.game);
-    if (result !== null) next.outcome = { finished: true, winner: result[0], reason: result[1] };
+    if (result !== null) next.outcome = gameOutcome(result);
+  }
+  // The transcript cap (`GameRules::max_steps`), once no reveal is pending.
+  if (!next.outcome.finished && !next.pending.active && env.seq + 1 >= game.maxSteps(config)) {
+    next.outcome = gameOutcome(game.adjudicate(config, next.game));
   }
   // A turn ends when the game's due seat changes: settle the time it used,
   // and start the next one from nothing.
@@ -360,6 +393,13 @@ export function applyStep(game, context, terms, env, step, scratch = null, stamp
   next.seq += 1;
   next.transcript = poseidon([next.transcript, message]);
   return { env: next, message, seat };
+}
+
+// A finished outcome as a game reports it (`game_outcome` in protocol.cairo).
+function gameOutcome([winner, reason]) {
+  check(Number.isInteger(winner) && winner >= 0 && winner <= 2, 'Invalid winner');
+  check(Number.isInteger(reason) && reason >= 1 && reason < 128, 'Invalid finish reason');
+  return { finished: true, winner, reason };
 }
 
 /** Apply unsigned steps from any seat (`apply_steps` in protocol.cairo), stamped when `stamps` is given. */
@@ -569,6 +609,10 @@ export class Session {
     check(mark.seq <= tip.seq, `Session is behind seq ${mark.seq}, which this key signed`);
     const at = mark.seq === tip.seq ? { transcript: tip.transcript, message }
       : [...this.steps, ...this.pending][mark.seq - this.start.seq];
+    // The referee's step (a start) took that position before our step reached
+    // it. Our step was never stamped, so no timed replay can use it: signing
+    // on from here is no equivocation.
+    if (at.seat === REFEREE && felt(at.transcript) === felt(mark.transcript)) return;
     check(felt(at.transcript) === felt(mark.transcript) && at.message === felt(mark.message),
       `Would equivocate: this key signed a different step at seq ${mark.seq}`);
   }
@@ -618,11 +662,11 @@ export class Session {
 
   export() {
     const steps = this.steps.map(signedStep);
-    return { version: 3, terms: this.terms, start: this.start, witness: this.startWitness, steps };
+    return { version: 4, terms: this.terms, start: this.start, witness: this.startWitness, steps };
   }
   /** Rebuild a session from `export()`, verifying every step. `lastSigned` is as for the constructor. */
   static import(game, record, { lastSigned } = {}) {
-    check(record.version === 3, 'Unsupported transcript version');
+    check(record.version === 4, 'Unsupported transcript version');
     const session = new Session(game, record.terms, { start: record.start, witness: record.witness, lastSigned });
     for (const signed of record.steps) session.receive(signed);
     return session;
@@ -740,6 +784,25 @@ export class Referee {
     return at !== null && t >= at ? this.session.stamp({ step: flag(), signature: ZERO_SIGNATURE }, t, this.privateKey) : null;
   }
 
+  /**
+   * The attested `start` record at `now`: the clock runs from here, and the
+   * time since the last stamp is charged to no one. For a clock that is still
+   * paused before the first move, and after play resumes from forced play.
+   */
+  start(now = Date.now()) {
+    return this.session.stamp({ step: start(), signature: ZERO_SIGNATURE }, this.time(now), this.privateKey);
+  }
+
+  /** The referee's `acknowledge` signature for the dispute at `epoch` ending at `deadline`. */
+  acknowledgement(epoch, deadline) {
+    return sign(liveHash(this.session.game, this.session.context, epoch, deadline), this.privateKey);
+  }
+
+  /** The referee's signature returning the game from forced play at `epoch`, from the anchor `anchorHash`. */
+  resumeSignature(epoch, anchorHash) {
+    return sign(refereeResumeHash(this.session.game, this.session.context, epoch, anchorHash), this.privateKey);
+  }
+
   /** Wall-clock time from which the due seat can be flagged, or null while the clock is paused or the game is over. */
   deadline() {
     const at = this.session.flagAt();
@@ -767,6 +830,34 @@ export function rebase(session, anchorHash) {
     if (i === session.steps.length) return null;
     env = applyStep(game, context, terms, env, session.steps[i].step, scratch, session.steps[i].stamp ?? null).env;
   }
+}
+
+/** `session` cut to its first `n` steps after its start: a segment to submit. */
+export function prefix(session, n) {
+  if (n >= session.steps.length) return session;
+  const base = new Session(session.game, session.terms, { start: session.start, witness: session.startWitness, lastSigned: session.lastSigned });
+  for (const record of session.steps.slice(0, n)) base.receive(record);
+  return base;
+}
+
+/** Whether `a` beats `b` as a dispute candidate (`channel::receive`): envelopes or channel references. */
+export const outranks = (a, b) =>
+  a.support_turn > b.support_turn || (a.support_turn === b.support_turn && a.seq > b.seq);
+
+/**
+ * What to submit against `channel` (a decoded `ChannelGame`) from `session`:
+ * the session rebased on the channel's candidate when its history holds it,
+ * so the answer extends the candidate, otherwise on the anchor; cut to
+ * `maxSteps` steps; null when nothing there outranks the candidate. A seat
+ * uses it to answer a dispute its opponent opened, and a keeper to settle a
+ * long transcript in segments.
+ */
+export function disputeAnswer(session, channel, { maxSteps = Infinity } = {}) {
+  const extends_ = felt(channel.candidate.hash) !== felt(channel.anchor.hash) ? rebase(session, channel.candidate.hash) : null;
+  const base = extends_ ?? rebase(session, channel.anchor.hash);
+  if (!base || base.steps.length === 0) return null;
+  const answer = prefix(base, maxSteps);
+  return outranks(answer.env, channel.candidate) ? answer : null;
 }
 
 // ---- Cairo Serde encoders and decoders for channel calldata ----
@@ -844,10 +935,14 @@ export function readTerms(game, r) {
 }
 export const decodeTerms = (game, values) => { const r = new Reader(values); const t = readTerms(game, r); r.done(); return t; };
 
-/** The channel's `snapshot(game_id)`: terms, epoch, anchor hash, anchor block. */
+/**
+ * The channel's `snapshot(game_id)`: terms, epoch, the anchor's hash and block,
+ * and the candidate's. A proof starts from either.
+ */
 export function decodeSnapshot(game, values) {
   const r = new Reader(values);
-  const result = { terms: readTerms(game, r), epoch: r.num(), anchor_hash: r.next(), anchor_block: r.num() };
+  const result = { terms: readTerms(game, r), epoch: r.num(), anchor_hash: r.next(), anchor_block: r.num(),
+    candidate_hash: r.next(), candidate_block: r.num() };
   r.done();
   return result;
 }
@@ -871,7 +966,8 @@ export function decodeChannelGame(game, values) {
   const referee = r.next(), settings = r.span();
   result.clock = referee === 0n ? null : { referee, settings: timeOf(game).decodeSettings(new Reader(settings)) };
   Object.assign(result, {
-    anchor: readRef(r), candidate: readRef(r), anchor_block: r.num(), deadline: r.num(), result: readOutcome(r),
+    anchor: readRef(r), candidate: readRef(r), anchor_block: r.num(), candidate_block: r.num(), deadline: r.num(),
+    acked_epoch: r.num(), acked_deadline: r.num(), result: readOutcome(r),
   });
   r.done();
   return result;

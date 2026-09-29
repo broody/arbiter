@@ -7,11 +7,13 @@ use starknet::ContractAddress;
 
 #[starknet::interface]
 pub trait ICounterProver<T> {
+    /// `start_hash` is the channel's anchor or candidate the proof starts from.
     fn settle(
         ref self: T,
         channel: ContractAddress,
         game_id: felt252,
         epoch: u32,
+        start_hash: felt252,
         end: Envelope<Counter>,
         acks: Span<Signature>,
     );
@@ -66,12 +68,13 @@ pub mod CounterProver {
             channel: ContractAddress,
             game_id: felt252,
             epoch: u32,
+            start_hash: felt252,
             end: Envelope<Counter>,
             acks: Span<Signature>,
         ) {
             prover::settle::<
                 CounterRules,
-            >(channel, game_id, epoch, end, acks, self.os_program.read());
+            >(channel, game_id, epoch, start_hash, end, acks, self.os_program.read());
         }
 
         fn os_program(self: @ContractState) -> felt252 {

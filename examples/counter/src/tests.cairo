@@ -1,10 +1,10 @@
 use referee::{
     Batch, Envelope, Move, REASON_RESIGN, Signature, apply_steps, approve_all, checkpoint_hash,
-    context_hash, force, open, replay, rng_next, state_hash,
+    context_hash, force, live_hash, open, referee_resume_hash, replay, rng_next, state_hash,
 };
 use crate::fixtures::{
-    CHECKPOINT, CONTEXT, RNG_LEN, SEED_0, SEED_1, STATE_HASH, acks, expected, finals, signatures,
-    steps, terms,
+    CHECKPOINT, CONTEXT, LIVE_HASH, REFEREE_RESUME_HASH, RNG_LEN, SEED_0, SEED_1, STATE_HASH, acks,
+    expected, finals, signatures, steps, terms,
 };
 use crate::{ADD, Action, Counter, CounterRules, GAMBLE};
 
@@ -201,4 +201,56 @@ fn reveal_resolves_the_gamble() {
 #[should_panic(expected: 'Game already finished')]
 fn no_steps_after_the_end() {
     run(array![Move::Resign(0), add(1)]);
+}
+
+#[test]
+fn opening_heads_are_fresh() {
+    assert_eq!(start().rng_fresh, array![true, true].span());
+}
+
+#[test]
+#[should_panic(expected: 'Nothing revealed to recommit')]
+fn recommit_needs_a_reveal() {
+    run(array![Move::Recommit(rng_next(0x5eed2))]);
+}
+
+/// Seat 0 gambles and seat 1 reveals: seat 1 is due and has revealed.
+fn after_a_reveal() -> Array<Move<Action>> {
+    array![gamble(chain(SEED_0, RNG_LEN - 1)), Move::Reveal(chain(SEED_1, RNG_LEN - 1))]
+}
+
+#[test]
+fn recommit_follows_a_reveal() {
+    let mut steps = after_a_reveal();
+    steps.append(Move::Recommit(rng_next(0x5eed2)));
+    let end = run(steps);
+    assert_eq!(end.rng_fresh, array![false, true].span());
+    assert_eq!(*end.rng_heads.at(1), rng_next(0x5eed2));
+}
+
+#[test]
+#[should_panic(expected: 'Nothing revealed to recommit')]
+fn one_recommit_per_reveal() {
+    let mut steps = after_a_reveal();
+    steps.append(Move::Recommit(rng_next(0x5eed2)));
+    steps.append(Move::Recommit(rng_next(0x5eed3)));
+    run(steps);
+}
+
+#[test]
+#[should_panic(expected: 'Untimed game')]
+fn untimed_games_take_no_start() {
+    run(array![Move::Start]);
+}
+
+#[test]
+#[should_panic(expected: 'Untimed game')]
+fn untimed_games_take_no_flag() {
+    run(array![Move::Flag]);
+}
+
+#[test]
+fn referee_messages_match_sdk() {
+    assert_eq!(live_hash::<CounterRules>(CONTEXT, 3, 12345), LIVE_HASH);
+    assert_eq!(referee_resume_hash::<CounterRules>(CONTEXT, 2, STATE_HASH), REFEREE_RESUME_HASH);
 }

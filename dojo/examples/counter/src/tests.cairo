@@ -1,4 +1,3 @@
-use dojo::model::ModelStorage;
 use dojo::world::{WorldStorage, WorldStorageTrait, world};
 use dojo_cairo_test::{
     ContractDef, ContractDefTrait, NamespaceDef, TestResource, WorldStorageTestTrait,
@@ -7,12 +6,15 @@ use dojo_cairo_test::{
 use referee::channel::{ACTIVE, DISPUTE, FORCED, SETTLED};
 use referee::clocks::{Standard, encode};
 use referee::{
-    Batch, Envelope, Move, REASON_TIMEOUT, REFEREE, Signature, Terms, TimeControl, action_hash,
-    actor, apply_steps, checkpoint_hash, context_hash, force, open, reopen_hash, stamp_hash,
-    state_hash,
+    Batch, Envelope, Move, REASON_ABANDON, REASON_TIMEOUT, REFEREE, Signature, Terms, TimeControl,
+    action_hash, actor, apply_steps, checkpoint_hash, context_hash, force, live_hash, open,
+    referee_resume_hash, reopen_hash, stamp_hash, state_hash,
 };
 use referee_counter::{ADD, Action, Config, Counter, CounterRules, GAMBLE};
-use referee_dojo::models::{ChannelGame, e_ChannelUpdated, m_ChannelGame, m_ProverAllowed};
+use referee_dojo::channel::read;
+use referee_dojo::models::{
+    ChannelGame, e_ChannelUpdated, m_ChannelState, m_ChannelTerms, m_ProverAllowed,
+};
 use referee_testing::{chain_value, public_key, sign};
 use starknet::ContractAddress;
 use starknet::testing::{set_account_contract_address, set_block_timestamp, set_contract_address};
@@ -48,7 +50,8 @@ fn setup() -> (ICounterChannelDispatcher, WorldStorage) {
     let ndef = NamespaceDef {
         namespace: "counter",
         resources: [
-            TestResource::Model(m_ChannelGame::TEST_CLASS_HASH),
+            TestResource::Model(m_ChannelTerms::TEST_CLASS_HASH),
+            TestResource::Model(m_ChannelState::TEST_CLASS_HASH),
             TestResource::Model(m_ProverAllowed::TEST_CLASS_HASH),
             TestResource::Event(e_ChannelUpdated::TEST_CLASS_HASH),
             TestResource::Contract(channel::TEST_CLASS_HASH),
@@ -171,7 +174,7 @@ fn no_approvals() -> Span<Signature> {
 }
 
 fn stored(world: @WorldStorage, id: felt252) -> ChannelGame {
-    world.read_model(id)
+    read(world, id)
 }
 
 /// Dispute from the opening anchor and resolve into forced play (epoch 1).
@@ -249,7 +252,8 @@ fn forced_play_then_timeout() {
     let channel = stored(@world, id);
     assert_eq!(channel.status, SETTLED);
     assert_eq!(channel.result.winner, 1);
-    assert_eq!(channel.result.reason, REASON_TIMEOUT);
+    // The chain judged it: no referee flagged Bob.
+    assert_eq!(channel.result.reason, REASON_ABANDON);
 }
 
 #[test]
@@ -476,4 +480,174 @@ fn the_referee_key_is_a_curve_point() {
             WINDOW,
             Option::Some(clock),
         );
+}
+
+/// A timed game with a dispute Alice opened at time 0.
+fn disputed_timed() -> (ICounterChannelDispatcher, WorldStorage, felt252) {
+    let (game, world, id) = started_with(blitz());
+    caller(ALICE());
+    game.open_dispute(id, 0);
+    (game, world, id)
+}
+
+fn live_signature(game: ICounterChannelDispatcher, id: felt252, key: felt252) -> Signature {
+    let context = context_hash::<CounterRules>(@game.terms(id));
+    sign(live_hash::<CounterRules>(context, 0, game.get_channel(id).deadline), key)
+}
+
+#[test]
+fn a_live_referee_keeps_a_dispute_offchain() {
+    let (game, world, id) = disputed_timed();
+    // Anyone may send the referee's signature.
+    caller(CAROL());
+    game.acknowledge(id, 0, live_signature(game, id, PK_REF));
+    let channel = stored(@world, id);
+    assert_eq!((channel.acked_epoch, channel.acked_deadline), (0, WINDOW.into()));
+    set_block_timestamp(WINDOW.into());
+    game.resolve(id, 0);
+    let channel = stored(@world, id);
+    assert_eq!(channel.status, ACTIVE);
+    assert_eq!((channel.epoch, channel.deadline), (1, 0));
+}
+
+#[test]
+fn without_an_acknowledgement_a_timed_dispute_is_forced() {
+    let (game, world, id) = disputed_timed();
+    set_block_timestamp(WINDOW.into());
+    game.resolve(id, 0);
+    assert_eq!(stored(@world, id).status, FORCED);
+}
+
+#[test]
+#[should_panic(expected: ('Invalid session signature', 'ENTRYPOINT_FAILED'))]
+fn only_the_referee_acknowledges() {
+    let (game, _, id) = disputed_timed();
+    game.acknowledge(id, 0, live_signature(game, id, PK_A));
+}
+
+#[test]
+#[should_panic(expected: ('Untimed game', 'ENTRYPOINT_FAILED'))]
+fn an_untimed_game_has_no_referee_to_acknowledge() {
+    let (game, _, id) = started();
+    caller(ALICE());
+    game.open_dispute(id, 0);
+    game.acknowledge(id, 0, live_signature(game, id, PK_REF));
+}
+
+#[test]
+#[should_panic(expected: ('Dispute window closed', 'ENTRYPOINT_FAILED'))]
+fn an_acknowledgement_after_the_window_is_too_late() {
+    let (game, _, id) = disputed_timed();
+    let signature = live_signature(game, id, PK_REF);
+    set_block_timestamp(WINDOW.into());
+    game.acknowledge(id, 0, signature);
+}
+
+fn referee_resume(
+    game: ICounterChannelDispatcher, world: @WorldStorage, id: felt252, key: felt252,
+) {
+    let context = context_hash::<CounterRules>(@game.terms(id));
+    let anchor = stored(world, id).anchor.hash;
+    game
+        .resume_by_referee(
+            id, 1, sign(referee_resume_hash::<CounterRules>(context, 1, anchor), key),
+        );
+}
+
+#[test]
+fn the_referee_alone_returns_a_timed_game_from_forced_play() {
+    let (game, world, id) = disputed_timed();
+    set_block_timestamp(WINDOW.into());
+    game.resolve(id, 0);
+    // Bob, who would rather stay onchain, need not sign.
+    caller(CAROL());
+    referee_resume(game, @world, id, PK_REF);
+    let channel = stored(@world, id);
+    assert_eq!((channel.status, channel.epoch, channel.deadline), (ACTIVE, 2, 0));
+}
+
+#[test]
+#[should_panic(expected: ('Invalid session signature', 'ENTRYPOINT_FAILED'))]
+fn a_seat_cannot_resume_alone() {
+    let (game, world, id) = disputed_timed();
+    set_block_timestamp(WINDOW.into());
+    game.resolve(id, 0);
+    referee_resume(game, @world, id, PK_A);
+}
+
+#[test]
+#[should_panic(expected: ('Untimed game', 'ENTRYPOINT_FAILED'))]
+fn an_untimed_game_needs_every_seat_to_resume() {
+    let (game, world, id) = forced_play();
+    referee_resume(game, @world, id, PK_REF);
+}
+
+#[test]
+fn segments_extend_the_candidate_within_one_window() {
+    let (game, world, id) = started();
+    let terms = game.terms(id);
+    let start = opening(@terms);
+    let steps = full_game();
+    // The first four steps open a dispute...
+    let (first, middle) = sign_steps(@terms, start, steps.slice(0, 4));
+    caller(CAROL());
+    game.submit_history(id, 0, start, first, no_approvals());
+    let channel = stored(@world, id);
+    assert_eq!(channel.candidate.hash, state_hash::<CounterRules>(@middle));
+    let (_, _, anchor_hash, _, candidate_hash, _) = game.snapshot(id);
+    assert_eq!((anchor_hash, candidate_hash), (channel.anchor.hash, channel.candidate.hash));
+    // ...and the rest extends the candidate rather than starting over.
+    let (rest, end) = sign_steps(@terms, middle, steps.slice(4, 3));
+    game.submit_history(id, 0, middle, rest, no_approvals());
+    assert_eq!(stored(@world, id).candidate.hash, state_hash::<CounterRules>(@end));
+    set_block_timestamp(WINDOW.into());
+    game.resolve(id, 0);
+    let channel = stored(@world, id);
+    assert_eq!((channel.status, channel.result.winner), (SETTLED, 1));
+}
+
+#[test]
+fn channel_state_packs_and_unpacks_exactly() {
+    let big = referee_dojo::models::StoredOutcome { finished: true, winner: 255, reason: 255 };
+    let r = |
+        hash: felt252, seq: u32,
+    | referee::channel::StateRef {
+        hash,
+        seq,
+        support_turn: 0xffffffff,
+        due: 255,
+        outcome: referee::Outcome {
+            finished: big.finished, winner: big.winner, reason: big.reason,
+        },
+    };
+    let max40: u64 = 0xffffffffff;
+    let channel = referee::Channel {
+        status: 255,
+        epoch: 0xffffffff,
+        context: 0,
+        response_seconds: 604800,
+        anchor: r(0xa, 0xffffffff),
+        candidate: r(0xc, 7),
+        anchor_block: max40,
+        candidate_block: max40 - 1,
+        deadline: max40 - 2,
+        acked_epoch: 0xfffffffe,
+        acked_deadline: max40 - 3,
+        result: referee::Outcome { finished: true, winner: 254, reason: 253 },
+    };
+    let packed = referee_dojo::models::pack_state(1, @channel);
+    assert_eq!(referee_dojo::models::unpack_state(@packed, 0, 604800), channel);
+    // A candidate that is the anchor is stored as zero, and read back as the anchor.
+    let same = referee::Channel { candidate: channel.anchor, ..channel };
+    let packed = referee_dojo::models::pack_state(1, @same);
+    assert_eq!(packed.candidate, 0);
+    assert_eq!(referee_dojo::models::unpack_state(@packed, 0, 604800), same);
+}
+
+#[test]
+#[should_panic(expected: 'Value exceeds 40 bits')]
+fn block_numbers_past_40_bits_are_refused() {
+    let empty = referee::channel::create(3600);
+    let channel = referee::Channel { anchor_block: 0x10000000000, ..empty };
+    referee_dojo::models::pack_state(1, @channel);
 }

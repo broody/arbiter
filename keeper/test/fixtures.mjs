@@ -12,6 +12,12 @@ export const terms = (game_id = 7n) => ({
   players: [0xa11cen, 0xb0bn], keys: keys.map(publicKey), rng_tips: [0x11n, 0x22n], config: { target: 20 },
 });
 export const add = amount => play({ kind: ADD, amount });
+
+/** The key the refereeing keeper signs with. */
+export const REFEREE_KEY = 0x7e7e7en;
+/** A timed game refereed with REFEREE_KEY: 30 s per turn and a 60 s bank, so a seat's time runs out 90 s into its turn. */
+export const timed = (game_id = 7n) => ({ ...terms(game_id),
+  clock: { referee: publicKey(REFEREE_KEY), settings: { turn_ms: 30000, bank_ms: 60000, increment_ms: 0, byoyomi: null } } });
 export { resign };
 
 /** Each seat in turn adds `amounts`, signing with its own key. */
@@ -31,9 +37,10 @@ export const signed = (session, from = 0) => session.steps.slice(from).map(signe
 export const ref = env => ({ hash: stateHash(counter, env), seq: env.seq, support_turn: env.support_turn, due: due(counter, env), outcome: env.outcome });
 
 /** A decoded `ChannelGame` for `session`'s terms. */
-export function channelOf(session, { status = ACTIVE, epoch = 0, anchor = session.start, candidate = anchor, deadline = 0 } = {}) {
+export function channelOf(session, { status = ACTIVE, epoch = 0, anchor = session.start, candidate = anchor, deadline = 0,
+  acked_epoch = 0, acked_deadline = 0 } = {}) {
   return { id: session.terms.game_id, status, epoch, context: contextHash(counter, session.terms), anchor: ref(anchor),
-    candidate: ref(candidate), deadline, anchor_block: 0 };
+    candidate: ref(candidate), deadline, anchor_block: 0, candidate_block: 0, acked_epoch, acked_deadline };
 }
 
 /**
@@ -49,12 +56,22 @@ export function walletSign(key, message) {
   return [signature.r, signature.s];
 }
 
-/** The watcher's chain interface over settable channels, recording every send. */
+/**
+ * The watcher's chain interface over settable channels, recording every send.
+ * `failing` names the sends that throw; `bundles` is whether a resolve's
+ * after-settle calls simulate with it; `joins` (`{ game_id, block }`) and
+ * `termsOf` (game id -> terms) stand in for the world's events and the
+ * system's `terms`, up to block `block`.
+ */
 export function fakeChain({ canSend = true } = {}) {
-  const channels = new Map(), sent = [];
+  const channels = new Map(), sent = [], failing = new Set(), joins = [], termsOf = new Map();
   const accounts = new Map(wallets.map(key => [walletAddress(key), ec.starkCurve.getPublicKey(keyHex(key))]));
+  const record = (via, entry) => {
+    if (failing.has(via)) throw Error(`${via} failed`);
+    sent.push({ via, ...entry });
+  };
   return {
-    channels, sent, time: 1000, canSend,
+    channels, sent, failing, joins, termsOf, time: 1000, block: 10, bundles: true, reads: { terms: 0 }, canSend,
     async verifyMessage(address, message, [r, s]) {
       const key = accounts.get(BigInt(address));
       return Boolean(key) && ec.starkCurve.verify(new ec.starkCurve.Signature(BigInt(r), BigInt(s)),
@@ -66,11 +83,28 @@ export function fakeChain({ canSend = true } = {}) {
       if (!channel) throw Error('Unknown channel');
       return structuredClone(channel);
     },
-    async submitHistory(entry, session, epoch) { sent.push({ via: 'history', session, epoch }); return '0x1'; },
-    async resolve(entry, gameId, epoch) { sent.push({ via: 'resolve', gameId, epoch }); return '0x2'; },
-    async settle(entry, session, epoch) { sent.push({ via: 'proof', session, epoch }); return '0x3'; },
+    async blockNumber() { return this.block; },
+    async joinedGames(entry, from) {
+      return { games: joins.filter(j => j.block >= from && j.block <= this.block), to: this.block };
+    },
+    async terms(entry, gameId) {
+      this.reads.terms += 1;
+      if (!termsOf.has(BigInt(gameId))) throw Error('Unknown channel');
+      return structuredClone(termsOf.get(BigInt(gameId)));
+    },
+    async submitHistory(entry, session, epoch) { record('history', { session, epoch }); return '0x1'; },
+    async resolve(entry, gameId, epoch, { after = [] } = {}) {
+      if (!after.length) { record('resolve', { gameId, epoch }); return { tx: '0x2' }; }
+      if (this.bundles) { record('resolve', { gameId, epoch, after }); return { tx: '0x2', bundled: true }; }
+      record('resolve', { gameId, epoch });
+      record('calls', { calls: after });
+      return { tx: '0x2', bundled: false, after_tx: '0x6' };
+    },
+    async settle(entry, session, epoch) { record('proof', { session, epoch }); return '0x3'; },
+    async acknowledge(entry, gameId, epoch, signature) { record('acknowledge', { gameId, epoch, signature }); return '0x4'; },
+    async resumeByReferee(entry, gameId, epoch, signature) { record('resume', { gameId, epoch, signature }); return '0x5'; },
   };
 }
 
 export const entry = (overrides = {}) =>
-  ({ channel: CHANNEL, game: counter, entrypoints: {}, max_history_steps: 64, prover: null, ...overrides });
+  ({ channel: CHANNEL, game: counter, entrypoints: {}, replay_max_steps: 64, prover: null, ...overrides });

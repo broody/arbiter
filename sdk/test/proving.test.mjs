@@ -77,7 +77,7 @@ test('submit_history replays from the start against final signatures', async () 
 
   const ref = [0x11n, 5n, 3n, 1n, 0n, 0n, 0n];
   const stored = [terms.game_id, 0xa11cen, 0xb0bn, 1n, 2n, 3n, 4n, terms.prover, 1n, 20n, 2n, 3n, 0xc0n, 3600n, 0n, 0n,
-    ...ref, ...ref, 55n, 900n, 0n, 0n, 0n];
+    ...ref, ...ref, 55n, 55n, 900n, 0n, 0n, 0n, 0n, 0n];
   const provider = { callContract: async (c, block) => {
     assert.deepEqual([c.contractAddress, c.entrypoint, c.calldata, block], [hex(terms.channel), 'get_channel', [hex(terms.game_id)], 'latest']);
     return stored.map(hex);
@@ -93,10 +93,11 @@ test('games with a replay witness must encode it', () => {
 });
 
 test('settlement calls the adapter with the end state and approvals', () => {
-  const call = settlementCall(counter, { prover: terms.prover, channel: terms.channel, gameId: terms.game_id, epoch: 1, end: session.env });
+  const call = settlementCall(counter, { prover: terms.prover, channel: terms.channel, gameId: terms.game_id, epoch: 1,
+    startHash, end: session.env });
   assert.equal(call.entrypoint, 'settle');
   assert.equal(BigInt(call.contractAddress), terms.prover);
-  assert.deepEqual(call.calldata.map(BigInt), [terms.channel, terms.game_id, 1n, ...encodeEnvelope(counter, session.env),
+  assert.deepEqual(call.calldata.map(BigInt), [terms.channel, terms.game_id, 1n, startHash, ...encodeEnvelope(counter, session.env),
     ...encodeSignatures([ZERO_SIGNATURE, ZERO_SIGNATURE])]);
 });
 
@@ -119,8 +120,10 @@ test('native responses must carry exactly the requested transition', () => {
   assert.throws(() => validateNativeProof({ ...counter, tag: 'OTHER' }, response(), expected), /another transition/);
 });
 
-// A provider for one channel whose anchor is the session start at block 100.
-function fakeProvider({ head = 140, anchorBlock = 100, epoch = 0, chain = CHAIN, snapshotTerms = terms, anchorHash = startHash } = {}) {
+// A provider for one channel whose anchor is the session start at block 100,
+// and whose candidate is the anchor unless given.
+function fakeProvider({ head = 140, anchorBlock = 100, epoch = 0, chain = CHAIN, snapshotTerms = terms, anchorHash = startHash,
+  candidateHash = anchorHash, candidateBlock = anchorBlock } = {}) {
   const blocks = n => ({ block_number: n, block_hash: hex(0xb000n + BigInt(n)) });
   return {
     getChainId: async () => hex(chain),
@@ -131,7 +134,8 @@ function fakeProvider({ head = 140, anchorBlock = 100, epoch = 0, chain = CHAIN,
     callContract: async call => {
       if (call.entrypoint === 'os_program') return [hex(OS)];
       assert.equal(call.entrypoint, 'snapshot');
-      return [...encodeTerms(counter, snapshotTerms), BigInt(epoch), anchorHash, BigInt(anchorBlock)].map(hex);
+      return [...encodeTerms(counter, snapshotTerms), BigInt(epoch), anchorHash, BigInt(anchorBlock),
+        candidateHash, BigInt(candidateBlock)].map(hex);
     },
   };
 }
@@ -170,7 +174,22 @@ test('proveSession proves from the anchor and returns the settle call', async ()
     assert.equal(proved.endHash, endHash);
     assert.equal(proved.options.proof, response().proof);
     assert.deepEqual(proved.call(), settlementCall(counter, { prover: terms.prover, channel: terms.channel,
-      gameId: terms.game_id, epoch: 0, end: session.env }));
+      gameId: terms.game_id, epoch: 0, startHash, end: session.env }));
+  });
+});
+
+test('proveSession extends the candidate once the candidate is deep enough', async () => {
+  const base = { block_number: 130, block_hash: hex(0xb000n + 130n) };
+  await withProver(() => ({ result: response({ block: base }) }), async (proverUrl, requests) => {
+    // The anchor is some older state; the session starts at the candidate, set in block 120.
+    const provider = fakeProvider({ anchorHash: 0xa11n, anchorBlock: 50, candidateHash: startHash, candidateBlock: 120 });
+    const proved = await proveSession({ provider, proverUrl, session, epoch: 0, expectedClassHash: CLASS });
+    assert.equal(proved.call().calldata.map(BigInt)[3], startHash);
+    const prove = extra => proveSession({ provider, proverUrl, session, epoch: 0, expectedClassHash: CLASS, waitMs: 0, ...extra });
+    await assert.rejects(prove({ blockNumber: 119 }), /Proof base must follow/);
+    await assert.rejects(proveSession({ provider: fakeProvider({ candidateHash: startHash, candidateBlock: 135, anchorHash: 0xa11n }),
+      proverUrl, session, epoch: 0, expectedClassHash: CLASS, waitMs: 0 }), /not yet 10 blocks deep/);
+    assert.equal(requests.length, 1);
   });
 });
 
@@ -179,7 +198,7 @@ test('proveSession refuses stale or foreign sessions before calling the prover',
     const prove = (provider, extra = {}) => proveSession({ provider, proverUrl, session, epoch: 0, expectedClassHash: CLASS, waitMs: 0, ...extra });
     await assert.rejects(prove(fakeProvider({ head: 105 })), /not yet 10 blocks deep/);
     await assert.rejects(prove(fakeProvider({ epoch: 1 })), /Stale proving epoch/);
-    await assert.rejects(prove(fakeProvider({ anchorHash: endHash })), /does not start at the chain anchor/);
+    await assert.rejects(prove(fakeProvider({ anchorHash: endHash })), /does not start at the chain anchor or candidate/);
     await assert.rejects(prove(fakeProvider(), { expectedClassHash: CLASS + 1n }), /Unexpected prover class/);
     await assert.rejects(prove(fakeProvider(), { blockNumber: 99 }), /Proof base must follow the anchor/);
     await assert.rejects(prove(fakeProvider(), { expectedClassHash: undefined }), /allowlisted prover class/);

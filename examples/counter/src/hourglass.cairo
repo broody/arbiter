@@ -87,4 +87,12 @@ pub impl HourglassCounterRules of GameRules {
     fn outcome(state: @Counter) -> Option<(u8, u8)> {
         CounterRules::outcome(state)
     }
+
+    fn max_steps(config: @Config) -> u32 {
+        CounterRules::max_steps(config)
+    }
+
+    fn adjudicate(config: @Config, state: @Counter) -> (u8, u8) {
+        CounterRules::adjudicate(config, state)
+    }
 }

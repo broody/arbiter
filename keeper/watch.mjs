@@ -1,35 +1,82 @@
-// The keeper's chain loop. Each round reads the channel of every open game and:
-// - answers a dispute whose candidate the archive outranks, before the deadline;
-// - resolves a dispute once its window has passed (anyone may);
-// - settles a finished game that is still active.
-// It submits a transcript by onchain replay (`submit_history`) when short, or
-// by a native proof through the game's adapter. Forced play and timeouts need
-// a player's wallet, so the keeper only waits them out.
-import { rebase } from '../sdk/src/index.mjs';
-import { gameKey, outranks } from './archive.mjs';
+// The keeper's chain loop. Each round, it registers the timed games that
+// joined onchain naming its referee key, then reads the channel of every open
+// game and:
+// - settles a finished game that is still active, in chained segments when its
+//   transcript is long (see `disputeAnswer`);
+// - as the referee of a timed game, acknowledges a dispute at once, so that
+//   the game returns to play after the window instead of forced play, and
+//   returns a game from forced play itself;
+// - answers any other dispute once, near its deadline, from the latest state:
+//   the fallback, too, when a referee's acknowledgement has not landed;
+// - resolves a dispute once its window has passed (anyone may), with the
+//   game's after-settle calls when that settles it.
+// It submits a segment by onchain replay (`submit_history`) when short, or by
+// a native proof through the game's adapter. Forced play and timeouts
+// otherwise need a player's wallet, so the keeper waits them out.
+import { Session, disputeAnswer, felt, hex, rebase } from '../sdk/src/index.mjs';
+import { gameKey } from './archive.mjs';
 
 export const WAITING = 0, ACTIVE = 1, DISPUTE = 2, FORCED = 3, SETTLED = 4, CANCELLED = 5;
+const CURSOR = 'keeper/cursor/';
+
+const replayMax = entry => entry.replay_max_steps ?? entry.max_history_steps ?? 64;
+/** Steps per submission: up to `proof_max_steps` with a prover, else `replay_max_steps`. */
+export const segmentSteps = entry => Math.max(replayMax(entry), entry.prover ? entry.proof_max_steps ?? Infinity : 0);
 
 /**
  * What to do about one game: `{ action, reason?, base? }`, where `action` is
- * close, wait, resolve, answer or settle. `base` is the archived session from
- * the channel's anchor (see `rebase`), for answer and settle. `baseFor(hash)`
- * defaults to rebasing `session`.
+ * close, wait, resolve, acknowledge, resume, settle or answer. `base` is the
+ * session to submit, for settle and answer. Options:
+ * - `settle`: submit finished games (default true);
+ * - `referee`: this keeper referees the (timed) game;
+ * - `margin`: seconds before a dispute's deadline from which to answer it;
+ * - `maxSteps`: steps per submission;
+ * - `sent`: what the keeper already sent in the channel's epoch, `{ against,
+ *   ours, ack, resumed }`: the candidates it submitted against, the states
+ *   it submitted, the `epoch/deadline` it acknowledged and the epoch it resumed;
+ * - `answer(channel)`: the submission against the channel (default
+ *   `disputeAnswer`); `holds(hash)`: whether the archive's history reaches
+ *   that state (default `rebase`).
  */
-export function decide(channel, session, now, { settle = true, baseFor = hash => rebase(session, hash) } = {}) {
+export function decide(channel, session, now, { settle = true, referee = false, margin = 600, maxSteps = Infinity, sent = {},
+  answer = c => disputeAnswer(session, c, { maxSteps }), holds = hash => rebase(session, hash) !== null } = {}) {
+  const wait = reason => (reason ? { action: 'wait', reason } : { action: 'wait' });
   switch (channel.status) {
     case SETTLED: case CANCELLED: return { action: 'close' };
-    case WAITING: return { action: 'wait', reason: 'not joined' };
-    case FORCED: return { action: 'wait', reason: `forced play: seat ${channel.anchor.due} is due` };
+    case WAITING: return wait('not joined');
+    case FORCED:
+      if (!referee) return wait(`forced play: seat ${channel.anchor.due} is due`);
+      if (sent.resumed === channel.epoch) return wait('resumed');
+      if (now >= channel.deadline) return wait('the forced-play window has passed');
+      return holds(channel.anchor.hash) ? { action: 'resume' } : wait('the channel anchor is not in the archive');
   }
   if (channel.status === DISPUTE && now >= channel.deadline) return { action: 'resolve' };
-  const finished = session.env.outcome.finished;
-  if (channel.status === ACTIVE && !(settle && finished)) return { action: 'wait' };
-  const base = baseFor(channel.anchor.hash);
-  if (!base) return { action: 'wait', reason: 'the channel anchor is not in the archive' };
-  if (base.env.seq <= channel.anchor.seq) return { action: 'wait', reason: 'nothing past the anchor' };
-  if (channel.status === ACTIVE) return { action: 'settle', base };
-  return outranks(base.env, channel.candidate) ? { action: 'answer', base } : { action: 'wait', reason: 'the candidate is current' };
+  const settling = settle && session.env.outcome.finished, candidate = felt(channel.candidate.hash);
+  const answered = sent.against?.has(candidate) ?? false;
+  const submit = action => {
+    const base = answer(channel);
+    return base ? { action, base } : null;
+  };
+  if (channel.status === ACTIVE) {
+    if (!settling) return wait();
+    return answered ? wait('submitted') : submit('settle') ?? wait('nothing past the anchor');
+  }
+  // A dispute, window open. The referee's acknowledgement returns an
+  // unfinished game to play after the window. An unfinished game is otherwise
+  // answered once, near the deadline, and again only against a candidate
+  // someone else submitted. Near the deadline, a submission goes first.
+  const late = now >= channel.deadline - margin, ours = sent.ours?.has(candidate) ?? false;
+  const acked = channel.acked_epoch === channel.epoch && channel.acked_deadline === channel.deadline;
+  const ack = referee && !acked && !channel.candidate.outcome.finished && sent.ack !== `${channel.epoch}/${channel.deadline}`;
+  const fallback = !settling && !answered && !ours && late && !(referee && acked);
+  if ((settling && !answered && (late || !ack)) || fallback) {
+    const decision = submit(settling ? 'settle' : 'answer');
+    if (decision) return decision;
+  }
+  if (ack) return { action: 'acknowledge' };
+  if (answered) return wait('answered');
+  if (referee && acked) return wait('acknowledged');
+  return wait(late ? 'the candidate is current' : 'answering near the deadline');
 }
 
 /**
@@ -40,24 +87,54 @@ export function decide(channel, session, now, { settle = true, baseFor = hash =>
  */
 export function startWatcher({ archive, chain, entries, intervalMs = 15000, settle = true, log = () => {} }) {
   const busy = new Map(); // key -> action promise
-  const bases = new Map(); // key -> { hash, seq, base }, so a round does not replay every transcript
+  const memos = new Map(); // key -> what was sent in the channel's current epoch
+  const anchors = new Map(); // key -> whether the archive holds a state, so forced rounds don't replay every transcript
   let timer = null, stopped = false;
 
-  const baseFor = (key, session) => hash => {
-    const cached = bases.get(key);
-    if (cached?.hash === hash && cached.seq === session.env.seq && cached.session === session) return cached.base;
-    const base = rebase(session, hash);
-    bases.set(key, { hash, seq: session.env.seq, session, base });
-    return base;
+  const sentIn = (key, epoch) => {
+    let sent = memos.get(key);
+    if (sent?.epoch !== epoch) memos.set(key, sent = { epoch, against: new Set(), ours: new Set(), ack: null, resumed: null });
+    return sent;
+  };
+  const holds = (key, session) => hash => {
+    const cached = anchors.get(key);
+    if (cached?.hash === hash && cached.session === session && cached.seq === session.env.seq) return cached.held;
+    const held = rebase(session, hash) !== null;
+    anchors.set(key, { hash, session, seq: session.env.seq, held });
+    return held;
   };
 
-  async function act(entry, ids, channel, decision) {
-    const { action, base } = decision;
-    if (action === 'resolve') return { tx: await chain.resolve(entry, ids.game_id, channel.epoch) };
-    const via = base.steps.length <= entry.max_history_steps ? 'history' : entry.prover ? 'proof' : null;
-    if (!via) throw Error(`${base.steps.length} steps exceed max_history_steps and no prover is configured`);
+  async function act(entry, ids, channel, { action, base }, sent) {
+    switch (action) {
+      case 'resolve': {
+        // The game's own calls after it settles go with the resolve that settles it.
+        let after = [];
+        if (channel.candidate.outcome.finished && entry.afterSettle) {
+          try { after = (await entry.afterSettle(ids, channel)) ?? []; } catch (e) {
+            log({ game: gameKey(ids), action: 'after_settle', outcome: 'failed', error: e.message });
+          }
+        }
+        return { ...await chain.resolve(entry, ids.game_id, channel.epoch, { after }), ...(after.length ? { after: after.length } : {}) };
+      }
+      case 'acknowledge': {
+        const signature = archive.acknowledgement(ids, channel.epoch, channel.deadline);
+        const tx = await chain.acknowledge(entry, ids.game_id, channel.epoch, signature);
+        sent.ack = `${channel.epoch}/${channel.deadline}`;
+        return { tx };
+      }
+      case 'resume': {
+        const signature = archive.resumeSignature(ids, channel.epoch, channel.anchor.hash);
+        const tx = await chain.resumeByReferee(entry, ids.game_id, channel.epoch, signature);
+        sent.resumed = channel.epoch;
+        await archive.resumed(ids, channel.epoch + 1);
+        return { tx };
+      }
+    }
+    const via = base.steps.length <= replayMax(entry) ? 'history' : 'proof';
     const tx = via === 'history' ? await chain.submitHistory(entry, base, channel.epoch) : await chain.settle(entry, base, channel.epoch);
-    return { tx, via, steps: base.steps.length };
+    sent.against.add(felt(channel.candidate.hash));
+    sent.ours.add(felt(base.stateHash()));
+    return { tx, via, from: base.start.seq, steps: base.steps.length };
   }
 
   async function visit(ids, now) {
@@ -67,10 +144,18 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
     const session = await archive.session(ids);
     if (!session) return;
     const channel = await chain.channel(entry, ids.game_id);
-    const decision = decide(channel, session, now, { settle, baseFor: baseFor(key, session) });
+    // The referee's clock stops for forced play, and restarts after it.
+    if (archive.referees(ids)) {
+      if (channel.status === FORCED) await archive.forced(ids, channel.epoch);
+      else if (channel.status === ACTIVE || channel.status === DISPUTE) await archive.resumed(ids, channel.epoch);
+    }
+    const sent = sentIn(key, channel.epoch);
+    const decision = decide(channel, session, now, { settle, referee: archive.referees(ids), sent, maxSteps: segmentSteps(entry),
+      margin: entry.answer_margin_seconds ?? 600, holds: holds(key, session) });
     if (decision.action === 'close') {
       await archive.close(ids, channel.status);
-      bases.delete(key);
+      memos.delete(key);
+      anchors.delete(key);
       log({ game: key, action: 'close', status: channel.status });
       return;
     }
@@ -78,14 +163,42 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
     const started = Date.now();
     const entryLog = { game: key, action: decision.action, epoch: channel.epoch, seq: decision.base?.env.seq };
     if (!chain.canSend) { log({ ...entryLog, outcome: 'skipped', error: 'watch-only: no keeper account' }); return; }
-    const run = act(entry, ids, channel, decision)
+    const run = act(entry, ids, channel, decision, sent)
       .then(result => log({ ...entryLog, ...result, outcome: 'sent', ms: Date.now() - started }))
       .catch(e => log({ ...entryLog, outcome: 'failed', error: e.message, ms: Date.now() - started }))
       .finally(() => busy.delete(key));
     busy.set(key, run);
   }
 
+  // Register the timed games that joined on `entry`'s channel naming our
+  // referee key, found in the world's `ChannelUpdated` events: each gets a
+  // referee and a `start` even if neither seat registers it.
+  async function discover(entry) {
+    const cursor = `${CURSOR}${hex(entry.channel)}`;
+    const from = (await archive.backend.get(cursor)) ?? entry.from_block ?? await chain.blockNumber();
+    const { games, to } = await chain.joinedGames(entry, from);
+    for (const { game_id } of games) {
+      const ids = archive.ids(entry.channel, game_id), key = gameKey(ids);
+      if (archive.known.has(key)) continue;
+      try {
+        const terms = await chain.terms(entry, game_id);
+        if (terms.clock == null || felt(terms.clock.referee) !== archive.referee) continue;
+        if ((await archive.register(new Session(entry.game, terms).export())).created)
+          log({ game: key, action: 'register', outcome: 'joined' });
+      } catch (e) { log({ game: key, action: 'register', outcome: 'failed', error: e.message }); }
+    }
+    if (to >= from) await archive.backend.put(cursor, to + 1);
+  }
+
   async function tick() {
+    if (archive.referee !== null && chain.joinedGames) {
+      for (const entry of entries.values()) {
+        if (!entry.world || entry.anchored === false) continue;
+        try { await discover(entry); } catch (e) {
+          log({ action: 'discover', channel: hex(entry.channel), outcome: 'failed', error: e.message });
+        }
+      }
+    }
     const now = await chain.now();
     for (const ids of archive.open()) {
       if (busy.has(gameKey(ids))) continue;

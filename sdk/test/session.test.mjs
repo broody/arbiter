@@ -153,15 +153,18 @@ test('resignation ends the game for the other seat', () => {
 test('terms, snapshots and channels decode from Cairo serialization', () => {
   const encoded = encodeTerms(counter, terms);
   assert.deepEqual(decodeTerms(counter, encoded), { ...terms, clock: null, response_seconds: 3600, config: { target: 20 } });
-  const snapshot = decodeSnapshot(counter, [...encoded, 2n, 0xabcn, 77n]);
+  const snapshot = decodeSnapshot(counter, [...encoded, 2n, 0xabcn, 77n, 0xdefn, 88n]);
   assert.equal(snapshot.epoch, 2);
   assert.equal(snapshot.anchor_hash, 0xabcn);
   assert.equal(snapshot.anchor_block, 77);
+  assert.deepEqual([snapshot.candidate_hash, snapshot.candidate_block], [0xdefn, 88]);
   const ref = [0x11n, 5n, 3n, 1n, 1n, 2n, 1n];
   const channel = decodeChannelGame(counter, [
     9n, 0xa11cen, 0xb0bn, 1n, 2n, 3n, 4n, 0xad0b7e5n, 1n, 20n, 4n, 2n, 0xc0n, 3600n, 0x7en, 4n, 30000n, 60000n, 2000n, 1n,
-    ...ref, ...ref, 55n, 0n, 1n, 2n, 1n,
+    ...ref, ...ref, 55n, 56n, 0n, 3n, 900n, 1n, 2n, 1n,
   ]);
+  assert.deepEqual([channel.anchor_block, channel.candidate_block, channel.deadline], [55, 56, 0]);
+  assert.deepEqual([channel.acked_epoch, channel.acked_deadline], [3, 900]);
   assert.equal(channel.config.target, 20);
   assert.deepEqual(channel.clock, { referee: 0x7en, settings: { turn_ms: 30000, bank_ms: 60000, increment_ms: 2000, byoyomi: null } });
   assert.equal(channel.status, 4);

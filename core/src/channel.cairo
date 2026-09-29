@@ -5,7 +5,7 @@
 //! carried every seat's approval.
 use crate::protocol::{due, forfeit, state_hash};
 use crate::rules::GameRules;
-use crate::types::{Envelope, Outcome, REASON_RESIGN, REASON_TIMEOUT};
+use crate::types::{Envelope, Outcome, REASON_ABANDON, REASON_RESIGN};
 
 pub const WAITING: u8 = 0;
 pub const ACTIVE: u8 = 1;
@@ -39,7 +39,14 @@ pub struct Channel {
     pub candidate: StateRef,
     /// Block of the last anchor change. Proofs must be based at or after it.
     pub anchor_block: u64,
+    /// Block the candidate was set in. A proof or replay that extends the
+    /// candidate must be based at or after it.
+    pub candidate_block: u64,
     pub deadline: u64,
+    /// The dispute (epoch and deadline) the referee of a timed game showed it
+    /// was live for (`acknowledge`); zeros otherwise.
+    pub acked_epoch: u32,
+    pub acked_deadline: u64,
     /// Final result once SETTLED.
     pub result: Outcome,
 }
@@ -70,7 +77,10 @@ pub fn create(response_seconds: u32) -> Channel {
         anchor: empty,
         candidate: empty,
         anchor_block: 0,
+        candidate_block: 0,
         deadline: 0,
+        acked_epoch: 0,
+        acked_deadline: 0,
         result: unfinished(),
     }
 }
@@ -85,6 +95,7 @@ pub fn join(mut channel: Channel, context: felt252, anchor: StateRef, block: u64
     channel.anchor = anchor;
     channel.candidate = anchor;
     channel.anchor_block = block;
+    channel.candidate_block = block;
     channel.status = ACTIVE;
     channel
 }
@@ -95,10 +106,12 @@ pub fn cancel(mut channel: Channel) -> Channel {
     channel
 }
 
-/// A state proved or replayed from the anchor. With every seat's checkpoint
-/// approval it commits at once. Without, it becomes the dispute candidate: it
-/// must beat the current candidate, it opens a dispute if none is running, and
-/// it never extends the deadline.
+/// A state proved or replayed from the anchor, or from the candidate (the
+/// binding checks which). With every seat's checkpoint approval it commits at
+/// once. Without, it becomes the dispute candidate: it must beat the current
+/// candidate, it opens a dispute if none is running, and it never extends the
+/// deadline. Starting from the candidate lets a long transcript arrive in
+/// segments within one dispute window.
 pub fn receive(
     mut channel: Channel, epoch: u32, end: StateRef, approved: bool, now: u64, block: u64,
 ) -> Channel {
@@ -125,6 +138,7 @@ pub fn receive(
             channel.deadline = now + channel.response_seconds.into();
         }
         channel.candidate = end;
+        channel.candidate_block = block;
     }
     channel
 }
@@ -139,18 +153,39 @@ pub fn open_dispute(mut channel: Channel, epoch: u32, now: u64) -> Channel {
     channel
 }
 
-/// After the window, the best candidate becomes the anchor. An unfinished game
-/// moves to forced onchain play with a fresh window, so a last-second
-/// candidate can never steal the next turn by timeout.
-pub fn resolve(mut channel: Channel, epoch: u32, now: u64, block: u64) -> Channel {
+/// The referee of a timed game is live during this dispute (the binding checks
+/// its signature over `live_hash`). `resolve` then returns an unfinished game
+/// to offchain play, where the referee's clock keeps running, instead of
+/// forced play.
+pub fn acknowledge(mut channel: Channel, epoch: u32, now: u64) -> Channel {
+    assert(channel.status == DISPUTE, 'No dispute');
+    assert(channel.epoch == epoch, 'Stale channel epoch');
+    assert(now < channel.deadline, 'Dispute window closed');
+    channel.acked_epoch = epoch;
+    channel.acked_deadline = channel.deadline;
+    channel
+}
+
+/// After the window, the best candidate becomes the anchor. A finished game
+/// settles. An unfinished timed game whose referee acknowledged this dispute
+/// returns to offchain play: forced play is the fallback for a referee that is
+/// down, so a dispute can't pause a live referee's clock. Otherwise it moves
+/// to forced onchain play with a fresh window, so a last-second candidate can
+/// never steal the next turn by timeout. `timed` says whether the game has a
+/// referee clock.
+pub fn resolve(mut channel: Channel, epoch: u32, now: u64, block: u64, timed: bool) -> Channel {
     assert(channel.status == DISPUTE, 'No dispute');
     assert(channel.epoch == epoch, 'Stale channel epoch');
     assert(now >= channel.deadline, 'Dispute window open');
+    let acked = channel.acked_epoch == epoch && channel.acked_deadline == channel.deadline;
     let candidate = channel.candidate;
     commit(ref channel, candidate, block);
     if candidate.outcome.finished {
         channel.deadline = 0;
         settle(ref channel, candidate.outcome);
+    } else if timed && acked {
+        channel.status = ACTIVE;
+        channel.deadline = 0;
     } else {
         channel.status = FORCED;
         channel.deadline = now + channel.response_seconds.into();
@@ -176,7 +211,8 @@ pub fn forced(
     channel
 }
 
-/// Every seat approved returning to offchain play from the anchor.
+/// Every seat approved returning to offchain play from the anchor, or, in a
+/// timed game, its referee did (the binding checks either).
 pub fn resume(mut channel: Channel, epoch: u32, approved: bool, now: u64, block: u64) -> Channel {
     forced_epoch(@channel, epoch, now);
     assert(approved, 'Need every approval');
@@ -184,10 +220,12 @@ pub fn resume(mut channel: Channel, epoch: u32, approved: bool, now: u64, block:
     channel.deadline = 0;
     channel.epoch += 1;
     channel.anchor_block = block;
+    channel.candidate_block = block;
     channel
 }
 
-/// The waiting seat wins once the due seat misses its forced-play window.
+/// The waiting seat wins once the due seat misses its forced-play window. The
+/// chain judges it, not a referee: `REASON_ABANDON`.
 pub fn claim_timeout(mut channel: Channel, epoch: u32, seat: u8, now: u64) -> Channel {
     assert(channel.status == FORCED, 'Not in forced play');
     assert(channel.epoch == epoch, 'Stale channel epoch');
@@ -195,7 +233,7 @@ pub fn claim_timeout(mut channel: Channel, epoch: u32, seat: u8, now: u64) -> Ch
     assert(seat != channel.anchor.due, 'Only waiting seat');
     channel.epoch += 1;
     channel.deadline = 0;
-    settle(ref channel, forfeit(channel.anchor.due, REASON_TIMEOUT));
+    settle(ref channel, forfeit(channel.anchor.due, REASON_ABANDON));
     channel
 }
 
@@ -231,6 +269,7 @@ fn commit(ref channel: Channel, state: StateRef, block: u64) {
     channel.candidate = state;
     channel.epoch += 1;
     channel.anchor_block = block;
+    channel.candidate_block = block;
 }
 
 fn settle(ref channel: Channel, outcome: Outcome) {

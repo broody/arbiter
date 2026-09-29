@@ -43,7 +43,7 @@ test('the referee stamps each step and every seat verifies the stamps', () => {
   assert.equal(seat.stateHash(), referee.session.stateHash());
   const copy = Session.import(counter, structuredClone(seat.export()));
   assert.equal(copy.stateHash(), seat.stateHash());
-  assert.equal(copy.export().version, 3);
+  assert.equal(copy.export().version, 4);
 });
 
 test('a seat whose time runs out is flagged', () => {
@@ -163,19 +163,26 @@ test('time left counts down the due seat only', () => {
   assert.equal(timeLeft(counter, { ...terms, clock: null }, new Session(counter, { ...terms, clock: null }).env, T0), null);
 });
 
-// Seat 0 may recommit its hash chain and then play in one turn: two steps.
+// Seat 0 adds, seat 1 gambles and seat 0 reveals the roll. Seat 0 is due
+// again and has revealed, so it may recommit its hash chain and then play in
+// one turn: two steps. Returns the prelude's stamped records.
 const newTip = rngChain(0x5eed2n, 8)[8];
+function prelude(referee, seat) {
+  return [add(3), playRandom({ kind: GAMBLE, amount: 0 }, chains[1][7]), reveal(chains[0][7])]
+    .map((step, i) => play1(referee, seat, step, T0 + i));
+}
 
 test('a seat signs ahead through its turn and the stamps catch up', () => {
   const { referee, seat } = table();
+  prelude(referee, seat);
   const first = seat.sign(recommit(newTip), keys[0]);
   const second = seat.sign(add(3), keys[0]);
-  assert.deepEqual(seat.pending.map(r => r.seq), [0, 1]);
-  assert.deepEqual([seat.env.seq, seat.tip.seq], [0, 2]);
+  assert.deepEqual(seat.pending.map(r => r.seq), [3, 4]);
+  assert.deepEqual([seat.env.seq, seat.tip.seq], [3, 5]);
   // At the tip the turn has passed to seat 1.
   assert.throws(() => seat.sign(add(1), keys[0]), /Wrong signing key/);
-  seat.receive(referee.stamp(first, T0));
-  assert.deepEqual(seat.pending.map(r => r.seq), [1]);
+  seat.receive(referee.stamp(first, T0 + 10));
+  assert.deepEqual(seat.pending.map(r => r.seq), [4]);
   seat.receive(referee.stamp(second, T0 + 300));
   assert.deepEqual(seat.pending, []);
   assert.equal(seat.stateHash(), referee.session.stateHash());
@@ -183,11 +190,12 @@ test('a seat signs ahead through its turn and the stamps catch up', () => {
 
 test('another step landing first drops the steps signed ahead', () => {
   const { referee, seat } = table();
+  const bob = new Session(counter, terms);
+  for (const record of prelude(referee, seat)) bob.receive(record);
   seat.sign(recommit(newTip), keys[0]);
   seat.sign(add(3), keys[0]);
   // Seat 1 resigns before seat 0's steps reach the referee.
-  const bob = new Session(counter, terms);
-  seat.receive(referee.stamp(bob.sign(resign(1), keys[1]), T0));
+  seat.receive(referee.stamp(bob.sign(resign(1), keys[1]), T0 + 10));
   assert.deepEqual(seat.pending, []);
   assert.equal(seat.env.outcome.reason, REASON_RESIGN);
 });
@@ -196,17 +204,18 @@ test('a store keeps steps signed ahead across a restart', async () => {
   const backend = memoryBackend();
   const store = new SessionStore(backend);
   const session = await store.open(counter, terms);
+  const { referee, seat } = table();
+  for (const record of prelude(referee, seat)) await store.receive(session, signedStep(record));
   await store.move(session, recommit(newTip), keys[0]);
   await store.move(session, add(3), keys[0]);
   // A new tab or a restart restores both, ready to resend.
   const restored = await new SessionStore(backend).load(counter, terms);
-  assert.deepEqual(restored.pending.map(r => r.seq), [0, 1]);
-  const { referee } = table();
-  const stamped = restored.pending.map((r, i) => referee.stamp(signedStep(r), T0 + i));
+  assert.deepEqual(restored.pending.map(r => r.seq), [3, 4]);
+  const stamped = restored.pending.map((r, i) => referee.stamp(signedStep(r), T0 + 10 + i));
   await store.receive(restored, signedStep(stamped[0]));
-  assert.deepEqual(restored.pending.map(r => r.seq), [1]);
+  assert.deepEqual(restored.pending.map(r => r.seq), [4]);
   await store.receive(restored, signedStep(stamped[1]));
-  assert.deepEqual([restored.pending, restored.env.seq], [[], 2]);
+  assert.deepEqual([restored.pending, restored.env.seq], [[], 5]);
 });
 
 test('a failed write never releases the step it signed', async () => {

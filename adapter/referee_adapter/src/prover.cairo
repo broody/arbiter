@@ -8,10 +8,11 @@ use starknet::syscalls::{
 use starknet::{ContractAddress, SyscallResultTrait, get_contract_address, get_tx_info};
 use crate::facts::check_facts;
 
-/// The channel's `snapshot(game_id)`: terms, epoch, anchor hash, anchor block.
+/// The channel's `snapshot(game_id)`: terms, epoch, and the hash and block of
+/// the anchor and of the candidate, the two states a proof may start from.
 pub fn snapshot<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>>(
     channel: ContractAddress, game_id: felt252,
-) -> (Terms<R::Config>, u32, felt252, u64) {
+) -> (Terms<R::Config>, u32, felt252, u64, felt252, u64) {
     let mut result = call_contract_syscall(channel, selector!("snapshot"), array![game_id].span())
         .unwrap_syscall();
     Serde::deserialize(ref result).expect('Malformed snapshot')
@@ -43,9 +44,10 @@ pub fn message_hash(prover: felt252, payload: Span<felt252>) -> felt252 {
     poseidon_hash_span(encoded.span())
 }
 
-/// Virtual `__execute__`: replay steps from the anchor against each seat's
-/// final signature (and, in a timed game, the referee's attestation of the
-/// stamps) and emit the transition message for the prover to prove.
+/// Virtual `__execute__`: replay steps from the anchor, or from the candidate
+/// to extend it, against each seat's final signature (and, in a timed game,
+/// the referee's attestation of the stamps) and emit the transition message
+/// for the prover to prove.
 pub fn execute<
     impl R: GameRules,
     +Serde<R::Config>,
@@ -67,39 +69,41 @@ pub fn execute<
     batch: Batch<R::Action>,
 ) {
     assert_virtual();
-    let (terms, anchor_hash, _) = checked_snapshot::<R>(channel, game_id, epoch);
-    assert(state_hash::<R>(@start) == anchor_hash, 'Wrong proof anchor');
+    let start_hash = state_hash::<R>(@start);
+    let (terms, _) = checked_snapshot::<R>(channel, game_id, epoch, start_hash);
     let context = context_hash::<R>(@terms);
     let end = replay::<R>(context, @terms, start, witness, batch);
-    let message = own_payload::<R>(@terms, context, epoch, anchor_hash, state_hash::<R>(@end));
+    let message = own_payload::<R>(@terms, context, epoch, start_hash, state_hash::<R>(@end));
     send_message_to_l1_syscall(0, message.span()).unwrap_syscall();
 }
 
-/// Real `settle`: check the attached proof facts commit to anchor → `end` for
-/// this game and epoch, then hand `end` and the checkpoint approvals to the
-/// channel.
+/// Real `settle`: check the attached proof facts commit to `start_hash` → `end`
+/// for this game and epoch, where `start_hash` is the channel's anchor or
+/// candidate and the proof is based at or after the block it was set in, then
+/// hand `end` and the checkpoint approvals to the channel.
 pub fn settle<
     impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Serde<R::State>, +Drop<R::State>,
 >(
     channel: ContractAddress,
     game_id: felt252,
     epoch: u32,
+    start_hash: felt252,
     end: Envelope<R::State>,
     acks: Span<Signature>,
     os_program: felt252,
 ) {
-    let (terms, anchor_hash, anchor_block) = checked_snapshot::<R>(channel, game_id, epoch);
+    let (terms, base_block) = checked_snapshot::<R>(channel, game_id, epoch, start_hash);
     let context = context_hash::<R>(@terms);
-    let message = own_payload::<R>(@terms, context, epoch, anchor_hash, state_hash::<R>(@end));
+    let message = own_payload::<R>(@terms, context, epoch, start_hash, state_hash::<R>(@end));
     let info = get_execution_info_v3_syscall().unwrap_syscall();
     check_facts(
         info.tx_info.proof_facts,
         message_hash(get_contract_address().into(), message.span()),
         os_program,
         info.block_info.block_number,
-        anchor_block,
+        base_block,
     );
-    let mut calldata = array![game_id, epoch.into(), anchor_hash];
+    let mut calldata = array![game_id, epoch.into(), start_hash];
     end.serialize(ref calldata);
     acks.serialize(ref calldata);
     call_contract_syscall(channel, selector!("accept_verified"), calldata.span()).unwrap_syscall();
@@ -119,15 +123,25 @@ pub fn assert_virtual() {
     }
 }
 
+// The channel's terms and the block the state `start_hash` was set in, which
+// must be the anchor or the candidate.
 fn checked_snapshot<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>>(
-    channel: ContractAddress, game_id: felt252, epoch: u32,
-) -> (Terms<R::Config>, felt252, u64) {
-    let (terms, current, anchor_hash, anchor_block) = snapshot::<R>(channel, game_id);
+    channel: ContractAddress, game_id: felt252, epoch: u32, start_hash: felt252,
+) -> (Terms<R::Config>, u64) {
+    let (terms, current, anchor_hash, anchor_block, candidate_hash, candidate_block) = snapshot::<
+        R,
+    >(channel, game_id);
     assert(terms.channel == channel.into() && terms.game_id == game_id, 'Wrong channel terms');
     assert(terms.chain_id == get_tx_info().chain_id, 'Wrong chain terms');
     assert(epoch == current, 'Stale proof epoch');
     assert(terms.prover == get_contract_address().into(), 'Wrong game prover');
-    (terms, anchor_hash, anchor_block)
+    let block = if start_hash == anchor_hash {
+        anchor_block
+    } else {
+        assert(start_hash == candidate_hash, 'Wrong proof anchor');
+        candidate_block
+    };
+    (terms, block)
 }
 
 fn own_payload<impl R: GameRules>(

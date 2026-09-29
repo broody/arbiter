@@ -47,6 +47,18 @@ pub trait GameRules {
     fn due(state: @Self::State) -> u8;
 
     /// `Some((winner, reason))` once the game is over; `winner` is seat + 1 or
-    /// `DRAW`, and `reason` is in 1..=127.
+    /// `DRAW`, and `reason` is in 1..=127. A game bounds its own length here
+    /// (a move or round limit), so it always ends.
     fn outcome(state: @Self::State) -> Option<(u8, u8)>;
+
+    /// The most steps (`seq`) a transcript may hold. The protocol ends the game
+    /// with `adjudicate` at the first step at or past it that leaves no reveal
+    /// pending. A safety net for transcripts, proofs and archives, not the
+    /// game's own limit: set it to at least the game's longest game times
+    /// (1 + protocol steps per game action).
+    fn max_steps(config: @Self::Config) -> u32;
+
+    /// `(winner, reason)` for a game stopped at `max_steps`, as `outcome`
+    /// reports them.
+    fn adjudicate(config: @Self::Config, state: @Self::State) -> (u8, u8);
 }

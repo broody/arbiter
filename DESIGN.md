@@ -48,10 +48,18 @@ pub trait GameRules {
     fn resolve(config: @Config, ref scratch: Scratch, state: State, seed: felt252) -> State;
     fn due(state: @State) -> u8;
     fn outcome(state: @State) -> Option<(u8, u8)>;   // (seat + 1 or DRAW, reason 1..=127)
+    fn max_steps(config: @Config) -> u32;            // transcript cap; see below
+    fn adjudicate(config: @Config, state: @State) -> (u8, u8);   // the result at the cap
 }
 ```
 
-Rules must be deterministic and must panic on illegal actions.
+Rules must be deterministic and must panic on illegal actions. A game bounds
+its own length in `outcome` (a move or round limit), so every game ends.
+`max_steps` is a safety net on top: the protocol ends a game with
+`adjudicate` at the first step at or past it that leaves no reveal pending. It
+bounds transcripts, proofs and keeper archives even for a game with a bug in
+its own limit, so set it to at least the game's longest game times (1 +
+protocol steps per game action).
 `examples/counter` is a complete game in about 100 lines.
 
 | | Surround | Hashfront |
@@ -65,7 +73,7 @@ Rules must be deterministic and must panic on illegal actions.
 ## Protocol
 
 **Envelope.** The library wraps the game state:
-`Envelope { seq, transcript, support_turn, last_seat, pending, rng_heads, clock, outcome, game }`.
+`Envelope { seq, transcript, support_turn, last_seat, pending, rng_heads, rng_fresh, clock, outcome, game }`.
 
 **Moves.** A step is a `Move<A>`:
 
@@ -74,11 +82,12 @@ Rules must be deterministic and must panic on illegal actions.
 | `Play(A)` | the game action | the due seat |
 | `PlayRandom((A, entropy))` | an action whose `apply` requests randomness, and the actor's next chain value | the due seat |
 | `Reveal(value)` | the named seat's next chain value | the seat the pending request names |
-| `Recommit(tip)` | a new chain tip | the due seat |
+| `Recommit(tip)` | a new chain tip | the due seat, once per reveal |
 | `Resign(seat)` | the resigning seat | named, since either seat may resign at any time |
 | `Flag` | nothing | the referee of a timed game (`REFEREE`), once the due seat's time ran out |
+| `Start` | nothing | the referee of a timed game, to start or restart its clock |
 
-Every game gets the last five for free. The seat is implied by the state
+Every game gets the last six for free. The seat is implied by the state
 (`actor`), so only `Resign` carries one, and only `PlayRandom` carries entropy.
 `Play` of an action that requests randomness fails with `'Randomness requested'`,
 and `PlayRandom` of one that doesn't fails with `'Unexpected entropy'`. A
@@ -87,13 +96,16 @@ entropy }` with a fixed-width action, plus a signature per step).
 
 **Messages.** A step's message is
 `signing_hash(TAG, 'REFEREE_ACTION_V1', context, seq, transcript, move)`.
-`PROTOCOL_VERSION` 3 is in the context hash, so older signatures never
+`PROTOCOL_VERSION` 4 is in the context hash, so older signatures never
 verify under it.
 - It binds the transcript, not the full state. State is determined by the
   anchor plus the transcript, and hashing a large state on every step is costly
   to prove.
 - `transcript' = poseidon(transcript, message)`.
-- Checkpoint and reopen approvals sign the state hash with an epoch.
+- Checkpoint and reopen approvals sign the state hash with an epoch. The
+  referee of a timed game signs `live_hash(context, epoch, deadline)` to show
+  it is live during a dispute, and `referee_resume_hash(context, epoch, state)`
+  to return a game from forced play on its own.
 - All digests are domain-separated by the game's `TAG` and a
   `REFEREE_*_V1` tag, and masked to 250 bits for STARK-curve ECDSA.
 
@@ -125,7 +137,9 @@ acknowledged.
 - Withholding a reveal only stalls, and a stall ends in a forced reveal or a
   timeout.
 - `Recommit` replaces the due seat's tip before its chain runs out. It is
-  impossible while a reveal is pending.
+  impossible while a reveal is pending, and allowed only after the seat
+  revealed from its current tip (`rng_fresh`), so a seat can't add steps at
+  will. A game that never reveals, like Go, can't recommit at all.
 
 **Clocks** (optional, per game). `Terms.clock` is an
 `Option<TimeControl { referee, settings }>`: the referee's public key and the
@@ -191,8 +205,16 @@ signs time.
   `tampered_stamp_breaks_the_attestation` cover this.
 - **Pauses.** An unstamped step (onchain `force`) pauses the clock, and the next
   stamp restarts it without charging anyone. A timed game reaches FORCED only
-  when the referee is down, since a live referee flags a staller inside the
-  dispute window. Forced play therefore runs untimed, on the channel's windows.
+  when the referee is down: a live referee acknowledges the dispute
+  (`acknowledge`), and `resolve` returns the game to offchain play, where its
+  clock keeps running. Forced play therefore runs untimed, on the channel's
+  windows, and the referee returns the game from it on its own once it is back.
+- **Start.** The referee's `Start` sets the clock's stamp and charges no one,
+  paused or not. The keeper sends one when a game opens, so the first move is
+  timed too, and one after play resumes from forced play, whose stale stamp
+  would otherwise charge the forced period. Seats can't send it: replay
+  authenticates referee steps only through the attestation, `force` never
+  takes them, and an untimed game refuses them.
 - **Channel.** Unchanged: a flag is a finished history like any other, and the
   flagged seat cannot outrank it without the referee attesting a competing
   branch.
@@ -239,18 +261,26 @@ This is Surround's state machine, generalized, as pure functions in
 - **Statuses:** WAITING, ACTIVE, DISPUTE, FORCED, SETTLED, CANCELLED. `epoch`
   increments on every commit.
 - **Committing:** a state commits only when proved (adapter) or replayed onchain
-  (`submit_history`), from the stored anchor. With all approvals it commits at
-  once. Without them it becomes a candidate and opens a dispute window.
-  Signatures alone never commit a state, because colluding seats could sign
-  fabricated results.
+  (`submit_history`), from the stored anchor or the current candidate. With all
+  approvals it commits at once. Without them it becomes a candidate and opens a
+  dispute window. Signatures alone never commit a state, because colluding
+  seats could sign fabricated results.
 - **Disputes:**
-  - candidates replay from the frozen anchor and rank by `(support_turn, seq)`;
+  - candidates rank by `(support_turn, seq)`;
+  - a submission may start from the candidate, so a transcript longer than one
+    proof arrives as a chain of segments within one window (the channel keeps
+    the candidate's block; a proof must be based at or after it);
   - a late candidate never extends the deadline;
-  - `resolve` promotes the candidate to SETTLED, or to FORCED with a fresh window.
+  - `resolve` settles a finished candidate. An unfinished one moves to FORCED
+    with a fresh window, unless the game is timed and its referee acknowledged
+    this dispute (`acknowledge`, stored as the dispute's epoch and deadline):
+    then the game returns to ACTIVE.
 - **Forced play:** the due seat submits its steps up to the next change of due
   seat in one transaction (`force`). Surround allows one step per transaction.
-- **Endings:** `claim_timeout` after a missed window, `resume` with every seat's
-  reopen approval, and `resign` at any time.
+- **Endings:** `claim_timeout` after a missed window (`REASON_ABANDON`: the
+  chain judged it, not a referee), `resume` with every seat's reopen approval
+  or, in a timed game, the referee's alone (`resume_by_referee`), and `resign`
+  at any time.
 - **Storage:** anchors and candidates are stored as hashes, with preimages in calldata.
 - **Settlement:** writes the winner, the reason and the game's outputs, and
   emits an event for rewards.
@@ -270,18 +300,33 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 }
 ```
 
-- The game adds `referee_dojo::models::{m_ChannelGame, m_ProverAllowed, e_ChannelUpdated}`
-  to `build-external-contracts`, and `sozo` registers them in the game's namespace.
-- `ChannelGame` stores 2 seats (wallet, session key, randomness tip), the prover,
-  the time control, the serialized game `Config`, the `Channel` fields and the
-  result.
+- The game adds `referee_dojo::models::{m_ChannelTerms, m_ChannelState, m_ProverAllowed,
+  e_ChannelUpdated}` to `build-external-contracts`, and `sozo` registers them
+  in the game's namespace.
+- A channel is stored in two models:
+  - `ChannelTerms`, written at create and join only: 2 seats (wallet, session
+    key, randomness tip), the prover, the time control, the serialized game
+    `Config`, the context and the response window.
+  - `ChannelState`, written on every transition: the anchor's hash, the
+    candidate's (zero while it is the anchor), and two packed words for
+    status, epoch, deadline, blocks, the acknowledgement, both references'
+    small fields and the result.
+
+  Transitions that need no terms beyond the seats or the referee key read
+  only those members. `get_channel` returns both as one `ChannelGame`, and
+  `ChannelUpdated` is the readable view for indexers. Compared with one
+  41-field model, a 9×9 game's create, join, settlement, rating and kifu take
+  about 18% less execution gas in tests (`scarb test -f gas_profile` in
+  Surround), with fewer storage slots and event felts on top.
 - `create` takes an `Option<TimeControl>`, checked by the game's time rules. A
   referee key must be a curve point and neither seat's session key.
   `ChannelGame` keeps the referee key and the serialized settings, whatever the
   rules.
 - Callers are authenticated by wallet for create, join, cancel, dispute, forced
-  play, timeout and resign. `submit_history` and `resolve` are open to anyone, for
-  example a keeper. `accept_verified` accepts only the game's prover.
+  play, timeout and resign. `submit_history`, `resolve`, `acknowledge` and
+  `resume_by_referee` are open to anyone, for example a keeper; the last two
+  carry the referee's signature. `accept_verified` accepts only the game's
+  prover.
 - `allow_prover` lets namespace owners allowlist adapter classes.
 - Rewards read `binding::result(world, game_id)` once a game is SETTLED.
 
@@ -294,7 +339,7 @@ its constructor.
 
 - **`__execute__` (virtual).** A zero-fee INVOKE_V3 that is never broadcast. It:
   - reads the channel's `snapshot`;
-  - checks the start state against the anchor hash;
+  - checks the start state against the anchor or the candidate;
   - replays the signed steps with the game's rules;
   - emits one L2→L1 message: adapter class, `TAG`, `'REFEREE_PROVED_V1'`,
     chain, adapter, channel, game, context, epoch, start hash, end hash.
@@ -304,7 +349,8 @@ its constructor.
   network-verified proof facts:
   - PROOF1 or PROOF2;
   - the virtual SNOS program pinned at deployment;
-  - a base block at or after the anchor and at most 4000 blocks old;
+  - a base block at or after the block that set the start state, and at most
+    4000 blocks old;
   - exactly one message equal to the expected transition.
 
   It then calls the channel's `accept_verified`.
@@ -314,8 +360,8 @@ its constructor.
 - **Calldata convention.** A game's adapter declares
   `__execute__(channel, game_id, epoch, start, witness, batch)`
   (no `witness` argument when the game's witness is `()`) and
-  `settle(channel, game_id, epoch, end, acks)`, which is what the JS proving
-  client builds.
+  `settle(channel, game_id, epoch, start_hash, end, acks)`, which is what the JS
+  proving client builds.
 
 **JS proving client** (`@referee/sdk/proving`), for any game:
 - `proveSession({ rpcUrl | provider, proverUrl, session, epoch, expectedClassHash })`
@@ -386,8 +432,15 @@ latest verified transcript.
 - **Trust.** The keeper's trust model is the prover gateway's. It keeps only
   steps that verify, so it cannot forge one. It can delay or withhold steps,
   but both players keep their own copies. It holds no player keys: its own
-  account sends only `submit_history`, `resolve` and the adapter's `settle`,
-  which anyone may send.
+  account sends only `submit_history`, `resolve`, the adapter's `settle`, and
+  a referee's `acknowledge` and `resume_by_referee`, which anyone may send.
+- **Admission.** Only open games count against `max_open_games`; settled and
+  cancelled ones leave memory and stay on disk. Per-player limits
+  (`max_open_per_player`) apply only to unanchored games, which need nothing
+  but wallet signatures, and those close when finished or idle. An entry's
+  `admit` hook ranks games for the `reserved_games` near capacity, so a game
+  a matchmaker paired can't be crowded out. A game whose `maxSteps(config) +
+  1` exceeds its entry's `max_steps` is refused up front.
 - **Archive.** A game is admitted when its context matches the one the
   channel stores. Where two branches meet, the one that ranks higher as a
   dispute candidate is kept. Two different steps one seat signed at one seq
@@ -397,11 +450,25 @@ latest verified transcript.
   stream (`follow`). The stream pushes each batch as the archive gets it, with
   no gap between polls, and serves spectators too. Clients verify every step
   they apply, and both refuse a branch that diverges from their own.
-- **Watcher.** It answers a dispute whose candidate the archive outranks,
-  replaying from the channel's anchor (`rebase`). It resolves once the window
-  passes, and submits finished games still ACTIVE. Up to `max_history_steps`
-  steps go onchain through `submit_history`; longer transcripts are proved.
-  Forced play and timeouts need a player's wallet, so it leaves them alone.
+- **Watcher.**
+  - For a timed game it referees, it `acknowledge`s a dispute at once, so the
+    dispute returns to offchain play. If the acknowledgement isn't onchain by
+    `deadline − answer_margin_seconds`, it submits the latest attested state
+    instead, so forced play would start there.
+  - It answers other disputes once, near the deadline, from the channel's
+    candidate when its history holds it (`disputeAnswer`), and again only
+    against a newer candidate someone else submitted.
+  - It settles a finished game in segments of at most `proof_max_steps` (with
+    a prover) or `replay_max_steps` steps, each extending the candidate within
+    one dispute window, and resolves once the window passes. An entry's
+    `afterSettle` hook adds calls to that `resolve` (Surround rates the game)
+    when the bundle simulates, and sends them apart otherwise.
+  - It returns a timed game it referees from forced play with
+    `resume_by_referee` once its archive holds the anchor. Forced moves and
+    timeout claims need a player's wallet, so it leaves them alone.
+  - With an entry's `world` and `namespace`, it registers joined games that
+    name its referee key from the channel's `ChannelUpdated` events, so every
+    such game has a referee even if no seat registers it.
 - **Channel reads.** A game system exposes `get_channel(game_id)`, which
   returns the `ChannelGame` model, decoded by the SDK's `getChannel`.
 - **Referee.** With a referee key, the keeper referees the timed games whose
@@ -413,6 +480,10 @@ latest verified transcript.
   - A late step is refused (`'Flag fell'`) and the seat flagged.
   - It never stamps a second step at one seq, so it attests one branch.
   - On restart it resumes each clock at its last stamp.
+  - A new game's clock starts with its first step, or with one `Start` after
+    `start_grace_seconds`. After play resumes from forced play it stamps
+    nothing and flags no one until it restarts the clock, once per epoch, so
+    the forced period is charged to no one.
   - A keeper that is not the game's referee accepts only stamped steps.
   - This role is trusted, unlike the rest of the keeper: a delay costs the
     delayed seat clock time, and seats cannot route around it.

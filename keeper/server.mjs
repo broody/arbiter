@@ -11,8 +11,14 @@
 // so it cannot forge a move, and both players keep their own copies, so it can
 // delay or withhold but not rewrite. It never holds player keys; its own
 // account only pays for calls anyone may send. With a referee key it also
-// referees the timed games that name that key: it stamps their steps and flags
-// a seat whose time runs out, which players trust it to do on time.
+// referees the timed games that name that key: it stamps their steps, starts
+// their clocks and flags a seat whose time runs out, which players trust it to
+// do on time. It registers such games itself when they join onchain.
+//
+// A game module may export, next to its codec, `admit(ids, terms)`, which
+// ranks a new game for the keeper's reserved capacity, and
+// `afterSettle(ids, channel)`, which returns calls to send with the resolve
+// that settles a game. Each also gets `{ provider }`.
 //
 //   node keeper/server.mjs CONFIG_JSON      (see config.example.json)
 //
@@ -38,11 +44,23 @@ import { WAITING, startWatcher } from './watch.mjs';
 
 const DEFAULTS = {
   host: '127.0.0.1', port: 3200, store: 'keeper-data', poll_seconds: 15, settle: true,
-  max_games: 10000, max_steps: 4096, max_body_bytes: 1 << 20, rate_per_minute: 120,
-  max_wait_seconds: 30, max_waiters: 1000, cors_origin: '*', max_history_steps: 64, heartbeat_seconds: 15,
+  max_open_games: 10000, reserved_games: 0, max_open_per_player: 4, unanchored_ttl_seconds: 86400,
+  max_steps: 4096, max_body_bytes: 1 << 20, rate_per_minute: 120, max_wait_seconds: 30, max_waiters: 1000,
+  cors_origin: '*', replay_max_steps: 64, start_grace_seconds: 120, answer_margin_seconds: 600, heartbeat_seconds: 15,
 };
 
 const chainTag = id => (/^0x/i.test(id) ? BigInt(id) : tag(id));
+
+// A game entry's settings, from the config's where it sets none.
+// `max_history_steps` is the old name of `replay_max_steps`.
+const settings = (g, config) => ({
+  max_steps: g.max_steps ?? config.max_steps ?? DEFAULTS.max_steps,
+  replay_max_steps: g.replay_max_steps ?? g.max_history_steps ?? config.replay_max_steps ?? config.max_history_steps
+    ?? DEFAULTS.replay_max_steps,
+  proof_max_steps: g.proof_max_steps ?? config.proof_max_steps ?? null,
+  start_grace_seconds: g.start_grace_seconds ?? config.start_grace_seconds ?? DEFAULTS.start_grace_seconds,
+  answer_margin_seconds: g.answer_margin_seconds ?? config.answer_margin_seconds ?? DEFAULTS.answer_margin_seconds,
+});
 
 /**
  * Resolve a keeper config (a parsed config.example.json). Game codecs are
@@ -50,6 +68,9 @@ const chainTag = id => (/^0x/i.test(id) ? BigInt(id) : tag(id));
  */
 export async function loadConfig(raw, { base = process.cwd(), env = process.env } = {}) {
   const config = { ...DEFAULTS, ...raw };
+  // Old names: `max_games`, `max_history_steps`.
+  config.max_open_games = raw.max_open_games ?? raw.max_games ?? DEFAULTS.max_open_games;
+  config.replay_max_steps = raw.replay_max_steps ?? raw.max_history_steps ?? DEFAULTS.replay_max_steps;
   if (!config.chain_id) throw Error('Config needs chain_id');
   if (!Array.isArray(config.games) || config.games.length === 0) throw Error('Config needs at least one entry in games');
   config.chain = chainTag(config.chain_id);
@@ -57,13 +78,17 @@ export async function loadConfig(raw, { base = process.cwd(), env = process.env 
   for (const g of config.games) {
     if (!g.channel || !g.module || !g.export) throw Error('Each game needs channel, module and export');
     const url = g.module.startsWith('.') ? pathToFileURL(resolve(base, g.module)).href : g.module;
-    const game = (await import(url))[g.export];
+    const module = await import(url), game = module[g.export];
     if (!game?.tag) throw Error(`${g.module} exports no game codec named ${g.export}`);
+    if (typeof game.maxSteps !== 'function') throw Error(`${g.export} has no maxSteps: it predates protocol v4`);
     const channel = felt(g.channel), anchored = g.anchored ?? true;
     if (!anchored && g.prover) throw Error('An unanchored game has no channel to settle on: remove its prover');
+    if (g.world && !g.namespace) throw Error('A game entry with a world needs its namespace');
+    const hook = name => (typeof module[name] === 'function' ? module[name] : null);
     config.entries.set(channel, {
-      channel, game, anchored, entrypoints: { ...ENTRYPOINTS, ...g.entrypoints },
-      max_history_steps: g.max_history_steps ?? config.max_history_steps,
+      channel, game, anchored, entrypoints: { ...ENTRYPOINTS, ...g.entrypoints }, ...settings(g, config),
+      world: anchored && g.world ? felt(g.world) : null, namespace: g.namespace ?? null, from_block: g.from_block ?? null,
+      admit: hook('admit'), afterSettle: hook('afterSettle'),
       prover: g.prover ? { url: g.prover.url, class_hash: BigInt(g.prover.class_hash) } : null,
     });
   }
@@ -107,10 +132,21 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
   backend ??= await fileBackend(config.store);
   chain ??= config.rpc_url ? starknetChain({ rpcUrl: config.rpc_url, account: config.account }) : null;
   if (chain?.chainId && (await chain.chainId()) !== config.chain) throw Error(`RPC node is not on ${config.chain_id}`);
-  const entries = config.entries;
+  // The game modules' hooks get the RPC provider too.
+  const context = { provider: chain?.provider };
+  const entries = new Map([...config.entries].map(([channel, e]) => [channel, {
+    anchored: true, ...e, ...settings(e, config),
+    admit: e.admit ? (ids, terms) => e.admit(ids, terms, context) : null,
+    afterSettle: e.afterSettle ? (ids, channel) => e.afterSettle(ids, channel, context) : null,
+  }]));
   const archive = await Archive.open(backend, {
-    games: [...entries].map(([channel, entry]) => [channel, entry.game]), chainId: config.chain,
-    maxSteps: config.max_steps, maxGames: config.max_games, referee: config.referee ?? null, now, log,
+    games: [...entries].map(([channel, e]) => [channel, { game: e.game, anchored: e.anchored, maxSteps: e.max_steps,
+      startGraceMs: e.start_grace_seconds * 1000, admit: e.admit }]),
+    chainId: config.chain, maxSteps: config.max_steps ?? DEFAULTS.max_steps,
+    maxOpenGames: config.max_open_games ?? config.max_games ?? DEFAULTS.max_open_games,
+    reservedGames: config.reserved_games ?? 0, maxOpenPerPlayer: config.max_open_per_player ?? DEFAULTS.max_open_per_player,
+    unanchoredTtlMs: (config.unanchored_ttl_seconds ?? DEFAULTS.unanchored_ttl_seconds) * 1000,
+    referee: config.referee ?? null, now, log,
     verify: chain && (async (session, authorizations) => {
       const entry = entries.get(felt(session.terms.channel));
       if (!entry.anchored) return verifyAuthorizations(chain, entry.game, session.terms, authorizations);
@@ -125,6 +161,11 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
   const watcher = chain && config.poll_seconds > 0
     ? startWatcher({ archive, chain, entries, intervalMs: config.poll_seconds * 1000, settle: config.settle, log })
     : null;
+  // Idle unanchored games close after their time to live.
+  const sweeping = [...entries.values()].some(e => !e.anchored)
+    ? setInterval(() => archive.sweep().catch(e => log({ event: 'sweep', outcome: 'failed', error: e.message })), 60_000)
+    : null;
+  sweeping?.unref?.();
 
   let waiters = 0;
   const buckets = new Map();
@@ -141,8 +182,11 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
     chain_id: config.chain_id, watching: watcher !== null, sending: Boolean(chain?.canSend),
     referee: archive.referee === null ? null : hex(archive.referee),
     games: [...entries.values()].map(e => ({ channel: hex(e.channel), tag: e.game.tag, anchored: e.anchored, prover: Boolean(e.prover) })),
-    limits: { max_games: config.max_games, max_steps: config.max_steps, max_body_bytes: config.max_body_bytes,
+    limits: { max_open_games: archive.maxOpenGames, reserved_games: archive.reservedGames,
+      max_open_per_player: archive.maxOpenPerPlayer, max_steps: config.max_steps, max_body_bytes: config.max_body_bytes,
       rate_per_minute: config.rate_per_minute, max_wait_seconds: config.max_wait_seconds, max_waiters: config.max_waiters },
+    // What a matchmaker checks before it pairs a game here.
+    capacity: archive.capacity(),
   });
   const idsOf = (channel, game) => {
     try { return archive.ids(channel, game); } catch { fail(400, 'Invalid game id'); }
@@ -257,6 +301,7 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
     url: `http://${address.includes(':') ? `[${address}]` : address}:${port}`, archive, watcher, info,
     close: async () => {
       await watcher?.stop();
+      clearInterval(sweeping);
       archive.stop();
       server.closeAllConnections();
       await new Promise(done => server.close(done));

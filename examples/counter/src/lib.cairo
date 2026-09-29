@@ -7,6 +7,8 @@ pub const ADD: u8 = 0;
 pub const GAMBLE: u8 = 1;
 /// Finish reason: the counter reached the target.
 pub const REACHED: u8 = 1;
+/// Finish reason: the transcript reached `max_steps`, a draw.
+pub const LIMIT: u8 = 2;
 
 #[derive(Copy, Drop, Serde, PartialEq, Debug)]
 pub struct Config {
@@ -78,6 +80,17 @@ pub impl CounterRules of GameRules {
         } else {
             Option::None
         }
+    }
+
+    /// Every action raises the counter, so a game takes at most `target`
+    /// actions; a gamble adds a reveal and allows each seat one recommit.
+    fn max_steps(config: @Config) -> u32 {
+        let target: u32 = (*config.target).into();
+        4 * target + 16
+    }
+
+    fn adjudicate(config: @Config, state: @Counter) -> (u8, u8) {
+        (referee::DRAW, LIMIT)
     }
 }
 

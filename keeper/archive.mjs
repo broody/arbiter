@@ -6,73 +6,109 @@
 // equivocation evidence.
 //
 // With a referee key, it is also the referee of every timed game whose terms
-// name that key: it stamps each step as it arrives and flags a seat whose time
-// runs out. It never stamps a step at a seq it has already stamped, so it
-// attests one branch only.
-import { Referee, Session, actionHash, felt, hex, publicKey, signedStep, stateHash, verify } from '../sdk/src/index.mjs';
+// name that key: it stamps each step as it arrives, starts a clock nobody
+// started, and flags a seat whose time runs out. It never stamps a step at a
+// seq it has already stamped, so it attests one branch only.
+//
+// Only open games live in memory. A settled, cancelled or evicted game stays on
+// disk, readable, and no longer counts against capacity.
+import { Referee, Session, actionHash, felt, hex, outranks, publicKey, signedStep, stateHash, verify } from '../sdk/src/index.mjs';
 import { SessionStore } from '../sdk/src/store.mjs';
+
+export { outranks };
 
 export class KeeperError extends Error {
   constructor(status, message, data) { super(message); this.status = status; this.data = data; }
 }
 export const fail = (status, message, data) => { throw new KeeperError(status, message, data); };
 
-/** Whether envelope `a` beats `b` as a dispute candidate (`channel::receive`). */
-export const outranks = (a, b) =>
-  a.support_turn > b.support_turn || (a.support_turn === b.support_turn && a.seq > b.seq);
-
 export const gameKey = ids => `${hex(ids.channel)}/${hex(ids.game_id)}`;
 const EVIDENCE = 'keeper/evidence/', CLOSED = 'keeper/closed/', AUTHORIZED = 'keeper/authorized/';
+const ADMITTED = 'keeper/admitted/', CLOCK = 'keeper/clock/';
 const summary = session => ({ start: session.start.seq, seq: session.env.seq, transcript: session.env.transcript });
 const position = session => ({ seq: session.start.seq, transcript: session.start.transcript });
 
 /**
- * `games` maps channel addresses to game codecs. `verify(session)` checks a new
- * game's terms against its channel; `anchorHash(ids)` reads the channel's
- * anchor. Both throw a KeeperError to refuse. `referee` (`{ privateKey }`)
- * makes the archive the referee of the timed games that name its key; `now()`
- * is its wall clock in milliseconds.
+ * `games` maps channel addresses to game codecs, or to entries `{ game,
+ * anchored, maxSteps, startGraceMs, admit }`:
+ * - `anchored: false` for games no channel holds;
+ * - `maxSteps` caps a transcript (default: the archive's `maxSteps`), and
+ *   refuses a game whose codec's `maxSteps(config) + 1` exceeds it;
+ * - `startGraceMs` is how long the referee waits before it starts a clock;
+ * - `admit(ids, terms)` returns a priority: above 0, a game may use the
+ *   `reservedGames` of capacity.
+ *
+ * `verify(session, authorizations)` checks a new game's terms against its
+ * channel; `anchorHash(ids)` reads the channel's anchor. Both throw a
+ * KeeperError to refuse. `referee` (`{ privateKey }`) makes the archive the
+ * referee of the timed games that name its key; `now()` is its wall clock in
+ * milliseconds. At most `maxOpenGames` games are open at once, and each wallet
+ * plays at most `maxOpenPerPlayer` unanchored ones, which close once finished
+ * or after `unanchoredTtlMs` without a step.
  */
 export class Archive {
   #loaded = new Map(); // key -> Session
   #locks = new Map(); // key -> promise tail
   #listeners = new Map(); // key -> Set of wake functions
   #referees = new Map(); // key -> Referee, for the timed games this archive referees
-  #timers = new Map(); // key -> timeout that flags the due seat
+  #timers = new Map(); // key -> timeout that flags the due seat, or starts the clock
+  #clocks = new Map(); // key -> { epoch, phase }: in forced play onchain, resumed from it, or started since
+  #graces = new Map(); // key -> wall time at which the referee starts the clock itself
+  #casual = new Map(); // key -> { players, touched }, for unanchored games
+  #players = new Map(); // wallet -> open unanchored games it plays
 
-  constructor(backend, { games, chainId, verify: verifyTerms, anchorHash, maxSteps = 4096, maxGames = 10000, referee = null,
-    now = Date.now, log = () => {} }) {
+  constructor(backend, { games, chainId, verify: verifyTerms, anchorHash, maxSteps = 4096, maxGames = 10000,
+    maxOpenGames = maxGames, reservedGames = 0, maxOpenPerPlayer = 4, unanchoredTtlMs = 86_400_000, startGraceMs = 120_000,
+    referee = null, now = Date.now, log = () => {} }) {
     this.backend = backend;
     this.store = new SessionStore(backend);
-    this.games = new Map([...games].map(([channel, game]) => [felt(channel), game]));
+    this.games = new Map([...games].map(([channel, value]) => {
+      const entry = value.tag ? { game: value } : value;
+      return [felt(channel), { game: entry.game, anchored: entry.anchored ?? true, maxSteps: entry.maxSteps ?? maxSteps,
+        startGraceMs: entry.startGraceMs ?? startGraceMs, admit: entry.admit ?? null }];
+    }));
     this.chainId = felt(chainId);
-    Object.assign(this, { verifyTerms, anchorHash, maxSteps, maxGames, now, log });
+    Object.assign(this, { verifyTerms, anchorHash, maxOpenGames, reservedGames, maxOpenPerPlayer, unanchoredTtlMs, now, log });
     this.refereeKey = referee ? felt(referee.privateKey) : null;
     this.referee = referee ? publicKey(referee.privateKey) : null;
-    this.known = new Map(); // key -> ids
-    this.closed = new Set();
+    this.known = new Map(); // key -> ids, for open games
   }
 
   static async open(backend, options) {
     const archive = new Archive(backend, options);
+    const closed = new Set((await backend.keys(CLOSED)).map(key => key.slice(CLOSED.length)));
     for (const ids of await archive.store.list()) {
-      if (ids.chain_id === archive.chainId && archive.games.has(ids.channel)) archive.known.set(gameKey(ids), ids);
+      const key = gameKey(ids);
+      if (ids.chain_id === archive.chainId && archive.games.has(ids.channel) && !closed.has(key)) archive.known.set(key, ids);
     }
-    for (const key of await backend.keys(CLOSED)) archive.closed.add(key.slice(CLOSED.length));
+    // Open unanchored games count against their wallets' caps.
+    for (const [key, ids] of archive.known) {
+      if (archive.#entry(ids.channel).anchored) continue;
+      const players = (await backend.get(`${ADMITTED}${key}`))?.players
+        ?? (await archive.store.load(archive.gameFor(ids.channel), ids))?.terms.players ?? [];
+      archive.#track(key, players.map(felt));
+    }
     // A referee resumes the clocks of the games it referees.
     if (archive.referee !== null) for (const ids of archive.open()) await archive.session(ids);
     return archive;
   }
 
   ids(channel, gameId) { return { chain_id: this.chainId, channel: felt(channel), game_id: felt(gameId) }; }
-  gameFor(channel) { return this.games.get(felt(channel)) ?? fail(404, `Channel ${hex(channel)} is not kept here`); }
-  /** Archived games the watcher still follows. */
-  open() { return [...this.known].filter(([key]) => !this.closed.has(key)).map(([, ids]) => ids); }
+  gameFor(channel) { return this.#entry(channel).game; }
+  /** Open games: the ones the watcher follows. */
+  open() { return [...this.known.values()]; }
 
-  /** The archived session, or null. Treat it as read-only. */
+  /** Open games and free slots; `free_unreserved` is what a game without priority can use. */
+  capacity() {
+    const open = this.known.size, free = Math.max(0, this.maxOpenGames - open);
+    return { open, max_open_games: this.maxOpenGames, reserved_games: this.reservedGames, free,
+      free_unreserved: Math.max(0, free - this.reservedGames) };
+  }
+
+  /** The archived session, or null; a closed game is read from disk. Treat it as read-only. */
   async session(ids) {
     const key = gameKey(ids);
-    return this.#loaded.get(key) ?? this.#exclusive(key, () => this.#load(ids));
+    return this.#loaded.get(key) ?? await this.#exclusive(key, () => this.#load(ids)) ?? await this.#closed(ids);
   }
 
   /** Signed step records from `from` on, with the transcript's bounds. */
@@ -92,24 +128,17 @@ export class Archive {
   async register(record, authorizations) {
     if (!record?.terms || !Array.isArray(record.steps)) fail(400, 'Expected { record: session.export() }');
     try { ['chain_id', 'channel', 'game_id'].forEach(k => felt(record.terms[k])); } catch { fail(400, 'Invalid terms'); }
-    const game = this.gameFor(record.terms.channel);
+    const entry = this.#entry(record.terms.channel);
     if (felt(record.terms.chain_id) !== this.chainId) fail(400, `Terms are for chain ${hex(record.terms.chain_id)}`);
-    if (record.steps.length > this.maxSteps) fail(413, `Transcripts are limited to ${this.maxSteps} steps`);
+    if (record.steps.length > entry.maxSteps) fail(413, `Transcripts are limited to ${entry.maxSteps} steps`);
     let incoming;
-    try { incoming = Session.import(game, record); } catch (e) { fail(400, e.message); }
+    try { incoming = Session.import(entry.game, record); } catch (e) { fail(400, e.message); }
     const ids = this.ids(record.terms.channel, record.terms.game_id), key = gameKey(ids);
     return this.#exclusive(key, async () => {
       const current = await this.#load(ids);
       if (!current) {
-        if (this.known.size >= this.maxGames) fail(503, 'The keeper is full');
-        await this.verifyTerms?.(incoming, authorizations);
-        if (authorizations) await this.backend.put(`${AUTHORIZED}${key}`, authorizations);
-        await this.store.save(incoming);
-        this.known.set(key, ids);
-        this.#adopt(key, incoming);
-        this.#wake(key);
-        this.log({ game: key, event: 'registered', seq: incoming.env.seq });
-        return { ...summary(incoming), created: true };
+        if (await this.#isClosed(key)) fail(409, 'The game is closed here');
+        return this.#admit(key, ids, entry, incoming, authorizations);
       }
       if (incoming.context !== current.context) fail(409, 'The game is archived with other terms');
       // Merge where one transcript's start lies in the other's history.
@@ -119,7 +148,7 @@ export class Archive {
         return this.#merge(key, current, current.start.seq, incoming.steps.slice(current.start.seq - incoming.start.seq).map(signedStep));
       // Disjoint histories: only the channel's current anchor replaces the archive.
       const anchor = this.anchorHash ? await this.anchorHash(ids) : null;
-      if (anchor == null || felt(anchor) !== stateHash(game, incoming.start))
+      if (anchor == null || felt(anchor) !== stateHash(entry.game, incoming.start))
         fail(409, 'The session neither overlaps the archived transcript nor starts at the channel anchor');
       await this.store.save(incoming, { replace: true });
       this.#adopt(key, incoming);
@@ -138,7 +167,8 @@ export class Archive {
     if (!Number.isSafeInteger(from) || !Array.isArray(records)) fail(400, 'Expected { from, steps }');
     const key = gameKey(ids);
     return this.#exclusive(key, async () => {
-      const current = await this.#load(ids) ?? fail(404, 'Unknown game');
+      const current = await this.#load(ids)
+        ?? (await this.#isClosed(key) ? fail(409, 'The game is closed here') : fail(404, 'Unknown game'));
       return this.#merge(key, current, from, records);
     });
   }
@@ -150,19 +180,75 @@ export class Archive {
     return entries.sort((a, b) => a.seq - b.seq);
   }
 
-  /** Stop watching a game the channel settled or cancelled. */
-  async close(ids, status) {
+  /** Close a game the channel settled or cancelled: it leaves memory and stays on disk. */
+  close(ids, status) {
     const key = gameKey(ids);
-    this.closed.add(key);
-    this.#disarm(key);
-    this.#referees.delete(key);
-    await this.backend.put(`${CLOSED}${key}`, { status });
+    return this.#exclusive(key, () => this.#close(key, status));
   }
 
   /** Whether this archive referees the game `ids` (once loaded). */
   referees(ids) { return this.#referees.has(gameKey(ids)); }
 
-  /** Cancel every flag timer. */
+  /** The referee's `acknowledge` signature for a game's dispute at `epoch` ending at `deadline`, or null. */
+  acknowledgement(ids, epoch, deadline) { return this.#referees.get(gameKey(ids))?.acknowledgement(epoch, deadline) ?? null; }
+
+  /** The referee's signature returning a game from forced play at `epoch`, from the anchor `anchorHash`, or null. */
+  resumeSignature(ids, epoch, anchorHash) {
+    return this.#referees.get(gameKey(ids))?.resumeSignature(epoch, anchorHash) ?? null;
+  }
+
+  /**
+   * The channel of a game this archive referees is in forced play at `epoch`.
+   * No clock runs offchain meanwhile: the referee neither flags nor stamps
+   * until the channel resumes. Returns whether this changed anything.
+   */
+  forced(ids, epoch) {
+    const key = gameKey(ids);
+    return this.#exclusive(key, async () => {
+      await this.#load(ids);
+      const clock = this.#clocks.get(key);
+      // A stale read of the channel can't undo a resume.
+      if (!this.#referees.has(key) || (clock && clock.epoch >= epoch)) return false;
+      await this.#setClock(key, { epoch, phase: 'forced' });
+      this.#graces.delete(key);
+      this.#arm(key);
+      this.log({ game: key, event: 'forced', epoch });
+      return true;
+    });
+  }
+
+  /**
+   * The channel returned from forced play at `epoch`. The last stamp is stale
+   * and would charge the forced period to the due seat, and flags wait until
+   * the clock restarts: with one `start` after the start grace, or from the
+   * last stamp when the due seat's step comes first. Once per epoch. Returns
+   * whether this changed anything.
+   */
+  resumed(ids, epoch) {
+    const key = gameKey(ids);
+    return this.#exclusive(key, async () => {
+      await this.#load(ids);
+      const clock = this.#clocks.get(key);
+      if (!this.#referees.has(key) || clock?.phase !== 'forced' || epoch <= clock.epoch) return false;
+      await this.#setClock(key, { epoch, phase: 'resumed' });
+      this.#graces.delete(key);
+      this.#arm(key);
+      this.log({ game: key, event: 'resumed', epoch });
+      return true;
+    });
+  }
+
+  /** Close the unanchored games without a step for longer than `unanchoredTtlMs`. Returns how many. */
+  async sweep() {
+    const cutoff = this.now() - this.unanchoredTtlMs;
+    const idle = [...this.#casual].filter(([, casual]) => casual.touched < cutoff).map(([key]) => key);
+    for (const key of idle) this.#forget(key);
+    await Promise.all(idle.map(key => this.backend.put(`${CLOSED}${key}`, { status: 'idle' })));
+    for (const key of idle) this.log({ game: key, event: 'evicted', reason: 'idle' });
+    return idle.length;
+  }
+
+  /** Cancel every timer. */
   stop() { for (const key of [...this.#timers.keys()]) this.#disarm(key); }
 
   /**
@@ -200,13 +286,106 @@ export class Archive {
     };
   }
 
+  #entry(channel) { return this.games.get(felt(channel)) ?? fail(404, `Channel ${hex(channel)} is not kept here`); }
+
   async #load(ids) {
     const key = gameKey(ids);
     if (this.#loaded.has(key)) return this.#loaded.get(key);
     if (!this.known.has(key)) return null;
     const session = await this.store.load(this.gameFor(ids.channel), ids);
+    const clock = await this.backend.get(`${CLOCK}${key}`);
+    if (clock) this.#clocks.set(key, clock);
     this.#adopt(key, session);
     return session;
+  }
+
+  async #isClosed(key) { return (await this.backend.get(`${CLOSED}${key}`)) !== undefined; }
+
+  // A closed game, read from disk without keeping it in memory.
+  async #closed(ids) {
+    if (!this.games.has(ids.channel) || !(await this.#isClosed(gameKey(ids)))) return null;
+    return this.store.load(this.gameFor(ids.channel), ids);
+  }
+
+  // Admit a new game: within its entry's step cap, its wallets' caps if it is
+  // unanchored, and the keeper's capacity, whose reserved slots only go to
+  // games that `admit` ranks above 0.
+  async #admit(key, ids, entry, session, authorizations) {
+    const { terms } = session;
+    const needs = entry.game.maxSteps(terms.config) + 1;
+    if (needs > entry.maxSteps)
+      fail(409, `The game can run to ${needs} steps; this keeper keeps at most ${entry.maxSteps} per game on channel ${hex(ids.channel)}`);
+    const players = entry.anchored ? [] : terms.players.map(felt);
+    const busy = () => players.find(player => (this.#players.get(player) ?? 0) >= this.maxOpenPerPlayer);
+    if (busy() !== undefined) await this.sweep();
+    const player = busy();
+    if (player !== undefined) fail(429, `Wallet ${hex(player)} already plays ${this.maxOpenPerPlayer} open unanchored games here`);
+    const room = priority => {
+      const free = this.maxOpenGames - this.known.size;
+      return free > 0 && (free > this.reservedGames || priority > 0);
+    };
+    if (!room(0)) await this.sweep();
+    if (this.known.size >= this.maxOpenGames) fail(503, 'The keeper is full');
+    await this.verifyTerms?.(session, authorizations);
+    const priority = room(0) ? 0 : Number(await entry.admit?.(ids, terms)) || 0;
+    if (!room(priority)) fail(503, this.known.size < this.maxOpenGames
+      ? 'The keeper is full: its reserved capacity is for priority games' : 'The keeper is full');
+    // Take the slot before writing, so concurrent registrations can't overfill.
+    this.known.set(key, ids);
+    if (!entry.anchored) this.#track(key, players);
+    try {
+      if (authorizations) await this.backend.put(`${AUTHORIZED}${key}`, authorizations);
+      if (!entry.anchored) await this.backend.put(`${ADMITTED}${key}`, { players });
+      await this.store.save(session);
+    } catch (e) {
+      this.#forget(key);
+      throw e;
+    }
+    this.#adopt(key, session);
+    this.#wake(key);
+    this.log({ game: key, event: 'registered', seq: session.env.seq, ...(priority > 0 ? { priority } : {}) });
+    await this.#settled(key, session);
+    return { ...summary(session), created: true };
+  }
+
+  #track(key, players) {
+    this.#casual.set(key, { players, touched: this.now() });
+    for (const player of new Set(players)) this.#players.set(player, (this.#players.get(player) ?? 0) + 1);
+  }
+
+  // Drop an open game from memory.
+  #forget(key) {
+    this.#disarm(key);
+    for (const map of [this.#referees, this.#loaded, this.#clocks, this.#graces, this.known]) map.delete(key);
+    const casual = this.#casual.get(key);
+    if (!casual) return;
+    this.#casual.delete(key);
+    for (const player of new Set(casual.players)) {
+      const left = this.#players.get(player) - 1;
+      if (left > 0) this.#players.set(player, left);
+      else this.#players.delete(player);
+    }
+  }
+
+  async #close(key, status) {
+    await this.backend.put(`${CLOSED}${key}`, { status });
+    this.#forget(key);
+  }
+
+  // Note a step in an unanchored game, which closes once finished: no channel
+  // will settle it.
+  async #settled(key, session) {
+    const casual = this.#casual.get(key);
+    if (!casual) return;
+    casual.touched = this.now();
+    if (!session.env.outcome.finished) return;
+    await this.#close(key, 'finished');
+    this.log({ game: key, event: 'evicted', reason: 'finished' });
+  }
+
+  async #setClock(key, clock) {
+    await this.backend.put(`${CLOCK}${key}`, clock);
+    this.#clocks.set(key, clock);
   }
 
   // Keep `session` as the game's transcript and, for a timed game that names
@@ -215,18 +394,45 @@ export class Archive {
   #adopt(key, session) {
     this.#loaded.set(key, session);
     this.#referees.delete(key);
-    if (this.referee !== null && session.timed && felt(session.terms.clock.referee) === this.referee && !this.closed.has(key))
+    if (this.referee !== null && session.timed && felt(session.terms.clock.referee) === this.referee && this.known.has(key))
       this.#referees.set(key, new Referee(session, this.refereeKey, { now: this.now() }));
     this.#arm(key);
   }
 
-  // Flag the due seat when its time runs out.
+  // A transcript at its entry's cap takes no more steps, a flag included.
+  #full(session) { return session.steps.length >= this.#entry(session.terms.channel).maxSteps; }
+
+  // Set the game's one timer:
+  // - none once the game is over, or while it is in forced play onchain;
+  // - the start of a clock nobody started (a new game), or of one resumed from
+  //   forced play, after the start grace; flags wait for it;
+  // - otherwise the due seat's flag, when its time runs out.
+  // A game whose transcript is at its cap is no longer refereed.
   #arm(key) {
     this.#disarm(key);
-    const deadline = this.#referees.get(key)?.deadline() ?? null;
-    if (deadline === null) return;
-    const timer = setTimeout(() => this.#exclusive(key, () => this.#flag(key)).catch(e =>
-      this.log({ game: key, event: 'flag', outcome: 'failed', error: e.message })), Math.max(0, deadline - this.now()));
+    const referee = this.#referees.get(key);
+    if (!referee || referee.session.env.outcome.finished) return;
+    const session = referee.session, phase = this.#clocks.get(key)?.phase;
+    if (this.#full(session)) {
+      this.#referees.delete(key);
+      this.log({ game: key, event: 'unrefereed', reason: 'the transcript is at its step cap' });
+      return;
+    }
+    if (phase === 'forced') return;
+    if (phase === 'resumed' || session.env.clock.stamp === 0) {
+      const at = this.#graces.get(key) ?? this.now() + this.#entry(session.terms.channel).startGraceMs;
+      this.#graces.set(key, at);
+      this.#schedule(key, at, () => this.#start(key));
+      return;
+    }
+    this.#graces.delete(key);
+    const deadline = referee.deadline();
+    if (deadline !== null) this.#schedule(key, deadline, () => this.#flag(key));
+  }
+
+  #schedule(key, at, task) {
+    const timer = setTimeout(() => this.#exclusive(key, task).catch(e =>
+      this.log({ game: key, event: 'timer', outcome: 'failed', error: e.message })), Math.max(0, at - this.now()));
     timer.unref?.();
     this.#timers.set(key, timer);
   }
@@ -238,12 +444,30 @@ export class Archive {
 
   async #flag(key) {
     const referee = this.#referees.get(key);
-    const record = referee?.flag(this.now());
+    const record = referee && !this.#full(referee.session) ? referee.flag(this.now()) : null;
     if (record) {
       await this.store.save(referee.session);
       this.#wake(key);
       this.log({ game: key, event: 'flagged', seq: record.seq });
+      await this.#settled(key, referee.session);
     }
+    this.#arm(key);
+  }
+
+  // Start a clock nobody started, or one resumed from forced play.
+  async #start(key) {
+    const referee = this.#referees.get(key);
+    if (!referee) return;
+    const session = referee.session, clock = this.#clocks.get(key), resumed = clock?.phase === 'resumed';
+    if ((resumed || session.env.clock.stamp === 0) && !this.#full(session)) {
+      if (resumed) await this.#setClock(key, { epoch: clock.epoch, phase: 'started' });
+      const record = referee.start(this.now());
+      await this.store.save(session);
+      this.#wake(key);
+      this.log({ game: key, event: 'started', seq: record.seq, ...(resumed ? { epoch: clock.epoch } : {}) });
+      await this.#settled(key, session);
+    }
+    this.#graces.delete(key);
     this.#arm(key);
   }
 
@@ -261,15 +485,29 @@ export class Archive {
       if (!same(records[i], from + i)) return this.#fork(key, current, from + i, records.slice(i));
     }
     // As the referee, stamp each step as it arrives, and flag a seat whose
-    // time ran out before its step did.
-    const referee = this.#referees.get(key);
+    // time ran out before its step did. Nothing is stamped during forced play.
+    let referee = this.#referees.get(key);
+    const clock = this.#clocks.get(key);
+    if (referee && clock?.phase === 'forced' && i < records.length)
+      fail(409, 'The game is in forced play onchain: steps wait until the channel resumes', summary(current));
+    const limit = this.#entry(current.terms.channel).maxSteps;
     let accepted = 0, error = null, at = current.env.seq, flagged = false;
     for (const record of records.slice(i)) {
       at = current.env.seq;
-      if (current.steps.length >= this.maxSteps) { error = `Transcripts are limited to ${this.maxSteps} steps`; break; }
+      if (current.steps.length >= limit) { error = `Transcripts are limited to ${limit} steps`; break; }
       try {
         if (referee && record.stamp == null) {
           const now = this.now();
+          // The first step after forced play, before the start: the seat
+          // signed it after the last stamp, so a `start` can't go before it.
+          // The clock restarts from that stamp instead, charging the forced
+          // period to no one, as it does after the keeper's own downtime.
+          if (this.#clocks.get(key)?.phase === 'resumed') {
+            await this.#setClock(key, { epoch: clock.epoch, phase: 'started' });
+            referee = new Referee(current, this.refereeKey, { now });
+            this.#referees.set(key, referee);
+            this.log({ game: key, event: 'restarted', seq: at, epoch: clock.epoch });
+          }
           if ((flagged = referee.flag(now) !== null)) { error = 'Flag fell: the seat\'s time ran out first'; break; }
           referee.stamp(record, now);
         } else current.receive(record);
@@ -279,8 +517,9 @@ export class Archive {
     if (accepted || flagged) {
       await this.store.save(current);
       this.#wake(key);
-      this.#arm(key);
+      await this.#settled(key, current);
     }
+    this.#arm(key);
     if (error) fail(400, `Step ${at} rejected: ${error}`, { ...summary(current), accepted });
     return { ...summary(current), accepted };
   }
@@ -304,6 +543,7 @@ export class Archive {
     this.#adopt(key, branch);
     this.#wake(key);
     this.log({ game: key, event: 'switched', at, seq: branch.env.seq, equivocation: equivocated });
+    await this.#settled(key, branch);
     return { ...summary(branch), accepted: branch.env.seq - at, switched: at };
   }
 

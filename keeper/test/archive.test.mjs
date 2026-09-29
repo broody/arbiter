@@ -9,7 +9,7 @@ import { stateHash } from '../../sdk/src/index.mjs';
 import { memoryBackend } from '../../sdk/src/store.mjs';
 import { fileBackend } from '../../sdk/src/store-file.mjs';
 import { Archive, KeeperError } from '../archive.mjs';
-import { CHAIN, CHANNEL, Session, copy, counter, keys, played, prefix, resign, signed, terms } from './fixtures.mjs';
+import { CHAIN, CHANNEL, Session, add, copy, counter, keys, played, prefix, resign, signed, terms } from './fixtures.mjs';
 
 const open = (backend = memoryBackend(), options = {}) =>
   Archive.open(backend, { games: [[CHANNEL, counter]], chainId: CHAIN, ...options });
@@ -110,14 +110,91 @@ test('waiters wake on new steps, or time out', async () => {
   await cancelled.promise;
 });
 
-test('limits on games and steps', async () => {
-  const archive = await open(memoryBackend(), { maxGames: 1, maxSteps: 3 });
+test('a game must fit its entry\'s step cap, which bounds its transcript', async () => {
+  // The counter to 20 can run to maxSteps + 1 = 97 steps.
+  const tight = await open(memoryBackend(), { games: [[CHANNEL, { game: counter, maxSteps: 96 }]] });
+  await rejects(tight.register(played([3]).export()), 409, /can run to 97 steps; this keeper keeps at most 96/);
+  const archive = await open(memoryBackend(), { games: [[CHANNEL, { game: counter, maxSteps: 97 }]] });
+  assert.equal((await archive.register(played([3]).export())).created, true);
+
+  // A cap lowered after a game was admitted refuses its later steps.
+  const backend = memoryBackend();
+  await (await open(backend)).register(played([3, 2]).export());
+  const lowered = await open(backend, { games: [[CHANNEL, { game: counter, maxSteps: 3 }]] });
+  const session = played([3, 2, 1, 3]);
+  await assert.rejects(lowered.append(ids(), 2, signed(session, 2)), e => e.status === 400 && e.data.accepted === 1);
+  await rejects(lowered.register(played([1, 1, 1, 1], new Session(counter, terms(8n))).export()), 413, /limited to 3/);
+});
+
+test('only open games count against capacity, and closed ones stay readable', async () => {
+  const archive = await open(memoryBackend(), { maxOpenGames: 1 });
   const session = played([3, 2]);
   await archive.register(session.export());
   await rejects(archive.register(played([1], new Session(counter, terms(8n))).export()), 503, /full/);
-  played([1, 3], session);
-  await assert.rejects(archive.append(ids(), 2, signed(session, 2)), e => e.status === 400 && e.data.accepted === 1);
-  await rejects(archive.register(played([1, 1, 1, 1], new Session(counter, terms(8n))).export()), 413, /limited to 3/);
+  assert.deepEqual(archive.capacity(), { open: 1, max_open_games: 1, reserved_games: 0, free: 0, free_unreserved: 0 });
+  // The channel settles game 7: it leaves memory, and its slot is free.
+  await archive.close(ids(), 4);
+  assert.deepEqual([archive.open(), archive.known.size], [[], 0]);
+  assert.equal((await archive.register(played([1], new Session(counter, terms(8n))).export())).created, true);
+  assert.equal((await archive.session(ids())).stateHash(), session.stateHash());
+  assert.equal((await archive.steps(ids(), 1)).steps.length, 1);
+  // Registering it again can't reopen it.
+  await rejects(archive.register(session.export()), 409, /closed/);
+  await rejects(archive.append(ids(), 2, []), 409, /closed/);
+});
+
+test('reserved capacity goes to the games `admit` ranks above 0', async () => {
+  const asked = [];
+  const admit = async (gameIds, gameTerms) => {
+    asked.push(gameIds.game_id);
+    return gameTerms.game_id === 9n ? 1 : 0;
+  };
+  const archive = await open(memoryBackend(), { maxOpenGames: 3, reservedGames: 1, games: [[CHANNEL, { game: counter, admit }]] });
+  const game = id => played([1], new Session(counter, terms(id))).export();
+  await archive.register(game(5n));
+  await archive.register(game(6n));
+  // One slot left, and it is reserved.
+  assert.deepEqual([archive.capacity().free, archive.capacity().free_unreserved], [1, 0]);
+  await rejects(archive.register(game(8n)), 503, /reserved capacity is for priority games/);
+  assert.equal((await archive.register(game(9n))).created, true);
+  await rejects(archive.register(game(10n)), 503, /^The keeper is full$/);
+  // `admit` is asked only near full.
+  assert.deepEqual(asked, [8n, 9n]);
+});
+
+test('unanchored games: capped per wallet, closed once finished or idle', async () => {
+  let now = 1_000_000;
+  const CASUAL = 0n, alice = 0xa11cen;
+  const archive = await open(memoryBackend(), { maxOpenPerPlayer: 2, unanchoredTtlMs: 60_000, now: () => now,
+    games: [[CHANNEL, counter], [CASUAL, { game: counter, anchored: false }]] });
+  const casual = (id, other = 0xca701n) => new Session(counter, { ...terms(id), channel: CASUAL, players: [alice, other] });
+  const casualIds = id => ({ chain_id: CHAIN, channel: CASUAL, game_id: id });
+  await archive.register(casual(1n).export());
+  await archive.register(casual(2n, 0xda7en).export());
+  // Alice plays two open unanchored games: a third is refused, whoever she plays.
+  await rejects(archive.register(casual(3n, 0xe7en).export()), 429, /Wallet 0xa11ce already plays 2 open unanchored games/);
+  // An anchored game is never refused for her caps.
+  assert.equal((await archive.register(played([3]).export())).created, true);
+
+  // Game 1 finishes: it closes at once, which frees her slot.
+  const finished = played([3, 3, 3, 3, 3, 3, 2], casual(1n));
+  await archive.append(casualIds(1n), 0, signed(finished));
+  assert.equal(archive.known.has('0x0/0x1'), false);
+  assert.equal((await archive.session(casualIds(1n))).env.outcome.finished, true);
+  await archive.register(casual(3n, 0xe7en).export());
+
+  // Game 2 idles past its time to live: the next registration that needs its slot sweeps it.
+  now += 30_000;
+  const active = casual(3n, 0xe7en);
+  active.move(add(1), keys[0]);
+  await archive.append(casualIds(3n), 0, signed(active));
+  now += 31_000;
+  await archive.register(casual(4n, 0xf00n).export());
+  assert.deepEqual(archive.open().map(i => i.game_id).sort(), [3n, 4n, 7n]);
+  assert.equal(await archive.sweep(), 0);
+  now += 61_000;
+  assert.equal(await archive.sweep(), 2);
+  assert.deepEqual(archive.open().map(i => i.game_id), [7n]);
 });
 
 test('the archive, its evidence and closed games survive a restart', async () => {

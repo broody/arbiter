@@ -6,7 +6,11 @@ pub const REFEREE: u8 = 254;
 pub const DRAW: u8 = 0;
 /// Finish reasons 1..=127 are game-defined; the protocol reserves the rest.
 pub const REASON_RESIGN: u8 = 128;
+/// The referee flagged the due seat of a timed game (`Move::Flag`).
 pub const REASON_TIMEOUT: u8 = 129;
+/// The chain judged that the due seat missed its forced-play window
+/// (`channel::claim_timeout`), without any referee.
+pub const REASON_ABANDON: u8 = 130;
 
 #[derive(Copy, Drop, Serde, PartialEq, Debug)]
 pub struct Signature {
@@ -57,7 +61,7 @@ pub struct Terms<C> {
 /// A step: one seat's signed move. Only `Resign` names its seat; every other
 /// move belongs to the seat the state says is due (the turn's seat, or the
 /// pending seat for `Reveal`), so the seat is never carried or signed twice.
-/// `Flag` belongs to the referee of a timed game.
+/// `Flag` and `Start` belong to the referee of a timed game.
 #[derive(Copy, Drop, Serde, PartialEq, Debug)]
 pub enum Move<A> {
     /// The due seat's game action.
@@ -67,12 +71,16 @@ pub enum Move<A> {
     PlayRandom: (A, felt252),
     /// The pending seat's next hash-chain value.
     Reveal: felt252,
-    /// The due seat replaces its hash-chain tip before the chain runs out.
+    /// The due seat replaces its hash-chain tip before the chain runs out. Only
+    /// after it revealed from its current one (`Envelope.rng_fresh`).
     Recommit: felt252,
     /// This seat concedes, at any time.
     Resign: u8,
     /// The due seat's time ran out.
     Flag,
+    /// The referee starts or restarts the clock without charging anyone: before
+    /// the first move, and after play resumes from forced play.
+    Start,
 }
 
 /// Steps to replay, with what authenticates them: one final signature per seat
@@ -117,6 +125,9 @@ pub struct Envelope<S> {
     pub pending: Pending,
     /// Last revealed hash-chain value per seat (the committed tip initially).
     pub rng_heads: Span<felt252>,
+    /// Per seat: whether its head is a tip it committed and has not revealed
+    /// from yet. A seat may recommit only after a reveal.
+    pub rng_fresh: Span<bool>,
     /// `None` for an untimed game.
     pub clock: Option<Clock>,
     pub outcome: Outcome,

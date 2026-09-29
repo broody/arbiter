@@ -16,7 +16,7 @@ use crate::fixtures::{
     terms, timed_attestations, timed_expected, timed_finals, timed_stamps, timed_steps, timed_terms,
 };
 use crate::hourglass::{Hourglass, HourglassClock, HourglassCounterRules};
-use crate::{ADD, Action, Config, Counter, CounterRules, GAMBLE};
+use crate::{ADD, Action, Config, Counter, CounterRules, GAMBLE, LIMIT};
 
 fn zero() -> Signature {
     Signature { r: 0, s: 0 }
@@ -209,14 +209,16 @@ fn time_comes_from_the_turn_then_the_bank() {
 
 #[test]
 fn a_turn_adds_up_its_steps() {
-    // Seat 0 recommits and then plays: 40 s in one turn, 10 s from its bank.
+    // Seat 0 reveals for seat 1's gamble, then recommits and plays in its own
+    // turn: 40 s in one turn, 10 s from its bank.
     let env = run(
-        array![add(3), add(3), Move::Recommit(rng_next(0x5eed2))], array![1000, 2000, 22000],
+        array![add(3), gamble(), reveal(), Move::Recommit(rng_next(0x5eed2))],
+        array![1000, 2000, 3000, 23000],
     );
     assert_eq!(clock(@env).used, 20000);
     let env = apply_steps::<
         CounterRules,
-    >(TIMED_CONTEXT, @timed_terms(), env, (), array![add(3)].span(), array![42000].span());
+    >(TIMED_CONTEXT, @timed_terms(), env, (), array![add(3)].span(), array![43000].span());
     assert_eq!(banks(@env), array![54000, 62000].span());
     assert_eq!(clock(@env).used, 0);
 }
@@ -280,11 +282,101 @@ fn an_unstamped_step_pauses_the_clock() {
 }
 
 #[test]
-#[should_panic(expected: 'Flag needs a stamp')]
+#[should_panic(expected: 'Referee step needs a stamp')]
 fn forced_play_cannot_flag() {
     force::<
         CounterRules,
     >(TIMED_CONTEXT, @timed_terms(), timed_start(), (), 0, array![Move::Flag].span());
+}
+
+#[test]
+#[should_panic(expected: 'Referee step needs a stamp')]
+fn forced_play_cannot_start() {
+    force::<
+        CounterRules,
+    >(TIMED_CONTEXT, @timed_terms(), timed_start(), (), 0, array![Move::Start].span());
+}
+
+#[test]
+fn start_runs_the_clock_before_the_first_move() {
+    // Without the start, the first move's stamp would start the clock for free.
+    let env = run(array![Move::Start, add(3)], array![1000, 41000]);
+    assert_eq!(banks(@env), array![52000, 60000].span());
+    assert_eq!(env.last_seat, 0);
+}
+
+#[test]
+fn start_restarts_the_clock_without_charging() {
+    // Seat 1's clock runs from 1 s; the referee restarts it at 50 s (after
+    // forced play, say), so its move at 51 s costs 1 s, not 50 s.
+    let env = run(array![add(3), Move::Start, add(3)], array![1000, 50000, 51000]);
+    assert_eq!(banks(@env), array![62000, 62000].span());
+    assert_eq!(clock(@env).stamp, 51000);
+}
+
+#[test]
+fn start_keeps_the_turn_used_so_far() {
+    let env = run(array![add(3), Move::Start], array![1000, 21000]);
+    assert_eq!((clock(@env).used, clock(@env).stamp), (0, 21000));
+    let env = run(
+        array![add(3), gamble(), reveal(), Move::Recommit(rng_next(0x5eed2)), Move::Start],
+        array![1000, 2000, 3000, 23000, 90000],
+    );
+    assert_eq!((clock(@env).used, clock(@env).stamp), (20000, 90000));
+}
+
+#[test]
+#[should_panic(expected: 'Stamp out of order')]
+fn start_keeps_stamps_in_order() {
+    run(array![add(3), Move::Start], array![5000, 4000]);
+}
+
+/// Referee `Start` steps from seq `from`, one millisecond apart from `at`.
+fn starts(ref steps: Array<Move<Action>>, ref stamps: Array<u64>, count: u32, at: u64) {
+    let mut i: u32 = 0;
+    while i < count {
+        steps.append(Move::Start);
+        stamps.append(at + i.into());
+        i += 1;
+    }
+}
+
+#[test]
+fn the_transcript_cap_ends_the_game() {
+    // Target 20 allows 96 steps. Even steps that change nothing count.
+    let (mut steps, mut stamps) = (array![], array![]);
+    starts(ref steps, ref stamps, 96, 1000);
+    let env = run(steps, stamps);
+    assert_eq!(env.seq, 96);
+    assert!(env.outcome.finished);
+    assert_eq!((env.outcome.winner, env.outcome.reason), (referee::DRAW, LIMIT));
+}
+
+#[test]
+#[should_panic(expected: 'Game already finished')]
+fn nothing_follows_the_cap() {
+    let (mut steps, mut stamps) = (array![], array![]);
+    starts(ref steps, ref stamps, 97, 1000);
+    run(steps, stamps);
+}
+
+#[test]
+fn the_transcript_cap_waits_for_a_reveal() {
+    // Seat 0 adds, the referee pads to seq 95, and seat 1's gamble is step 96:
+    // the cap waits for seat 0's reveal, so the roll still applies.
+    let mut steps = array![add(3)];
+    let mut stamps = array![1000];
+    starts(ref steps, ref stamps, 94, 1001);
+    steps.append(gamble());
+    stamps.append(2000);
+    let env = run(steps, stamps);
+    assert_eq!(env.seq, 96);
+    assert!(env.pending.active && !env.outcome.finished);
+    let env = apply_steps::<
+        CounterRules,
+    >(TIMED_CONTEXT, @timed_terms(), env, (), array![reveal()].span(), array![3000].span());
+    assert!(env.game.total > 3);
+    assert_eq!((env.seq, env.outcome.reason), (97, LIMIT));
 }
 
 fn per_turn() -> Terms<Config> {
@@ -448,11 +540,12 @@ fn a_flag_in_overtime_ends_the_game() {
 
 #[test]
 fn periods_count_per_turn_not_per_step() {
-    // Seat 0 recommits and then plays: one turn, 7 s of overtime in all.
+    // Seat 0 reveals at once for seat 1's gamble, then recommits and plays:
+    // one turn, 7 s of overtime in all.
     let env = run_with(
         japanese(),
-        array![add(3), add(3), Move::Recommit(rng_next(0x5eed2)), add(3)],
-        array![1000, 2000, 15000, 19000],
+        array![add(3), gamble(), reveal(), Move::Recommit(rng_next(0x5eed2)), add(3)],
+        array![1000, 2000, 2000, 15000, 19000],
     );
     assert_eq!(banks(@env), array![0, 9000].span());
     assert_eq!(periods(@env), array![2, 3].span());
@@ -511,8 +604,8 @@ fn hourglass_replay_matches_sdk() {
     let batch = Batch {
         steps: hourglass_steps().span(),
         stamps: hourglass_stamps().span(),
-        signatures: hourglass_finals(0, 5).span(),
-        attestation: *hourglass_attestations().at(4),
+        signatures: hourglass_finals(0, 6).span(),
+        attestation: *hourglass_attestations().at(5),
     };
     let end = replay::<
         HourglassCounterRules,
@@ -520,6 +613,8 @@ fn hourglass_replay_matches_sdk() {
     assert_eq!(end, hourglass_expected());
     assert_eq!(state_hash::<HourglassCounterRules>(@end), HOURGLASS_STATE_HASH);
     assert_eq!(end.outcome.winner, 2); // seat 1: seat 0 ran dry
+    // The referee started the clock, so seat 0's first move cost it 2 s.
+    assert_eq!(*hourglass_steps().at(0), Move::Start);
 }
 
 #[test]

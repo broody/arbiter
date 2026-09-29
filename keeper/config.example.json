@@ -17,15 +17,27 @@
       "channel": "0x0000000000000000000000000000000000000000000000000000000000000000",
       "module": "../sdk/examples/counter.mjs",
       "export": "counter",
-      "entrypoints": { "get_channel": "get_channel", "submit_history": "submit_history", "resolve": "resolve" },
-      "max_history_steps": 64,
+      "entrypoints": {
+        "get_channel": "get_channel", "submit_history": "submit_history", "resolve": "resolve",
+        "acknowledge": "acknowledge", "resume_by_referee": "resume_by_referee", "terms": "terms"
+      },
+      "max_steps": 4096,
+      "replay_max_steps": 64,
+      "proof_max_steps": 512,
+      "start_grace_seconds": 120,
+      "answer_margin_seconds": 600,
+      "world": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "namespace": "counter",
       "prover": {
         "url": "http://127.0.0.1:3100",
         "class_hash": "0x0000000000000000000000000000000000000000000000000000000000000000"
       }
     }
   ],
-  "max_games": 10000,
+  "max_open_games": 10000,
+  "reserved_games": 1000,
+  "max_open_per_player": 4,
+  "unanchored_ttl_seconds": 86400,
   "max_steps": 4096,
   "max_body_bytes": 1048576,
   "rate_per_minute": 120,

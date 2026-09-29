@@ -5,12 +5,12 @@
 use core::ec::EcPointTrait;
 use core::num::traits::Zero;
 use dojo::event::EventStorage;
-use dojo::model::ModelStorage;
+use dojo::model::{Model, ModelStorage};
 use dojo::world::{IWorldDispatcherTrait, WorldStorage};
 use referee::{
-    Batch, Envelope, GameRules, Move, Outcome, Signature, Terms, TimeControl, approve_all,
-    channel as machine, check_clock, checkpoint_hash, context_hash, open, reopen_hash, replay,
-    state_ref,
+    Batch, Channel, Envelope, GameRules, Move, Outcome, Signature, Terms, TimeControl, approve_all,
+    channel as machine, check_clock, checkpoint_hash, context_hash, live_hash, open,
+    referee_resume_hash, reopen_hash, replay, state_ref, verify,
 };
 use starknet::syscalls::get_class_hash_at_syscall;
 use starknet::{
@@ -18,8 +18,9 @@ use starknet::{
     get_contract_address, get_tx_info,
 };
 use crate::models::{
-    CANCELLED, CREATED, ChannelGame, ChannelUpdated, DISPUTED, FORCED, JOINED, ProverAllowed,
-    RECEIVED, RESIGNED, RESOLVED, RESUMED, TIMED_OUT, channel_of, with_channel,
+    ACKNOWLEDGED, CANCELLED, CREATED, ChannelGame, ChannelState, ChannelTerms, ChannelUpdated,
+    DISPUTED, FORCED, JOINED, ProverAllowed, RECEIVED, RESIGNED, RESOLVED, RESUMED, TIMED_OUT,
+    channel_of, game_of, pack_state, terms_of, unpack_state, with_channel,
 };
 
 /// Open a channel as seat 0. `invited` may be zero for an open game. `clock`
@@ -76,10 +77,14 @@ pub fn create<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Drop<R::S
         anchor: channel.anchor.into(),
         candidate: channel.candidate.into(),
         anchor_block: 0,
+        candidate_block: 0,
         deadline: 0,
+        acked_epoch: 0,
+        acked_deadline: 0,
         result: channel.result.into(),
     };
-    save(ref world, with_channel(game, channel), CREATED);
+    save_terms(ref world, @with_channel(game, channel));
+    save(ref world, id, channel, CREATED);
     id
 }
 
@@ -107,17 +112,18 @@ pub fn join<
     let channel = machine::join(
         channel_of(@game), context_hash::<R>(@terms), state_ref::<R>(@opening), get_block_number(),
     );
-    save(ref world, with_channel(game, channel), JOINED);
+    save_terms(ref world, @with_channel(game, channel));
+    save(ref world, game_id, channel, JOINED);
 }
 
 pub fn cancel(ref world: WorldStorage, game_id: felt252) {
-    let game = read(@world, game_id);
-    assert(get_caller_address() == game.player_0, 'Only creator');
-    save(ref world, with_channel(game, machine::cancel(channel_of(@game))), CANCELLED);
+    let (channel, player_0, _) = read_seats(@world, game_id);
+    assert(get_caller_address() == player_0, 'Only creator');
+    save(ref world, game_id, machine::cancel(channel), CANCELLED);
 }
 
 /// Called by the proof adapter after it verified a native proof that replays
-/// from the anchor with hash `start_hash` to `end`.
+/// from the state with hash `start_hash`, the anchor or the candidate, to `end`.
 pub fn accept_verified<impl R: GameRules, +Serde<R::State>, +Drop<R::State>>(
     ref world: WorldStorage,
     game_id: felt252,
@@ -129,13 +135,14 @@ pub fn accept_verified<impl R: GameRules, +Serde<R::State>, +Drop<R::State>>(
     let game = read(@world, game_id);
     assert(get_caller_address() == game.prover, 'Only prover');
     valid_prover(@world, game.prover);
-    assert(start_hash == game.anchor.hash, 'Wrong proof anchor');
+    assert(is_base(@game, start_hash), 'Wrong proof anchor');
     receive::<R>(ref world, game, epoch, end, acks);
 }
 
-/// Replay steps onchain from the anchor, without a prover, against each seat's
-/// final signature (zero for a seat with no step) and, in a timed game, the
-/// steps' stamps and the referee's attestation.
+/// Replay steps onchain from the anchor or the candidate, without a prover,
+/// against each seat's final signature (zero for a seat with no step) and, in
+/// a timed game, the steps' stamps and the referee's attestation. Starting from
+/// the candidate extends it, so a long transcript can arrive in segments.
 pub fn submit_history<
     impl R: GameRules,
     +Serde<R::Config>,
@@ -158,25 +165,40 @@ pub fn submit_history<
     acks: Span<Signature>,
 ) {
     let game = read(@world, game_id);
-    assert(state_ref::<R>(@start).hash == game.anchor.hash, 'Wrong anchor state');
+    assert(is_base(@game, state_ref::<R>(@start).hash), 'Wrong anchor state');
     let terms = terms::<R>(@game);
     let end = replay::<R>(game.context, @terms, start, witness, batch);
     receive::<R>(ref world, game, epoch, end, acks);
 }
 
 pub fn open_dispute(ref world: WorldStorage, game_id: felt252, epoch: u32) {
-    let game = read(@world, game_id);
-    seat_of(@game, get_caller_address());
-    let channel = machine::open_dispute(channel_of(@game), epoch, get_block_timestamp());
-    save(ref world, with_channel(game, channel), DISPUTED);
+    let (channel, player_0, player_1) = read_seats(@world, game_id);
+    seat_among(player_0, player_1, get_caller_address());
+    let channel = machine::open_dispute(channel, epoch, get_block_timestamp());
+    save(ref world, game_id, channel, DISPUTED);
+}
+
+/// The referee of a timed game shows it is live during a dispute: `resolve`
+/// then returns an unfinished game to offchain play instead of forced play.
+/// Anyone may send the referee's signature.
+pub fn acknowledge<impl R: GameRules>(
+    ref world: WorldStorage, game_id: felt252, epoch: u32, signature: Signature,
+) {
+    let channel = read_state(@world, game_id);
+    let (referee, context) = referee_of(@world, game_id);
+    assert(referee != 0, 'Untimed game');
+    verify(referee, live_hash::<R>(context, epoch, channel.deadline), signature);
+    let channel = machine::acknowledge(channel, epoch, get_block_timestamp());
+    save(ref world, game_id, channel, ACKNOWLEDGED);
 }
 
 pub fn resolve(ref world: WorldStorage, game_id: felt252, epoch: u32) {
-    let game = read(@world, game_id);
+    let channel = read_state(@world, game_id);
+    let (referee, _) = referee_of(@world, game_id);
     let channel = machine::resolve(
-        channel_of(@game), epoch, get_block_timestamp(), get_block_number(),
+        channel, epoch, get_block_timestamp(), get_block_number(), referee != 0,
     );
-    save(ref world, with_channel(game, channel), RESOLVED);
+    save(ref world, game_id, channel, RESOLVED);
 }
 
 /// The due seat plays its steps onchain during forced play. Every step must be
@@ -215,34 +237,52 @@ pub fn force<
         get_block_timestamp(),
         get_block_number(),
     );
-    save(ref world, with_channel(game, channel), FORCED);
+    save(ref world, game_id, channel, FORCED);
 }
 
 /// Return to offchain play from forced play with every seat's approval.
 pub fn resume<impl R: GameRules>(
     ref world: WorldStorage, game_id: felt252, epoch: u32, acks: Span<Signature>,
 ) {
-    let game = read(@world, game_id);
+    let channel = read_state(@world, game_id);
+    let terms = Model::<ChannelTerms>::ptr_from_keys(game_id);
+    let key_0: felt252 = world.read_member(terms, selector!("key_0"));
+    let key_1: felt252 = world.read_member(terms, selector!("key_1"));
+    let context: felt252 = world.read_member(terms, selector!("context"));
     let approved = approve_all(
-        keys(@game), reopen_hash::<R>(game.context, epoch, game.anchor.hash), acks,
+        array![key_0, key_1].span(), reopen_hash::<R>(context, epoch, channel.anchor.hash), acks,
     );
     let channel = machine::resume(
-        channel_of(@game), epoch, approved, get_block_timestamp(), get_block_number(),
+        channel, epoch, approved, get_block_timestamp(), get_block_number(),
     );
-    save(ref world, with_channel(game, channel), RESUMED);
+    save(ref world, game_id, channel, RESUMED);
+}
+
+/// Return a timed game from forced play to offchain play on its referee's
+/// signature alone: forced play is the fallback for a referee that is down, so
+/// a seat can't keep a game onchain by refusing to approve. Anyone may send it.
+pub fn resume_by_referee<impl R: GameRules>(
+    ref world: WorldStorage, game_id: felt252, epoch: u32, signature: Signature,
+) {
+    let channel = read_state(@world, game_id);
+    let (referee, context) = referee_of(@world, game_id);
+    assert(referee != 0, 'Untimed game');
+    verify(referee, referee_resume_hash::<R>(context, epoch, channel.anchor.hash), signature);
+    let channel = machine::resume(channel, epoch, true, get_block_timestamp(), get_block_number());
+    save(ref world, game_id, channel, RESUMED);
 }
 
 pub fn claim_timeout(ref world: WorldStorage, game_id: felt252, epoch: u32) {
-    let game = read(@world, game_id);
-    let seat = seat_of(@game, get_caller_address());
-    let channel = machine::claim_timeout(channel_of(@game), epoch, seat, get_block_timestamp());
-    save(ref world, with_channel(game, channel), TIMED_OUT);
+    let (channel, player_0, player_1) = read_seats(@world, game_id);
+    let seat = seat_among(player_0, player_1, get_caller_address());
+    let channel = machine::claim_timeout(channel, epoch, seat, get_block_timestamp());
+    save(ref world, game_id, channel, TIMED_OUT);
 }
 
 pub fn resign(ref world: WorldStorage, game_id: felt252) {
-    let game = read(@world, game_id);
-    let seat = seat_of(@game, get_caller_address());
-    save(ref world, with_channel(game, machine::resign(channel_of(@game), seat)), RESIGNED);
+    let (channel, player_0, player_1) = read_seats(@world, game_id);
+    let seat = seat_among(player_0, player_1, get_caller_address());
+    save(ref world, game_id, machine::resign(channel, seat), RESIGNED);
 }
 
 /// Accept or revoke a proof adapter class. Namespace owners only.
@@ -275,37 +315,88 @@ pub fn terms<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>>(
     }
 }
 
-/// What the adapter needs to prove from the anchor: terms, epoch, anchor hash
-/// and the block the anchor was set in.
+/// What the adapter needs to prove from: terms, epoch, and the hash and block
+/// of each state a proof may start from, the anchor and the candidate (the
+/// same state outside a dispute).
 pub fn snapshot<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>>(
     world: @WorldStorage, game_id: felt252,
-) -> (Terms<R::Config>, u32, felt252, u64) {
+) -> (Terms<R::Config>, u32, felt252, u64, felt252, u64) {
     let game = read(world, game_id);
     assert(machine::is_live(@channel_of(@game)), 'Channel not live');
-    (terms::<R>(@game), game.epoch, game.anchor.hash, game.anchor_block)
+    (
+        terms::<R>(@game),
+        game.epoch,
+        game.anchor.hash,
+        game.anchor_block,
+        game.candidate.hash,
+        game.candidate_block,
+    )
 }
 
 /// The settled result, if any. Games pay rewards from this.
 pub fn result(world: @WorldStorage, game_id: felt252) -> Option<Outcome> {
-    let game = read(world, game_id);
-    if game.status == machine::SETTLED {
-        Option::Some(game.result.into())
+    let channel = read_state(world, game_id);
+    if channel.status == machine::SETTLED {
+        Option::Some(channel.result)
     } else {
         Option::None
     }
 }
 
+/// A channel's terms and state together.
 pub fn read(world: @WorldStorage, game_id: felt252) -> ChannelGame {
-    let game: ChannelGame = world.read_model(game_id);
-    assert(game.player_0.is_non_zero(), 'Unknown channel');
-    game
+    let terms: ChannelTerms = world.read_model(game_id);
+    assert(terms.player_0.is_non_zero(), 'Unknown channel');
+    let state: ChannelState = world.read_model(game_id);
+    game_of(@terms, @state)
+}
+
+/// A channel's state machine alone, without reading its terms: its context
+/// reads as zero. For callers that need the status, references and result.
+pub fn read_state(world: @WorldStorage, game_id: felt252) -> Channel {
+    let terms = Model::<ChannelTerms>::ptr_from_keys(game_id);
+    let response_seconds: u32 = world.read_member(terms, selector!("response_seconds"));
+    let state: ChannelState = world.read_model(game_id);
+    unpack_state(@state, 0, response_seconds)
+}
+
+/// A channel's status, from its packed state.
+pub fn status(world: @WorldStorage, game_id: felt252) -> u8 {
+    let times: felt252 = world
+        .read_member(Model::<ChannelState>::ptr_from_keys(game_id), selector!("times"));
+    let times: u256 = times.into();
+    (times.low % 0x100).try_into().unwrap()
+}
+
+// The state machine and both seats: what disputes, timeouts, resignations and
+// cancellations need.
+fn read_seats(
+    world: @WorldStorage, game_id: felt252,
+) -> (Channel, ContractAddress, ContractAddress) {
+    let terms = Model::<ChannelTerms>::ptr_from_keys(game_id);
+    let player_0: ContractAddress = world.read_member(terms, selector!("player_0"));
+    assert(player_0.is_non_zero(), 'Unknown channel');
+    let player_1: ContractAddress = world.read_member(terms, selector!("player_1"));
+    (read_state(world, game_id), player_0, player_1)
+}
+
+// A timed game's referee key (zero if untimed) and the channel's context.
+fn referee_of(world: @WorldStorage, game_id: felt252) -> (felt252, felt252) {
+    let terms = Model::<ChannelTerms>::ptr_from_keys(game_id);
+    (world.read_member(terms, selector!("referee")), world.read_member(terms, selector!("context")))
 }
 
 pub fn seat_of(game: @ChannelGame, address: ContractAddress) -> u8 {
-    if address == *game.player_0 {
+    seat_among(*game.player_0, *game.player_1, address)
+}
+
+fn seat_among(
+    player_0: ContractAddress, player_1: ContractAddress, address: ContractAddress,
+) -> u8 {
+    if address == player_0 {
         0
     } else {
-        assert(address.is_non_zero() && address == *game.player_1, 'Not a player');
+        assert(address.is_non_zero() && address == player_1, 'Not a player');
         1
     }
 }
@@ -324,12 +415,17 @@ fn receive<impl R: GameRules, +Serde<R::State>, +Drop<R::State>>(
     let channel = machine::receive(
         channel_of(@game), epoch, end, approved, get_block_timestamp(), get_block_number(),
     );
-    save(ref world, with_channel(game, channel), RECEIVED);
+    save(ref world, game.id, channel, RECEIVED);
 }
 
 fn config<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>>(game: @ChannelGame) -> R::Config {
     let mut data = *game.config;
     Serde::deserialize(ref data).expect('Invalid stored config')
+}
+
+// A submission starts from the anchor or extends the candidate.
+fn is_base(game: @ChannelGame, hash: felt252) -> bool {
+    hash == *game.anchor.hash || hash == *game.candidate.hash
 }
 
 fn keys(game: @ChannelGame) -> Span<felt252> {
@@ -347,27 +443,33 @@ fn valid_prover(world: @WorldStorage, prover: ContractAddress) {
     assert(entry.allowed, 'Untrusted prover class');
 }
 
-fn save(ref world: WorldStorage, game: ChannelGame, kind: u8) {
-    world.write_model(@game);
-    let state = if game.status == machine::DISPUTE {
-        game.candidate
+// Write a channel's terms, at create and join.
+fn save_terms(ref world: WorldStorage, game: @ChannelGame) {
+    world.write_model(@terms_of(game));
+}
+
+// Write a channel's state and announce the transition.
+fn save(ref world: WorldStorage, game_id: felt252, channel: Channel, kind: u8) {
+    world.write_model(@pack_state(game_id, @channel));
+    let state = if channel.status == machine::DISPUTE {
+        channel.candidate
     } else {
-        game.anchor
+        channel.anchor
     };
-    let outcome = if game.status == machine::SETTLED {
-        game.result
+    let outcome = if channel.status == machine::SETTLED {
+        channel.result
     } else {
         state.outcome
     };
     world
         .emit_event(
             @ChannelUpdated {
-                game_id: game.id,
+                game_id,
                 kind,
-                epoch: game.epoch,
+                epoch: channel.epoch,
                 seq: state.seq,
-                status: game.status,
-                deadline: game.deadline,
+                status: channel.status,
+                deadline: channel.deadline,
                 state_hash: state.hash,
                 winner: outcome.winner,
                 reason: outcome.reason,

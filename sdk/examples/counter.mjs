@@ -1,7 +1,7 @@
 // JS mirror of examples/counter/src/lib.cairo, for fixtures and SDK tests.
 import { MAX_CLOCK_MS, low128 } from '../src/index.mjs';
 
-export const ADD = 0, GAMBLE = 1, REACHED = 1;
+export const ADD = 0, GAMBLE = 1, REACHED = 1, LIMIT = 2;
 
 function advance(s, seat, amount) {
   const total = s.total + amount;
@@ -30,6 +30,8 @@ export const counter = {
   },
   due: s => s.next,
   outcome: s => (s.winner !== 0 ? [s.winner, REACHED] : null),
+  maxSteps: c => 4 * c.target + 16,
+  adjudicate: () => [0, LIMIT],
 };
 
 /**
