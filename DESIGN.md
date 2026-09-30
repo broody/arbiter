@@ -515,13 +515,59 @@ latest verified transcript.
 - **Aggregation across games** is the recursion that pays: many settled games
   per proof to spread the fixed charge. It is a later optimization.
 
+## Referee randomness (planned)
+
+*Planned, not built; it would be protocol version 5.* With player
+commit-reveal, the revealer must be online for every roll: in Hashfront, every
+attack waits for the defender. A timed game already has its referee on every
+step, so the referee can supply the randomness instead. This helps 2-seat
+games, so it comes before more than 2 seats (next section).
+- **Commitment.** The referee commits its own hash chain in the terms, like a
+  seat.
+- **Rolls.** When the referee stamps a `PlayRandom`, it reveals its next value,
+  and the seed mixes that with the requester's. No seat reveals, so a roll
+  resolves as soon as it is stamped.
+- **Per game.** A game opts in. Player commit-reveal stays the default: it
+  needs no trusted party, and games without a referee rely on it.
+- **Trust.** The referee can't bias a roll, since its values are fixed in
+  advance, and it can't know a roll before the requester's step arrives. But
+  a referee colluding with the requester could leak the roll before the action
+  is signed. Randomness joins time and order in what the referee is trusted
+  with.
+- **More than 2 seats.** No coalition of players can predict a roll, and the
+  revealer sets and the eliminated revealer's veto (next section) never arise.
+- **A VRF** would need no chain for the referee to keep, but each roll would
+  cost a proof check (elliptic-curve operations) instead of a hash.
+  Cartridge's VRF resolves inside one transaction, so it doesn't fit offchain
+  play.
+
+**When the referee is down, the game pauses** (decided 2026-09-30).
+- Offchain, it already does. Every step of a timed game needs the referee's
+  stamp, and a restarted referee resumes from its last stamp, so it charges
+  nobody for its downtime. A roll resolves when the referee stamps it.
+- In forced play, a roll played onchain waits for the referee's value.
+  (Forced play happens when a seat opens a dispute while the referee is
+  down.) While the roll waits, the forced-play deadline stops, so nobody can
+  claim a timeout.
+- Anyone can post the referee's next value onchain. The chain checks it
+  against the referee's committed chain, so it needs no signature. A backup
+  keeper that holds the referee's chain secret can unfreeze the game, which
+  keeps real outages short.
+- A pause has an end. The seats can all agree to void the game, and after a
+  long limit it ends void, with no result (a new reason). Falling back to a
+  seat's reveal instead would let a colluding referee re-roll by going quiet.
+  Void only lets it cancel a game, and only by stalling visibly for days.
+
+Still open: the limit (a week?).
+
 ## More than 2 seats (planned)
 
-*Planned, not built; it would be protocol version 5.* Referee plays exactly 2
-seats: `open` asserts `SEATS == 2` in Cairo and the SDK. This section records
-what more seats need, found by a spike that ran a 3-seat game through v4 on
-2026-09-30, and proposes how to build it. The first target is Hashfront, which
-plays 2 to 4 seats (its shipped maps have 2):
+*Planned, not built; it would be protocol version 6, after referee
+randomness.* Referee plays exactly 2 seats: `open` asserts `SEATS == 2` in
+Cairo and the SDK. This section records what more seats need, found by a spike
+that ran a 3-seat game through v4 on 2026-09-30, and proposes how to build it.
+Hashfront launches with 2 seats, and is the first game planned for more. It
+plays 2 to 4:
 - a turn is any number of actions, ended by END_TURN;
 - an attack's defender reveals the roll, and the attacker keeps its turn;
 - a seat is out when it loses its HQ, or its units, factories and gold;
@@ -530,8 +576,9 @@ plays 2 to 4 seats (its shipped maps have 2):
 The spike's game, Trio, has the same shape: END passes the turn, and ATTACK
 names a defender, who reveals.
 
-**Surround.** Neither Surround nor referee is in production, so v5 may break
-the API. Surround, 2 seats only, is updated alongside each layer, and must:
+**Surround.** Neither Surround nor referee is in production, so the protocol
+may break its API. Surround, 2 seats only, is updated alongside each layer,
+and must:
 - pass its own suites, with the same results;
 - stay at or below 72.8M gas for a 9×9 game.
 
@@ -652,8 +699,8 @@ Proposal:
 hash chains fix both in advance, so a colluding pair knows a roll before it
 signs the action. For Hashfront that is enough: the defender is the only other
 party to its fight, and a colluding defender could throw the fight anyway. A
-roll that affects everyone needs everyone's value. Decided: sets of revealers,
-in v5.
+roll that affects everyone needs everyone's value. Decided: sets of
+revealers.
 - `apply` returns the set of seats that must reveal, as a bitmask, instead of
   one seat.
 - The seats reveal in seat order, so `Reveal` stays seat-implicit, and the
@@ -664,28 +711,8 @@ in v5.
   the values revealed so far (decided). A colluding revealer can veto a roll
   that way, at the price of its seat.
 
-**Referee randomness** (open). Player commit-reveal stays the default. It needs
-no trusted party, and 2-seat games without a referee rely on it. A refereed
-game could opt into randomness from its referee instead:
-- The referee commits its own hash chain in the terms, like a seat. When it
-  stamps a `PlayRandom`, it reveals its next value, and the seed mixes that
-  with the requester's. No other seat reveals.
-- A roll then resolves when the referee stamps it, with no round trip to
-  another player. Today, Hashfront's defender must be online to reveal. With
-  more than 2 seats, no coalition of players can predict a roll, and the
-  extra reveals and the eliminated revealer's veto go away.
-- The referee can't bias a roll, and can't know one before the requester's
-  step arrives. But a referee colluding with the requester could leak the
-  roll before the action is signed. Randomness joins time and order in what
-  the referee is trusted with.
-- A roll pending while the referee is down can't resolve without its value.
-  Falling back to a seat's reveal would let a colluding referee re-roll by
-  going down, so the roll has to wait for that value. How it waits, and what
-  happens if the referee never returns, is the open question.
-- A VRF would do the same with no chain for the referee to keep, but each roll
-  would cost a proof check (elliptic-curve operations) instead of a hash.
-  Cartridge's VRF resolves inside one transaction, so it doesn't fit offchain
-  play.
+A game that takes its randomness from the referee (previous section) needs
+none of this: no seat reveals.
 
 **Seats.** `SEATS` is a constant, so a game that plays 2 to 4 would need a
 deployment per count. Proposal: `GameRules::seats(config)` replaces `SEATS`, so
@@ -727,20 +754,18 @@ Surround is updated at each layer and keeps its results and gas (above). The
 spike's collusion scenarios become tests that the new rules must reject.
 
 **Decisions** (2026-09-30).
-1. Games with more than 2 seats have a referee, in v5.
+1. Games with more than 2 seats have a referee.
 2. At most 16 seats.
-3. Sets of revealers, in v5.
+3. Sets of revealers.
 4. A revealer eliminated before revealing: the roll resolves from the values
    revealed so far.
 5. With more than 2 seats, a wallet resign only in forced play.
-6. Hashfront is the first game with more than 2 seats. Surround stays at 2.
+6. Hashfront launches with 2 seats and is the first game planned for more.
+   Surround stays at 2.
 7. Breaking changes are fine. Neither Surround nor referee is in production,
    and Surround is updated alongside.
 
-Still open:
-- whether Hashfront rates games by place;
-- referee randomness (above), and its rule for a roll pending while the
-  referee is down.
+Still open: whether Hashfront rates games by place.
 
 ## Roadmap
 
@@ -766,8 +791,10 @@ Still open:
    charged to the seat that has it, which is noise against clocks of seconds;
    `turn_ms` can serve as a grace if tighter clocks ever need one. Still to
    do: a referee bond that equivocation evidence can slash.
-10. More than 2 seats: designed, not built. See
+10. More than 2 seats: designed, not built, and after item 11. See
     [More than 2 seats](#more-than-2-seats-planned).
+11. Referee randomness: designed, not built, and first, since 2-seat
+    Hashfront can use it. See [Referee randomness](#referee-randomness-planned).
 
 ## Development
 
