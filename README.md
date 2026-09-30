@@ -13,6 +13,17 @@ The same code then:
 Referee was extracted from [Surround](https://github.com/broody/surround)
 (Go) and generalized for games with randomness, such as Hashfront (tactics).
 
+## Philosophy
+
+**Offchain gameplay, onchain settlement.** Games are played offchain, and the
+chain settles their results. A game should touch the chain as little as
+possible: ideally one transaction when it settles, plus what a dispute needs.
+Anything that adds a transaction to a game needs a reason, namely that it
+can't be done offchain or inside the settlement. That covers a separate
+transaction to open the game, a proof split into several, or a call a player
+has to send. [DESIGN.md](DESIGN.md) records these choices. For example, a game
+is to be opened in the same transaction that settles it (planned, protocol v6).
+
 ## How a game flows
 
 ```mermaid

@@ -1,6 +1,6 @@
 # Referee design
 
-Status: **draft, 2026-09-30**. Built and tested: the core crate (protocol,
+Status: **draft, 2026-10-01**. Built and tested: the core crate (protocol,
 optional referee clocks, randomness from the referee and channel state
 machine), the Dojo binding, the JS SDK mirror, and the counter example as both
 a pure game and a Dojo world.
@@ -632,9 +632,203 @@ clock, channel and Dojo suites pin the rest, for example
 `anyone_posts_the_referees_roll`. `keeper/katana.sh` plays such a game on a
 local Katana.
 
+## Opening by signatures (planned)
+
+*Planned, not built; it would be protocol version 6.* Today a game costs two
+transactions before its first move: `create`, then `join`. In a rated Surround
+9×9 game on Sepolia they take 28.6M of the 77.6M L2 gas, and an offer nobody
+takes still costs its creator a `create` and a `cancel`. A game should reach
+the chain only once every seat has agreed to play, and then only when it needs
+the chain: offchain gameplay, onchain settlement (see the README).
+
+**The idea.** Every seat's wallet signs the terms, and the signed terms are the
+game. Anyone who holds them can open it onchain, bundled with whatever call
+first needs the chain. A game that ends cooperatively then opens and settles in
+one transaction. Unanchored games already work this way offchain
+(`termsTypedData`, checked by the keeper), but their terms name no real
+channel, so they can never settle.
+
+**Opening** (`open_game(terms, signatures)`; `open(terms)` stays the core's
+opening state):
+- checks one wallet signature per seat over the terms (below), and the keys and
+  tips as `join` does today: every key a curve point, no key shared between
+  seats or with the referee, nonzero tips that differ;
+- checks the game id is unused. Clients choose it, since the terms must name it
+  before anyone signs: a random felt, as unanchored games do;
+- when the game takes its randomness from its referee, checks the referee's
+  signature over its tip, which the terms now carry (`clock.rng_tip`), as
+  `join` does today;
+- writes `ChannelTerms` and `ChannelState` once, with the opening state as the
+  anchor, and the game starts ACTIVE;
+- emits `ChannelUpdated` of a new kind, OPENED.
+
+It replaces `create`, `join` and `cancel`, and WAITING and CANCELLED go with
+them (decided), so game ids are only ever the ones clients choose.
+
+`open_game` is callable by anyone with the signatures. A stranger who opens a
+game early only spends their own gas, and a second `open_game` of the same id
+is refused.
+
+**Signatures.** Each wallet signs `termsTypedData(game, terms)`: SNIP-12
+revision 1, whose hash includes the signer's address. `open_game` calls each
+account's `is_valid_signature(hash, signature)` and accepts `'VALID'` (older
+accounts return 1). The typed data's domain carries the chain id, and the
+context binds the channel, the game id and every term, session keys included,
+so the signatures bind each wallet to its key as `create` and `join` do
+onchain. An account must be deployed to be checked.
+
+**Bundled with the first call.** Whatever call first needs the chain goes in
+one transaction with `open_game`, as a multicall:
+- a cooperative settlement (`submit_history` with approvals, or the adapter's
+  `settle`);
+- a dispute, a resignation or a timeout claim: the player's own transaction,
+  since those calls check the caller's wallet;
+- the keeper's settlement of a finished or flagged game.
+
+Answers, `resolve` and forced play follow a dispute, so the game is open by
+then.
+
+A game that settles by replay replays from the opening, as a game with no
+checkpoint does today.
+
+**Proofs.** Two rules in the adapter assume the game exists before the proof:
+- `__execute__` reads `snapshot(game_id)` at the base block. For a game that
+  isn't open there, it takes the terms in calldata and proves from
+  `open(terms)` at epoch 0. The message carries the context and the opening's
+  hash as the start, as for any proof.
+- `settle` requires a base block at or after the block that set the start
+  state. When `open_game` and `settle` share a transaction, the opening was
+  set in that block and the base is at least 10 blocks older, so the check
+  would fail.
+  It is waived for a proof that starts at the opening: the opening's hash is
+  fixed by the terms, and a game id is opened once, so there is no stale state
+  to guard against. The epoch must still be 0, and the anchor still the
+  opening.
+
+Wallet signatures are checked onchain in `open_game`, not inside the proof.
+
+**The game's time.** A rated game's time now comes from its referee, since the
+chain sees no join. `Clock` gains `started`, set once at the first stamp: a
+seat's step or the referee's `Start`. `stamp` can't serve: it is 0 while the
+clock is paused, before the first stamp and after a forced step. `started` is
+in the envelope, so every context and state hash changes, as in v4 and v5.
+
+**Rated games (Surround).**
+- *Rated or not is in what the wallets sign.* Otherwise a player who is losing
+  could open the same signed terms as an unrated game first, and the ticket
+  would never be used. `Config` is the only game-specific part of the terms, so
+  Surround's `GoConfig` gains the ticket's digest, 0 for an unrated game. Plain
+  `open_game` refuses a nonzero one. `open_rated_game` takes the ticket and the
+  matchmaker's signature and requires the digest to match.
+- *The terms must be the ticket's.* Today `create_rated_channel` builds the
+  terms from the ticket. Now the wallets sign terms of their own, so
+  `open_rated_game` checks that the players, board, komi, clock, prover and
+  response window equal the ticket's. The digest proves consent; this check
+  enforces the policy.
+- *The ticket window moves to the start stamp.* The game may open long after
+  the ticket expires (a long game, or an abandoned one the winner opens), so
+  `check_ticket` no longer checks the time, nor that black calls. It keeps
+  every policy check and records the digest, so a ticket is used once.
+- *Keeping the start.* Only the end state's hash is stored, and `rate` runs in
+  a later transaction, so the call that settles the game keeps `started` from
+  the end envelope, next to the settlement time and route that
+  `note_settlement` already writes.
+- *Rating* takes `played_at` from `clock.started / 1000` and voids the game
+  unless `issued_at ≤ played_at ≤ expires_at`. A rated game never started
+  (`started == 0`) is void. `settled_at` stays chain time, `played_at ≤
+  settled_at` still holds, and matchmaker revocation compares against
+  `played_at`.
+- *Revoking a referee key* from a time voids every rated game it started at or
+  after that time that isn't rated yet, as revoking a matchmaker key does,
+  since its stamp now sets the game's time (decided). Today it voids only the
+  timeouts it called.
+- *Why the referee's stamp and not `issued_at`.* A stolen matchmaker key can
+  sign tickets with any `issued_at`, including one before its revocation. The
+  referee's stamp needs a second key.
+- *The keeper won't start a rated game past its ticket.* The matchmaker gives
+  it the ticket's `expires_at` when it registers the game; the ratings contract
+  enforces the window anyway.
+
+**Keeper.**
+- *Registration.* A game registers with the keeper carrying every seat's wallet
+  signature, which the keeper checks as it does for unanchored games today
+  (`verifyMessage`). The anchored/unanchored split becomes "on a real channel,
+  opened or not yet".
+- *Referee discovery.* JOINED events go away, so a timed game gets a referee
+  only if a seat or the matchmaker registers it.
+- *Going onchain.* When the watcher settles a game no seat has opened, it
+  opens it in the same transaction and pays for that. It learns of games
+  others opened from OPENED events, and answers their disputes as today.
+- *Capacity.* `max_open_per_player` applies to every game until it opens.
+  Rated games need the entry's `admit` priority so they aren't crowded out.
+
+**SDK.** An `open_game` call builder; the typed-data hash per account; the
+proving client proves a game that isn't open from its terms;
+`decodeChannelGame` and the event kinds change shape.
+
+**Consequences.**
+- *Cost:* a game no longer pays for `create` and `join`. `open_game` writes the
+  terms and the state once, but pays one `is_valid_signature` per seat, which
+  depends on the wallet. A passkey wallet such as Cartridge Controller checks a
+  P-256 signature onchain. Measure before promising a saving.
+- *Nothing to cancel:* an offer nobody takes never reaches the chain.
+- *Invisible until needed:* the chain and indexers learn of a game only when
+  it opens, usually at settlement. Lobbies and live games come from the keeper
+  or the matchmaker.
+- *The same safety:* a player who needs the chain opens the game and starts a
+  dispute in one transaction.
+- *Aborts stay offchain:* a game abandoned before anyone opens it is never
+  seen onchain. Surround's matchmaker already counts aborts.
+- *More trust in the referee:* its first stamp sets a rated game's time, within
+  the ticket's window of at most 15 minutes.
+- *Referee randomness:* the referee's tip is in the terms every wallet signs,
+  so the join that carried it today goes away.
+
+**Build order.**
+1. Core and the SDK mirror: `Clock.started`, the version bump, fixtures.
+2. The channel state machine: games open straight to ACTIVE; `create`, `join`,
+   `cancel`, WAITING and CANCELLED go.
+3. The Dojo binding: `open_game` with signature checks, OPENED, unique ids.
+4. The adapter: proving and settling a game that isn't open.
+5. The keeper and the SDK's proving client, then Surround: `GoConfig.ticket`,
+   `open_rated_game`, the rating rules, measured against today's 77.6M.
+
+**Decisions** (2026-10-01).
+1. A game reaches the chain only once every seat's wallet has signed its
+   terms.
+2. `open_game` goes in one transaction with the first call that needs the
+   chain.
+3. A rated game's time is its referee's first stamp, checked against the
+   ticket's window.
+4. Rated or not is part of the signed terms (Surround: the ticket digest in
+   `GoConfig`).
+5. `open_game` replaces `create`, `join` and `cancel`; WAITING and CANCELLED
+   go.
+6. Revoking a referee key voids the rated games it started from the
+   revocation time on, and not yet rated.
+
+**Open questions.**
+1. How much skew to allow between the referee's clock and the matchmaker's
+   ticket times.
+2. The cost of `is_valid_signature` for passkey wallets, and accounts that are
+   deployed only on first use.
+3. A game never started is void, so a seat that resigns onchain before the
+   referee's first stamp escapes the rule that a short onchain forfeit still
+   rates the loser. The referee's `Start` after `start_grace_seconds` narrows
+   that window. Is it enough?
+4. An offchain resignation settles in one transaction only if the resigning
+   seat also approves the final state. It has no reason to, and without its
+   approval the state waits out the dispute window, and a second transaction
+   (`resolve`) settles it. A transcript that ends in a seat's own `Resign`
+   could commit at once without approvals: the resignation is that seat's
+   signed concession, and an honest seat signs no other branch past it. The
+   same may hold for a referee's `Flag`, since the referee attests one branch.
+   Both need their edge cases checked (equivocation) before they are decided.
+
 ## More than 2 seats (planned)
 
-*Planned, not built; it would be protocol version 6.* Referee plays exactly 2 seats: `open` asserts `SEATS == 2` in
+*Planned, not built; it would be protocol version 7, after opening by
+signatures (v6).* Referee plays exactly 2 seats: `open` asserts `SEATS == 2` in
 Cairo and the SDK. This section records what more seats need, found by a spike
 that ran a 3-seat game through v4 on 2026-09-30, and proposes how to build it.
 Hashfront launches with 2 seats, and is the first game planned for more. It
@@ -788,21 +982,16 @@ none of this: no seat reveals.
 
 **Seats.** `SEATS` is a constant, so a game that plays 2 to 4 would need a
 deployment per count. Proposal: `GameRules::seats(config)` replaces `SEATS`, so
-Hashfront's map can set it; a 2-seat game returns 2. `open` and `create` check
+Hashfront's map can set it; a 2-seat game returns 2. `open` and `open_game` check
 it against `terms.players`, with at most 16 seats (decided). Everything else
 uses the envelope's per-seat spans.
 
-**Joining.** Proposal: one set of entrypoints for every seat count.
-- `create` takes the config, and so the seat count, plus one optional invitee
-  per seat. The creator takes seat 0.
-- `join` names the seat it fills. It checks the joiner's wallet, key and tip
-  against every seat: two seats sharing a key would let one signature approve
-  for both.
-- The channel opens when the last seat joins, and until then the creator may
-  cancel.
-  - The last join emits JOINED, as today, so the keeper's discovery keeps
-    working.
-  - Earlier joins emit a new kind.
+**Joining.** With opening by signatures (v6), there is nothing to join. Every
+seat's wallet signs the terms and `open_game` checks one signature per seat,
+so no game is ever partly joined, and there is no per-seat `join` or cancel
+while waiting. This is the main reason to build v6 first.
+- `open_game` checks every seat's key and tip against every other: two seats
+  sharing a key would let one signature approve for both.
 - Every seat is stored the same way: a `ChannelSeat(id, seat)` row per seat,
   or lists in `ChannelTerms`, whichever measures cheaper. `get_channel` and the
   SDK's `decodeChannelGame` change shape.
@@ -862,11 +1051,15 @@ spike's collusion scenarios become tests that the new rules must reject.
    charged to the seat that has it, which is noise against clocks of seconds;
    `turn_ms` can serve as a grace if tighter clocks ever need one. Still to
    do: a referee bond that equivocation evidence can slash.
-10. More than 2 seats: designed, not built. See
+10. More than 2 seats: designed, not built, protocol v7. See
     [More than 2 seats](#more-than-2-seats-planned).
 11. ~~Referee randomness.~~ Done, in protocol v5: a timed game can take its
     randomness from its referee, so no seat has to be online to reveal. See
     [Referee randomness](#referee-randomness).
+12. Opening by signatures: designed, not built, protocol v6. A game reaches
+    the chain only when every seat has signed its terms, in one transaction
+    with its first onchain call. See
+    [Opening by signatures](#opening-by-signatures-planned).
 
 ## Development
 
