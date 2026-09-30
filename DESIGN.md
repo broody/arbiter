@@ -553,12 +553,10 @@ games, so it comes before more than 2 seats (next section).
   against the referee's committed chain, so it needs no signature. A backup
   keeper that holds the referee's chain secret can unfreeze the game, which
   keeps real outages short.
-- A pause has an end. The seats can all agree to void the game, and after a
-  long limit it ends void, with no result (a new reason). Falling back to a
-  seat's reveal instead would let a colluding referee re-roll by going quiet.
-  Void only lets it cancel a game, and only by stalling visibly for days.
-
-Still open: the limit (a week?).
+- A pause has an end. The seats can all agree to void the game, and after 3
+  days it ends void, with no result (a new reason). Falling back to a seat's
+  reveal instead would let a colluding referee re-roll by going quiet. Void
+  only lets it cancel a game, and only by stalling visibly for 3 days.
 
 ## More than 2 seats (planned)
 
@@ -685,6 +683,7 @@ referee colluding with that seat could use.
   it.
 
 **Outcomes.** `Outcome { finished, winner, reason }` names one winner.
+Hashfront rates games by finishing place (decided), so outcomes carry places.
 Proposal:
 - Add each seat's place: 1 for first, with a shared place for draws and
   teams.
@@ -764,8 +763,7 @@ spike's collusion scenarios become tests that the new rules must reject.
    Surround stays at 2.
 7. Breaking changes are fine. Neither Surround nor referee is in production,
    and Surround is updated alongside.
-
-Still open: whether Hashfront rates games by place.
+8. Hashfront rates games by finishing place, so outcomes carry places.
 
 ## Roadmap
 
