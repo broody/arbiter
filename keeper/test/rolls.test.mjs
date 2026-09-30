@@ -47,6 +47,9 @@ test('the keeper signs one tip per game, from its randomness secret', async () =
   assert.equal((await archive.tip(ids, config)).rng_tip, rng_tip);
   assert.notEqual((await archive.tip({ ...ids, game_id: 8n }, config)).rng_tip, rng_tip);
   await rejects(archive.tip(ids, { target: 'x' }), 400, /Invalid config/);
+  // A chain is as long as the game may run: no tip for a game too long to be admitted here.
+  const short = await open(memoryBackend(), { maxSteps: 64 });
+  await rejects(short.tip(ids, config), 409, /can run to 97 steps; this keeper keeps at most 64/);
   // Another secret gives another chain, and no secret gives none.
   const other = await open(memoryBackend(), { referee: { ...referee, rngSecret: 0x1234n } });
   assert.notEqual((await other.tip(ids, config)).rng_tip, rng_tip);

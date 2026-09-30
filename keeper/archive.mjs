@@ -217,8 +217,13 @@ export class Archive {
         fail(409, 'The game did not ask this referee for randomness');
       config = created.config;
     }
-    let chain;
-    try { chain = this.#chain(ids, config); } catch (e) { fail(400, `Invalid config: ${e.message}`); }
+    // A chain costs a hash per step the config allows: no longer than a game this keeper would admit.
+    let steps;
+    try { steps = entry.game.maxSteps(config); } catch { steps = NaN; }
+    if (!Number.isSafeInteger(steps) || steps < 0) fail(400, 'Invalid config');
+    if (steps + 1 > entry.maxSteps)
+      fail(409, `The game can run to ${steps + 1} steps; this keeper keeps at most ${entry.maxSteps} per game on channel ${hex(ids.channel)}`);
+    const chain = this.#chain(ids, config);
     const message = tipHash(entry.game, ids.chain_id, ids.channel, ids.game_id, chain.tip);
     return { rng_tip: chain.tip, signature: sign(message, this.refereeKey) };
   }

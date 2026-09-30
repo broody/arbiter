@@ -13,7 +13,7 @@ export const ENTRYPOINTS = { get_channel: 'get_channel', submit_history: 'submit
 
 /** `ChannelUpdated.kind` values (referee_dojo::models). */
 export const UPDATES = { CREATED: 0, JOINED: 1, CANCELLED: 2, DISPUTED: 3, RECEIVED: 4, RESOLVED: 5, FORCED: 6, RESUMED: 7,
-  TIMED_OUT: 8, RESIGNED: 9, ACKNOWLEDGED: 10 };
+  TIMED_OUT: 8, RESIGNED: 9, ACKNOWLEDGED: 10, ROLLED: 11, VOIDED: 12 };
 
 // A Dojo 1.8 world emits every game event as its own `EventEmitted`.
 const EVENT_EMITTED = BigInt(hash.getSelectorFromName('EventEmitted'));

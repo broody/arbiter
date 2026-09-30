@@ -194,8 +194,9 @@ export const seed = (game, context, seq, requester, revealer) =>
  * A long hash chain kept as checkpoints, for a referee that holds one per
  * game: `tip` is the value it commits (`rngChain(seed, length)[length]`), and
  * `before(head)` the value that hashes to `head`. Building it costs `length`
- * hashes; it keeps one value in every `every`, and a reveal then costs about
- * one hash.
+ * hashes; it keeps one value in every `every`, and the stretch between two
+ * checkpoints it last read. Reveals walk the chain back one value at a time,
+ * so they cost about two hashes each.
  */
 export class RngChain {
   #marks; #index = new Map(); #segment = null;
@@ -215,19 +216,21 @@ export class RngChain {
     this.#index.set(value, length);
   }
 
-  // The chain from its checkpoint at `base` up to the next one.
+  // The chain from its checkpoint at `base` up to the next one, with each
+  // value's place in the chain.
   #values(base) {
     if (this.#segment?.base !== base) {
       const values = [this.#marks[base / this.every]];
       while (values.length < this.every && base + values.length <= this.length) values.push(rngNext(values.at(-1)));
-      this.#segment = { base, values };
+      this.#segment = { base, values, index: new Map(values.map((value, i) => [value, base + i])) };
     }
     return this.#segment.values;
   }
 
   /** The value that hashes to `head`, or null if `head` is not on the chain or is its first value. */
   before(head) {
-    let value = felt(head), at = null;
+    // Where `head` is: in the stretch last read, or a walk forward to the next checkpoint.
+    let value = felt(head), at = this.#segment?.index.get(value) ?? null;
     for (let ahead = 0; ahead <= this.every && at === null; ahead++, value = rngNext(value)) {
       if (this.#index.has(value)) at = this.#index.get(value) - ahead;
     }
@@ -551,8 +554,8 @@ export function replay(game, terms, start, witness, signed) {
  * Each step record is `{ seq, transcript, message, step, signature, seat }`:
  * the position the step was signed at, its message, the signed step and its
  * seat. In a timed game records also carry the referee's `stamp` and
- * `attestation`, and the referee's `flag` records have seat REFEREE and a zero
- * signature. Our own timed steps wait in `pending` until they come back
+ * `attestation`, and the referee's own records (a flag, a start, a roll) have
+ * seat REFEREE and a zero signature. Our own timed steps wait in `pending` until they come back
  * stamped, and we can sign ahead of them within our turn. `lastSigned[seat]` is the record of the last step this client signed
  * for that seat, or null; `sign` refuses to sign anything that would
  * contradict it. Persist it apart from the transcript (`@referee/sdk/store`
@@ -598,8 +601,8 @@ export class Session {
   }
 
   /**
-   * As the referee of a timed game: stamp a seat's signed step, or a `flag`
-   * step, at referee time `stamp`; attest the state it reaches; and apply it.
+   * As the referee of a timed game: stamp a seat's signed step, or a step of
+   * the referee's own (a flag, a start, a roll), at referee time `stamp`; attest the state it reaches; and apply it.
    * Returns the record to send to the seats. `Referee` chooses the stamps.
    */
   stamp(signed, stamp, privateKey) {
@@ -692,7 +695,7 @@ export class Session {
     check(mark.seq <= tip.seq, `Session is behind seq ${mark.seq}, which this key signed`);
     const at = mark.seq === tip.seq ? { transcript: tip.transcript, message }
       : [...this.steps, ...this.pending][mark.seq - this.start.seq];
-    // The referee's step (a start) took that position before our step reached
+    // The referee's step (a start, a roll) took that position before our step reached
     // it. Our step was never stamped, so no timed replay can use it: signing
     // on from here is no equivocation.
     if (at.seat === REFEREE && felt(at.transcript) === felt(mark.transcript)) return;
@@ -716,8 +719,8 @@ export class Session {
     this.scratch = scratch;
     this.steps.push(record);
     // Our oldest pending step came back stamped. Any other step at its seq (a
-    // flag, or the other seat resigning) leaves every pending step off the
-    // history.
+    // referee step, or the other seat resigning) leaves every pending step off
+    // the history.
     const oldest = this.#pending[0];
     if (oldest) {
       if (oldest.record.seq === record.seq && oldest.record.message === record.message) this.#pending.shift();
@@ -985,7 +988,7 @@ export const encodeSteps = (game, list) => [BigInt(list.length), ...list.flatMap
 /**
  * Each seat's last signature among signed step records (`{ seat, signature }`),
  * or ZERO_SIGNATURE for a seat with no step: what replay verifies. The
- * referee's `flag` records are skipped.
+ * referee's own records are skipped.
  */
 export function finalSignatures(records, seats = 2) {
   const finals = Array.from({ length: seats }, () => ZERO_SIGNATURE);

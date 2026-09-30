@@ -7,7 +7,7 @@ One service that keeps referee games moving when players can't or won't:
 | archive | Keeps each game's signed transcript ([`archive.mjs`](archive.mjs)). Clients register a session and send steps. The keeper stores only steps that `Session.receive` verifies. |
 | transport | Forwards steps between the seats. A client long-polls for the other seat's steps or follows a server-sent event stream. A player who refreshes, switches device or comes back online restores the game from here. |
 | watcher | Reads every open game's channel ([`watch.mjs`](watch.mjs)). It answers disputes once, resolves expired ones and settles finished games, in segments when long, from the keeper's own account ([`chain.mjs`](chain.mjs)). |
-| referee | Optional. With a referee key, it registers the timed games that join naming that key, stamps their steps, starts their clocks, flags a seat whose time runs out, acknowledges their disputes and returns them from forced play. |
+| referee | Optional. With a referee key, it registers the timed games that join naming that key, stamps their steps, starts their clocks, flags a seat whose time runs out, acknowledges their disputes and returns them from forced play. With a randomness secret too, it gives the games that ask their rolls. |
 
 ```bash
 KEEPER_PRIVATE_KEY=0x... node keeper/server.mjs keeper/config.local.json   # see config.example.json
@@ -52,6 +52,11 @@ await keeper.submit(session, { store });                 // every pending step, 
   honest player's worst case is losing on time. Players opt in per game by
   accepting the referee's key in the terms. Use a key for refereeing that is
   kept apart from the keeper's account key.
+- **And with the dice, when a game asks.** In a game that takes its randomness
+  from the referee, the keeper can't bias a roll and can't know one before
+  the step that asks for it arrives. It could tell the acting player its next
+  value ahead of time, so players trust it not to. Keep the randomness secret
+  as safe as the referee key.
 
 ## Archive
 
@@ -129,6 +134,35 @@ that key (`clock.referee`):
 - **Other keepers.** A keeper that is not a game's referee archives and
   forwards only stamped steps, and settles and answers disputes as usual.
 
+### Randomness
+
+A referee started with a randomness secret (`referee.rng_secret_env`) also
+gives a timed game its rolls, when the game's terms carry the referee's
+hash-chain tip (`clock.rng_tip`). No seat then has to be online to reveal.
+- **Tips.** `POST /games/:channel/:game/tip` returns `{ rng_tip, signature }`:
+  the tip of the keeper's chain for that game, and the referee's signature
+  over it (`tipHash`). The last seat brings both to `join`, which checks the
+  signature. The same game always gets the same tip.
+  - For an anchored game, the keeper reads the created game from its channel,
+    and answers only if the creator asked this referee for randomness (a
+    nonzero `clock.rng_tip` at `create`).
+  - A game no channel anchors sends its `config`, and puts the tip in the
+    terms its wallets sign.
+- **One secret.** Each chain comes from the secret and the game's ids, so the
+  keeper stores nothing, and a backup with the secret can stand in. A chain
+  has a value for every roll the game's `maxSteps(config)` allow. Building
+  one costs a hash per value: about 0.1 ms each.
+- **Rolls.** When it stamps a step that asks for randomness, the keeper reveals
+  its next value as the next step, stamped at the same time. The roll charges
+  nobody's clock, and nobody is flagged while one is pending.
+- **Its own tips only.** It refuses to register a game that names it as
+  referee with a randomness tip that isn't its own: it couldn't roll for it.
+- **Restarts and forced play.** On start it answers a roll it owed when it
+  stopped. A roll a seat asked for onchain, in forced play, is answered as
+  soon as the channel resumes; the `start` still follows the start grace.
+  If the keeper stays down, anyone holding its next value may post it onchain
+  (`roll`), and after 3 days the game can be ended void.
+
 ## Watcher
 
 Each `poll_seconds`, for each open game:
@@ -179,8 +213,9 @@ The API speaks JSON, with BigInts encoded as `{ "$n": "<decimal>" }`
 | `GET /games/:channel/:game/steps` | `?from=SEQ&wait=SECONDS` | `{ start, seq, transcript, steps }`: step records from `from`, long-polling up to `max_wait_seconds` |
 | `POST /games/:channel/:game/steps` | `{ from, steps: [{ step, signature, stamp?, attestation? }] }` | `{ start, seq, transcript, accepted, switched? }` |
 | `GET /games/:channel/:game/evidence` | | `{ evidence }` |
+| `POST /games/:channel/:game/tip` | `{ config? }` | `{ rng_tip, signature }`: the referee's randomness tip for the game and its signature over it. `config` is for a game no channel anchors |
 | `GET /games/:channel/:game/events` | `?from=SEQ` | A `text/event-stream`: an event `steps` whose data is `{ start, seq, transcript, steps }` each time the archive gets steps, and a comment line every `heartbeat_seconds` |
-| `GET /info`, `GET /health` | | `/info` includes the `referee` public key, or null, the `limits`, and the `capacity`: `{ open, max_open_games, reserved_games, free, free_unreserved }` |
+| `GET /info`, `GET /health` | | `/info` includes the `referee` public key, or null, whether it gives `randomness`, the `limits`, and the `capacity`: `{ open, max_open_games, reserved_games, free, free_unreserved }` |
 
 POSTs are rate-limited per client (`rate_per_minute`) and capped at
 `max_body_bytes`. Waiting clients, long polls and streams together, are
@@ -229,6 +264,9 @@ each entry's `max_steps`. Steps to a closed game get 409.
 - `referee.private_key_env` (default `KEEPER_REFEREE_KEY`) names the
   environment variable holding the referee's private key. Without `referee`,
   the keeper referees nothing.
+- `referee.rng_secret_env` names the environment variable holding the
+  referee's randomness secret, a felt. Without it, the keeper gives no
+  randomness and refuses the games that would need it.
 
 ## Tests
 
@@ -237,8 +275,8 @@ each entry's `max_steps`. Steps to a closed game get 409.
   terms reads against a fake RPC provider. They include the admission attack
   (unanchored games filling a wallet's cap), self-registration from events,
   answering a dispute once, the fallback when an acknowledgement doesn't land,
-  starts after a join and after forced play, chained segments and no flag
-  after a step the cap refused.
+  starts after a join and after forced play, chained segments, no flag
+  after a step the cap refused, and the referee's tips and rolls.
 - `node keeper/bench.mjs [STEPS]`: the latency a referee adds, from the SDK
   work per step to a step's trip through a refereeing keeper to the other
   seat's stream, with the memory and the file store.
@@ -246,5 +284,8 @@ each entry's `max_steps`. Steps to a closed game get 409.
   [`katana.mjs`](katana.mjs) with real transactions. The keeper answers a stale
   dispute and resolves it into forced play, settles a finished game and
   resolves it to SETTLED, and referees a timed game: it flags the stalling seat
-  and settles the flag with reason TIMEOUT. It passed with katana 1.7.1 and
-  sozo 1.8.0 in about a minute. sozo 1.8.5 fails to deploy the world on katana 1.7.1.
+  and settles the flag with reason TIMEOUT. It also gives a game its
+  randomness: the join carries its signed tip, it rolls for a gamble, and the
+  channel replays the roll. It passed with katana 1.7.1 and sozo 1.8.0 in
+  about a minute and a half. sozo 1.8.5 fails to deploy the world on katana
+  1.7.1.
