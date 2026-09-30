@@ -1,10 +1,11 @@
 use referee::{
     Batch, Envelope, Move, REASON_RESIGN, Signature, apply_steps, approve_all, checkpoint_hash,
     context_hash, force, live_hash, open, referee_resume_hash, replay, rng_next, state_hash,
+    terms_message,
 };
 use crate::fixtures::{
-    CHECKPOINT, CONTEXT, LIVE_HASH, REFEREE_RESUME_HASH, RNG_LEN, SEED_0, SEED_1, STATE_HASH, acks,
-    expected, finals, signatures, steps, terms,
+    CHECKPOINT, CONTEXT, LIVE_HASH, REFEREE_RESUME_HASH, RNG_LEN, SEED_0, SEED_1, STATE_HASH,
+    TERMS_MESSAGE, acks, expected, finals, signatures, steps, terms,
 };
 use crate::{ADD, Action, Counter, CounterRules, GAMBLE};
 
@@ -253,4 +254,21 @@ fn untimed_games_take_no_flag() {
 fn referee_messages_match_sdk() {
     assert_eq!(live_hash::<CounterRules>(CONTEXT, 3, 12345), LIVE_HASH);
     assert_eq!(referee_resume_hash::<CounterRules>(CONTEXT, 2, STATE_HASH), REFEREE_RESUME_HASH);
+}
+
+#[test]
+fn terms_message_matches_sdk() {
+    // What a wallet signs to agree to the terms: the SDK's `termsTypedData`,
+    // hashed as starknet.js does for the account that signs it.
+    let t = terms();
+    let account = *t.players.at(0);
+    assert_eq!(
+        terms_message::<CounterRules>(t.chain_id, t.game_id, CONTEXT, account), TERMS_MESSAGE,
+    );
+    // Another account, game or context signs another message.
+    let other = terms_message::<CounterRules>(t.chain_id, t.game_id, CONTEXT, *t.players.at(1));
+    assert!(other != TERMS_MESSAGE);
+    assert!(
+        terms_message::<CounterRules>(t.chain_id, t.game_id + 1, CONTEXT, account) != TERMS_MESSAGE,
+    );
 }

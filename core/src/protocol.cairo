@@ -7,13 +7,15 @@ use crate::types::{
     Signature, Terms, TimeControl,
 };
 
-/// Version 5: randomness from the referee (`TimeControl.rng_tip`), and
-/// referee steps no longer count as signer changes. Version 4 added
+/// Version 6: a timed game's clock keeps its first stamp (`Clock.started`),
+/// and a channel opens on every seat's signed terms. Version 5: randomness
+/// from the referee (`TimeControl.rng_tip`), and referee steps no longer count
+/// as signer changes. Version 4 added
 /// `Move::Start`, recommits only after a reveal, a transcript cap
 /// (`GameRules::max_steps`), and disputes a live referee returns to offchain
 /// play. Version 3 added optional referee clocks; version 2 made steps
 /// seat-implicit `Move`s and replays take one final signature per seat.
-pub const PROTOCOL_VERSION: felt252 = 5;
+pub const PROTOCOL_VERSION: felt252 = 6;
 
 // Stark signatures require a message below 2^251. Use an explicit 250-bit mask
 // in every language; never reinterpret a field hash as an unrestricted message.
@@ -77,12 +79,32 @@ pub fn referee_resume_hash<impl R: GameRules>(
 }
 
 /// Message the referee signs to commit its hash-chain tip to one game, before
-/// the game's context exists: the binding checks it when the last seat joins.
-/// A tip a seat made up would let that seat know every roll.
+/// the seats sign its terms: the binding checks it when the game opens. A tip
+/// a seat made up would let that seat know every roll.
 pub fn tip_hash<impl R: GameRules>(
     chain_id: felt252, channel: felt252, game_id: felt252, tip: felt252,
 ) -> felt252 {
     signing_hash(array![R::TAG, 'REFEREE_TIP_V1', chain_id, channel, game_id, tip].span())
+}
+
+/// SNIP-12 (revision 1) type hashes of the typed data a seat's wallet signs to
+/// agree to a game's terms: `StarknetDomain(name, version, chainId, revision)`
+/// and `Game(game: shortstring, game_id: felt, context: felt)`, as the SDK's
+/// `termsTypedData` defines them.
+const DOMAIN_TYPE_HASH: felt252 = 0x1ff2f602e42168014d405a94f75e8a93d640751d71d16311266e140d8b0a210;
+const GAME_TYPE_HASH: felt252 = 0xd88a9d4412b386c3c7cbac82410db786655dee114866b6dc5db898c6fabbe7;
+
+/// The SNIP-12 message hash a seat's wallet at `account` signs to agree to a
+/// game: the SDK's `termsTypedData`, whose domain is referee's on `chain_id`
+/// and whose message names the game and binds every term through `context`.
+/// The channel opens the game only once every seat's account accepts its
+/// signature (`is_valid_signature`).
+pub fn terms_message<impl R: GameRules>(
+    chain_id: felt252, game_id: felt252, context: felt252, account: felt252,
+) -> felt252 {
+    let domain = poseidon_hash_span(array![DOMAIN_TYPE_HASH, 'referee', 1, chain_id, 1].span());
+    let game = poseidon_hash_span(array![GAME_TYPE_HASH, R::TAG, game_id, context].span());
+    poseidon_hash_span(array!['StarkNet Message', domain, account, game].span())
 }
 
 /// Message every seat signs to void a game whose roll waits for a referee that
@@ -180,7 +202,9 @@ pub fn open<impl R: GameRules, +Drop<R::State>>(terms: @Terms<R::Config>) -> Env
     let (clock, rng_referee) = match *terms.clock {
         Option::Some(time) => (
             Option::Some(
-                Clock { seats: R::Time::open(time.settings, R::SEATS), used: 0, stamp: 0 },
+                Clock {
+                    seats: R::Time::open(time.settings, R::SEATS), used: 0, stamp: 0, started: 0,
+                },
             ),
             time.rng_tip,
         ),
@@ -548,7 +572,7 @@ fn advance<
             let seats = R::Time::settle(
                 *settings, clock.seats, turn_seat, clock.used, false, @env.game,
             );
-            env.clock = Option::Some(Clock { seats, used: 0, stamp: clock.stamp });
+            env.clock = Option::Some(Clock { seats, used: 0, ..clock });
         }
     }
     // Only seats count as signers: a referee step acknowledges nothing.
@@ -572,7 +596,7 @@ fn advance<
 /// stamp, paused or not, and charges nobody. Nor does any step while the
 /// referee owes a roll (`payer` is `REFEREE`): that wait is nobody's time. Only
 /// a roll may go unstamped among referee steps: anyone posts it onchain in
-/// forced play.
+/// forced play. The game's first stamp also sets `started`, once.
 fn charge<impl R: GameRules>(
     settings: Span<felt252>,
     clock: Clock,
@@ -591,6 +615,12 @@ fn charge<impl R: GameRules>(
         },
     };
     assert(t != 0, 'Invalid stamp');
+    // The game's first stamp, whoever's step it is, is when it started.
+    let clock = if clock.started == 0 {
+        Clock { started: t, ..clock }
+    } else {
+        clock
+    };
     let flag = referee_step == Option::Some(RefereeStep::Flag);
     if referee_step == Option::Some(RefereeStep::Start) || payer == REFEREE {
         assert(t >= clock.stamp, 'Stamp out of order');
@@ -615,7 +645,7 @@ fn charge<impl R: GameRules>(
     assert(!expired, 'Flag fell');
     if reveal {
         let seats = R::Time::settle(settings, clock.seats, payer, elapsed, true, state);
-        return Clock { seats, used: clock.used, stamp: t };
+        return Clock { seats, stamp: t, ..clock };
     }
     Clock { used, stamp: t, ..clock }
 }

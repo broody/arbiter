@@ -8,10 +8,11 @@
 // Usage (from the repo root): node sdk/scripts/gen-counter-fixtures.mjs
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { typedData } from 'starknet';
 import {
   MOVE_FLAG, MOVE_PLAY, MOVE_PLAY_RANDOM, MOVE_RECOMMIT, MOVE_REVEAL, MOVE_START, REFEREE, RngChain, Session, applyStep,
   checkpointHash, contextHash, flag, hex, liveHash, open, play, playRandom, publicKey, recommit, refereeResumeHash, reveal,
-  rngChain, sign, start, stateHash, tag, tipHash, verify, voidHash,
+  rngChain, sign, start, stateHash, tag, termsTypedData, tipHash, verify, voidHash,
 } from '../src/index.mjs';
 
 import { ADD, GAMBLE, counter, hourglassCounter } from '../examples/counter.mjs';
@@ -145,7 +146,7 @@ const cairoOf = game => (game === hourglassCounter ? {
   clock: c => `encode(@StandardClock { banks: array![${c.banks.join(', ')}].span(), periods: array![${c.periods.join(', ')}].span() })`,
 });
 const clockCairo = (game, c) => (c == null ? 'Option::None'
-  : `Option::Some(Clock { seats: ${cairoOf(game).clock(c.seats)}, used: ${c.used}, stamp: ${c.stamp} })`);
+  : `Option::Some(Clock { seats: ${cairoOf(game).clock(c.seats)}, used: ${c.used}, stamp: ${c.stamp}, started: ${c.started} })`);
 const termsCairo = (t, game = counter) => `Terms {
         chain_id: ${h(t.chain_id)},
         channel: ${h(t.channel)},
@@ -248,6 +249,8 @@ pub const ROLLED_STATE_HASH: felt252 = ${h(rolled.stateHash())};
 /// state of the untimed game.
 pub const TIP_HASH: felt252 = ${h(tipHash(counter, terms.chain_id, terms.channel, 5n, refereeChain.tip))};
 pub const VOID_HASH: felt252 = ${h(voidHash(counter, context, 2, finalHash))};
+/// What seat 0's wallet signs to agree to the terms (SNIP-12, termsTypedData in the SDK).
+pub const TERMS_MESSAGE: felt252 = ${h(BigInt(typedData.getMessageHash(termsTypedData(counter, terms), terms.players[0])))};
 
 pub fn terms() -> Terms<Config> {
     ${termsCairo(terms)}

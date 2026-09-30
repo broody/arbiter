@@ -39,11 +39,12 @@ test('the referee stamps each step and every seat verifies the stamps', () => {
   assert.equal(first.stamp, T0);
   play1(referee, seat, add(3), T0 + 45000);
   // Seat 1 spent its 30 s allowance and 15 s of bank, then gained 2 s.
-  assert.deepEqual(seat.env.clock, { seats: { banks: [62000, 47000], periods: [] }, used: 0, stamp: T0 + 45000 });
+  // The first stamp is when the game started.
+  assert.deepEqual(seat.env.clock, { seats: { banks: [62000, 47000], periods: [] }, used: 0, stamp: T0 + 45000, started: T0 });
   assert.equal(seat.stateHash(), referee.session.stateHash());
   const copy = Session.import(counter, structuredClone(seat.export()));
   assert.equal(copy.stateHash(), seat.stateHash());
-  assert.equal(copy.export().version, 5);
+  assert.equal(copy.export().version, 6);
 });
 
 test('a seat whose time runs out is flagged', () => {
@@ -78,7 +79,7 @@ test('reveals are timed on their own and leave the turn allowance alone', () => 
   play1(referee, seat, playRandom({ kind: GAMBLE, amount: 0 }, chains[1][7]), T0 + 40000);
   play1(referee, seat, reveal(chains[0][7]), T0 + 45000);
   // Seat 1 paid 10 s of bank for its gamble; the roll passed the turn and added its increment.
-  assert.deepEqual(seat.env.clock, { seats: { banks: [62000, 52000], periods: [] }, used: 0, stamp: T0 + 45000 });
+  assert.deepEqual(seat.env.clock, { seats: { banks: [62000, 52000], periods: [] }, used: 0, stamp: T0 + 45000, started: T0 });
 });
 
 test('a restarted referee does not charge for its downtime', () => {

@@ -2,17 +2,18 @@
 //! `src/systems/channel.cairo`. Storage, caller authentication, proof checks
 //! and signature checks belong to the binding (e.g. a Dojo system): it passes
 //! the caller's seat, the block time and number, and whether a submission
-//! carried every seat's approval.
+//! carried every seat's approval. A game exists onchain only once it opens,
+//! on every seat's signed terms: there is no game waiting for a seat.
 use crate::protocol::{due, forfeit, state_hash};
 use crate::rules::GameRules;
 use crate::types::{DRAW, Envelope, Outcome, REASON_ABANDON, REASON_RESIGN, REASON_VOID, REFEREE};
 
-pub const WAITING: u8 = 0;
+/// A game id no channel has opened: a binding reads a missing state as 0.
+pub const UNOPENED: u8 = 0;
 pub const ACTIVE: u8 = 1;
 pub const DISPUTE: u8 = 2;
 pub const FORCED: u8 = 3;
 pub const SETTLED: u8 = 4;
-pub const CANCELLED: u8 = 5;
 
 pub const MIN_RESPONSE_SECONDS: u32 = 300;
 pub const MAX_RESPONSE_SECONDS: u32 = 604800;
@@ -70,48 +71,33 @@ pub fn state_ref<impl R: GameRules, +Serde<R::State>, +Drop<R::State>>(
     }
 }
 
-pub fn create(response_seconds: u32) -> Channel {
+/// Open a channel once every seat has signed its terms (the binding checks the
+/// signatures): `context` binds them, and `anchor` is the opening envelope.
+/// It starts live, in offchain play.
+pub fn open(
+    context: felt252, anchor: StateRef, response_seconds: u32, referee_rng: bool, block: u64,
+) -> Channel {
     assert(
         response_seconds >= MIN_RESPONSE_SECONDS && response_seconds <= MAX_RESPONSE_SECONDS,
         'Invalid response window',
     );
-    let empty = StateRef { hash: 0, seq: 0, support_turn: 0, due: 0, outcome: unfinished() };
+    assert(context != 0, 'Invalid context');
+    assert(anchor.seq == 0 && !anchor.outcome.finished, 'Invalid opening state');
     Channel {
-        status: WAITING,
+        status: ACTIVE,
         epoch: 0,
-        context: 0,
+        context,
         response_seconds,
-        anchor: empty,
-        candidate: empty,
-        anchor_block: 0,
-        candidate_block: 0,
+        anchor,
+        candidate: anchor,
+        anchor_block: block,
+        candidate_block: block,
         deadline: 0,
         acked_epoch: 0,
         acked_deadline: 0,
-        referee_rng: false,
+        referee_rng,
         result: unfinished(),
     }
-}
-
-/// The last seat joined. `anchor` is the opening envelope, which needs every
-/// seat's randomness tip and so cannot exist before now.
-pub fn join(mut channel: Channel, context: felt252, anchor: StateRef, block: u64) -> Channel {
-    assert(channel.status == WAITING, 'Not waiting');
-    assert(context != 0, 'Invalid context');
-    assert(anchor.seq == 0 && !anchor.outcome.finished, 'Invalid opening state');
-    channel.context = context;
-    channel.anchor = anchor;
-    channel.candidate = anchor;
-    channel.anchor_block = block;
-    channel.candidate_block = block;
-    channel.status = ACTIVE;
-    channel
-}
-
-pub fn cancel(mut channel: Channel) -> Channel {
-    assert(channel.status == WAITING, 'Not waiting');
-    channel.status = CANCELLED;
-    channel
 }
 
 /// A state proved or replayed from the anchor, or from the candidate (the

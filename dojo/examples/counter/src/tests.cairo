@@ -1,3 +1,5 @@
+use core::hash::HashStateTrait;
+use core::pedersen::PedersenTrait;
 use dojo::model::ModelStorage;
 use dojo::world::{WorldStorage, WorldStorageTrait, world};
 use dojo_cairo_test::{
@@ -9,7 +11,8 @@ use referee::clocks::{Standard, encode};
 use referee::{
     Batch, Envelope, Move, REASON_ABANDON, REASON_TIMEOUT, REASON_VOID, REFEREE, Signature, Terms,
     TimeControl, action_hash, actor, apply_steps, checkpoint_hash, context_hash, force, live_hash,
-    open, referee_resume_hash, reopen_hash, roll, stamp_hash, state_hash, tip_hash, void_hash,
+    open, referee_resume_hash, reopen_hash, roll, stamp_hash, state_hash, terms_message, tip_hash,
+    void_hash,
 };
 use referee_counter::{ADD, Action, Config, Counter, CounterRules, GAMBLE};
 use referee_dojo::channel::read;
@@ -18,8 +21,10 @@ use referee_dojo::models::{
     m_ProverAllowed,
 };
 use referee_testing::{chain_value, public_key, sign};
-use starknet::ContractAddress;
+use starknet::syscalls::{deploy_syscall, get_class_hash_at_syscall};
 use starknet::testing::{set_account_contract_address, set_block_timestamp, set_contract_address};
+use starknet::{ContractAddress, SyscallResultTrait, get_tx_info};
+use crate::account::TestAccount;
 use crate::{ICounterChannelDispatcher, ICounterChannelDispatcherTrait, channel};
 
 const PK_A: felt252 = 0x1a2b3c;
@@ -31,13 +36,49 @@ const SEED_REF: felt252 = 0x5eed7e;
 const RNG_LEN: u32 = 16;
 const WINDOW: u32 = 3600;
 const TARGET: u8 = 20;
+/// Clients choose a game's id before its seats sign the terms.
+const GAME_ID: felt252 = 0x6a3e;
+/// The wallets' own keys, apart from the per-game session keys.
+const WALLET_A: felt252 = 0xa11ce5;
+const WALLET_B: felt252 = 0xb0b5;
+
+/// A test wallet (`TestAccount`) deployed from zero with `salt`, at the
+/// address Starknet derives for it.
+fn wallet(salt: felt252, key: felt252) -> ContractAddress {
+    let class_hash: felt252 = TestAccount::TEST_CLASS_HASH.into();
+    let calldata = PedersenTrait::new(0).update(public_key(key)).update(1).finalize();
+    let hash = PedersenTrait::new(0)
+        .update('STARKNET_CONTRACT_ADDRESS')
+        .update(0)
+        .update(salt)
+        .update(class_hash)
+        .update(calldata)
+        .update(5)
+        .finalize();
+    let hash: u256 = hash.into();
+    let bound: u256 = 0x800000000000000000000000000000000000000000000000000000000000000 - 256;
+    let address: felt252 = (hash % bound).try_into().unwrap();
+    address.try_into().unwrap()
+}
 
 fn ALICE() -> ContractAddress {
-    'ALICE'.try_into().unwrap()
+    wallet('ALICE', WALLET_A)
 }
 
 fn BOB() -> ContractAddress {
-    'BOB'.try_into().unwrap()
+    wallet('BOB', WALLET_B)
+}
+
+fn deploy_wallet(salt: felt252, key: felt252) {
+    let address = wallet(salt, key);
+    if get_class_hash_at_syscall(address).unwrap_or(0.try_into().unwrap()).into() != 0 {
+        return;
+    }
+    let (deployed, _) = deploy_syscall(
+        TestAccount::TEST_CLASS_HASH, salt, array![public_key(key)].span(), true,
+    )
+        .unwrap_syscall();
+    assert_eq!(deployed, address);
 }
 
 fn CAROL() -> ContractAddress {
@@ -69,6 +110,8 @@ fn setup() -> (ICounterChannelDispatcher, WorldStorage) {
         .span();
     let mut world = spawn_test_world(world::TEST_CLASS_HASH, [ndef].span());
     world.sync_perms_and_inits(defs);
+    deploy_wallet('ALICE', WALLET_A);
+    deploy_wallet('BOB', WALLET_B);
     let (contract_address, _) = world.dns(@"channel").unwrap();
     (ICounterChannelDispatcher { contract_address }, world)
 }
@@ -89,22 +132,64 @@ fn blitz() -> Option<TimeControl> {
     )
 }
 
-/// `blitz`, asking for the referee's randomness: at create a nonzero tip asks,
-/// and the referee's signed tip comes with the join.
+/// `blitz`, taking its randomness from the referee: the terms carry the tip of
+/// the referee's hash chain.
 fn rolled_blitz() -> Option<TimeControl> {
-    Option::Some(TimeControl { rng_tip: 1, ..blitz().unwrap() })
+    Option::Some(TimeControl { rng_tip: chain_value(SEED_REF, RNG_LEN), ..blitz().unwrap() })
 }
 
 fn no_tip() -> Signature {
     Signature { r: 0, s: 0 }
 }
 
-/// The tip of the referee's hash chain for game `id`, signed with `key` as
-/// the referee signs it.
-fn referee_tip(game: ICounterChannelDispatcher, id: felt252, key: felt252) -> (felt252, Signature) {
-    let terms = game.terms(id);
-    let tip = chain_value(SEED_REF, RNG_LEN);
-    (tip, sign(tip_hash::<CounterRules>(terms.chain_id, terms.channel, id, tip), key))
+/// Alice (seat 0) and Bob (seat 1) under `clock`, on `game`'s channel.
+fn terms_for(game: ICounterChannelDispatcher, clock: Option<TimeControl>) -> Terms<Config> {
+    Terms {
+        chain_id: get_tx_info().chain_id,
+        channel: game.contract_address.into(),
+        game_id: GAME_ID,
+        prover: game.contract_address.into(),
+        response_seconds: WINDOW,
+        clock,
+        players: array![ALICE().into(), BOB().into()].span(),
+        keys: array![public_key(PK_A), public_key(PK_B)].span(),
+        rng_tips: array![chain_value(SEED_A, RNG_LEN), chain_value(SEED_B, RNG_LEN)].span(),
+        config: Config { target: TARGET },
+    }
+}
+
+/// Seat `seat`'s wallet signature over `terms`, with the wallet key `key`.
+fn wallet_signature(terms: @Terms<Config>, seat: u32, key: felt252) -> Span<felt252> {
+    let context = context_hash::<CounterRules>(terms);
+    let message = terms_message::<
+        CounterRules,
+    >(*terms.chain_id, *terms.game_id, context, *terms.players.at(seat));
+    let signature = sign(message, key);
+    array![signature.r, signature.s].span()
+}
+
+/// Both wallets' signatures over `terms`.
+fn signed_by_both(terms: @Terms<Config>) -> Span<Span<felt252>> {
+    array![wallet_signature(terms, 0, WALLET_A), wallet_signature(terms, 1, WALLET_B)].span()
+}
+
+/// The referee's signature over the randomness tip in `terms`, with `key`,
+/// for the game `id` (zero when the seats reveal).
+fn tip_signature(terms: @Terms<Config>, id: felt252, key: felt252) -> Signature {
+    match *terms.clock {
+        Option::Some(time) => if time.rng_tip == 0 {
+            no_tip()
+        } else {
+            sign(tip_hash::<CounterRules>(*terms.chain_id, *terms.channel, id, time.rng_tip), key)
+        },
+        Option::None => no_tip(),
+    }
+}
+
+/// Open `terms` with both wallets' signatures, sent by Carol: anyone may.
+fn open_as_carol(game: ICounterChannelDispatcher, terms: Terms<Config>) {
+    caller(CAROL());
+    game.open_game(terms, signed_by_both(@terms), tip_signature(@terms, GAME_ID, PK_REF));
 }
 
 /// Standard settings that allow `turn_ms` per turn, refereed by `referee`.
@@ -116,28 +201,16 @@ fn per_turn(referee: felt252) -> TimeControl {
 fn started_with(clock: Option<TimeControl>) -> (ICounterChannelDispatcher, WorldStorage, felt252) {
     let (game, world) = setup();
     game.allow_prover(channel::TEST_CLASS_HASH.try_into().unwrap(), true);
-    caller(ALICE());
-    let id = game
-        .create(
-            TARGET,
-            BOB(),
-            public_key(PK_A),
-            chain_value(SEED_A, RNG_LEN),
-            game.contract_address,
-            WINDOW,
-            clock,
-        );
+    open_as_carol(game, terms_for(game, clock));
     caller(BOB());
-    let (tip, signature) = match clock {
-        Option::Some(time) => if time.rng_tip == 0 {
-            (0, no_tip())
-        } else {
-            referee_tip(game, id, PK_REF)
-        },
-        Option::None => (0, no_tip()),
-    };
-    game.join(id, public_key(PK_B), chain_value(SEED_B, RNG_LEN), tip, signature);
-    (game, world, id)
+    (game, world, GAME_ID)
+}
+
+/// A world that trusts the channel system as its prover, before any game.
+fn trusting() -> ICounterChannelDispatcher {
+    let (game, _) = setup();
+    game.allow_prover(channel::TEST_CLASS_HASH.try_into().unwrap(), true);
+    game
 }
 
 fn opening(terms: @Terms<Config>) -> Envelope<Counter> {
@@ -220,7 +293,7 @@ fn forced_play() -> (ICounterChannelDispatcher, WorldStorage, felt252) {
 }
 
 #[test]
-fn join_fixes_context_and_opening_anchor() {
+fn opening_fixes_context_and_opening_anchor() {
     let (game, world, id) = started();
     let terms = game.terms(id);
     let channel = stored(@world, id);
@@ -232,6 +305,109 @@ fn join_fixes_context_and_opening_anchor() {
     game.get_channel(id).serialize(ref served);
     channel.serialize(ref model);
     assert_eq!(served, model);
+}
+
+#[test]
+fn a_game_opens_on_its_seats_signed_terms_alone() {
+    // Nothing is onchain before it opens.
+    let game = trusting();
+    let terms = terms_for(game, blitz());
+    assert_eq!(get_class_hash_at_syscall(ALICE()).unwrap_syscall().into() != 0, true);
+    // Either seat, or anyone, can send it: here Alice, who signed too.
+    caller(ALICE());
+    game.open_game(terms, signed_by_both(@terms), no_tip());
+    let channel = game.get_channel(GAME_ID);
+    assert_eq!((channel.status, channel.epoch), (ACTIVE, 0));
+    assert_eq!(game.terms(GAME_ID), terms);
+}
+
+#[test]
+#[should_panic(expected: ('Game already open', 'ENTRYPOINT_FAILED'))]
+fn a_game_opens_once() {
+    let (game, _, _) = started();
+    open_as_carol(game, terms_for(game, Option::None));
+}
+
+#[test]
+#[should_panic(expected: ('Invalid wallet signature', 'ENTRYPOINT_FAILED'))]
+fn every_seats_wallet_must_sign() {
+    let game = trusting();
+    let terms = terms_for(game, Option::None);
+    // Alice's wallet signs Bob's message: Bob never agreed.
+    let signatures = array![
+        wallet_signature(@terms, 0, WALLET_A), wallet_signature(@terms, 1, WALLET_A),
+    ];
+    game.open_game(terms, signatures.span(), no_tip());
+}
+
+#[test]
+#[should_panic(expected: ('Invalid wallet signature', 'ENTRYPOINT_FAILED'))]
+fn signatures_over_other_terms_do_not_open_a_game() {
+    let game = trusting();
+    let signed = terms_for(game, Option::None);
+    let terms = Terms { config: Config { target: TARGET + 1 }, ..signed };
+    game.open_game(terms, signed_by_both(@signed), no_tip());
+}
+
+#[test]
+#[should_panic(expected: ('Wrong channel', 'ENTRYPOINT_FAILED'))]
+fn terms_for_another_channel_do_not_open_here() {
+    let game = trusting();
+    let terms = Terms { channel: 'OTHER', ..terms_for(game, Option::None) };
+    game.open_game(terms, signed_by_both(@terms), no_tip());
+}
+
+#[test]
+#[should_panic(expected: ('Wrong chain', 'ENTRYPOINT_FAILED'))]
+fn terms_for_another_chain_do_not_open_here() {
+    let game = trusting();
+    let terms = Terms { chain_id: 'SN_OTHER', ..terms_for(game, Option::None) };
+    game.open_game(terms, signed_by_both(@terms), no_tip());
+}
+
+#[test]
+#[should_panic(expected: ('Invalid game id', 'ENTRYPOINT_FAILED'))]
+fn a_game_id_is_never_zero() {
+    let game = trusting();
+    let terms = Terms { game_id: 0, ..terms_for(game, Option::None) };
+    game.open_game(terms, signed_by_both(@terms), no_tip());
+}
+
+#[test]
+#[should_panic(expected: ('Shared session key', 'ENTRYPOINT_FAILED'))]
+fn seats_do_not_share_a_session_key() {
+    let game = trusting();
+    let keys = array![public_key(PK_A), public_key(PK_A)].span();
+    let terms = Terms { keys, ..terms_for(game, Option::None) };
+    game.open_game(terms, signed_by_both(@terms), no_tip());
+}
+
+#[test]
+#[should_panic(expected: ('Invalid tip', 'ENTRYPOINT_FAILED'))]
+fn seats_do_not_share_a_randomness_tip() {
+    let game = trusting();
+    let tip = chain_value(SEED_A, RNG_LEN);
+    let terms = Terms { rng_tips: array![tip, tip].span(), ..terms_for(game, Option::None) };
+    game.open_game(terms, signed_by_both(@terms), no_tip());
+}
+
+#[test]
+#[should_panic(expected: ('Invalid players', 'ENTRYPOINT_FAILED'))]
+fn one_wallet_takes_one_seat() {
+    let game = trusting();
+    let players = array![ALICE().into(), ALICE().into()].span();
+    let terms = Terms { players, ..terms_for(game, Option::None) };
+    let signatures = array![
+        wallet_signature(@terms, 0, WALLET_A), wallet_signature(@terms, 1, WALLET_A),
+    ];
+    game.open_game(terms, signatures.span(), no_tip());
+}
+
+#[test]
+#[should_panic(expected: ('Unknown channel', 'ENTRYPOINT_FAILED'))]
+fn an_unopened_game_has_no_channel() {
+    let game = trusting();
+    game.get_channel(GAME_ID);
 }
 
 #[test]
@@ -329,17 +505,7 @@ fn every_seat_can_resume_offchain_play() {
 #[should_panic(expected: ('Untrusted prover class', 'ENTRYPOINT_FAILED'))]
 fn untrusted_prover_rejected() {
     let (game, _) = setup();
-    caller(ALICE());
-    game
-        .create(
-            TARGET,
-            BOB(),
-            public_key(PK_A),
-            chain_value(SEED_A, RNG_LEN),
-            game.contract_address,
-            WINDOW,
-            Option::None,
-        );
+    open_as_carol(game, terms_for(game, Option::None));
 }
 
 #[test]
@@ -457,61 +623,24 @@ fn forced_play_pauses_the_clock() {
 
 #[test]
 #[should_panic(expected: ('Referee is a seat', 'ENTRYPOINT_FAILED'))]
-fn the_referee_is_not_the_creator() {
-    let (game, _) = setup();
-    game.allow_prover(channel::TEST_CLASS_HASH.try_into().unwrap(), true);
-    caller(ALICE());
-    let clock = per_turn(public_key(PK_A));
-    game
-        .create(
-            TARGET,
-            BOB(),
-            public_key(PK_A),
-            chain_value(SEED_A, RNG_LEN),
-            game.contract_address,
-            WINDOW,
-            Option::Some(clock),
-        );
+fn the_referee_is_not_seat_0() {
+    let game = trusting();
+    open_as_carol(game, terms_for(game, Option::Some(per_turn(public_key(PK_A)))));
 }
 
 #[test]
 #[should_panic(expected: ('Referee is a seat', 'ENTRYPOINT_FAILED'))]
-fn the_referee_is_not_the_joiner() {
-    let (game, _) = setup();
-    game.allow_prover(channel::TEST_CLASS_HASH.try_into().unwrap(), true);
-    caller(ALICE());
-    let id = game
-        .create(
-            TARGET,
-            BOB(),
-            public_key(PK_A),
-            chain_value(SEED_A, RNG_LEN),
-            game.contract_address,
-            WINDOW,
-            blitz(),
-        );
-    caller(BOB());
-    game.join(id, public_key(PK_REF), chain_value(SEED_B, RNG_LEN), 0, no_tip());
+fn the_referee_is_not_seat_1() {
+    let game = trusting();
+    open_as_carol(game, terms_for(game, Option::Some(per_turn(public_key(PK_B)))));
 }
 
 #[test]
 #[should_panic(expected: ('Invalid session key', 'ENTRYPOINT_FAILED'))]
 fn the_referee_key_is_a_curve_point() {
-    let (game, _) = setup();
-    game.allow_prover(channel::TEST_CLASS_HASH.try_into().unwrap(), true);
-    caller(ALICE());
+    let game = trusting();
     // x = 5 is not on the STARK curve.
-    let clock = per_turn(5);
-    game
-        .create(
-            TARGET,
-            BOB(),
-            public_key(PK_A),
-            chain_value(SEED_A, RNG_LEN),
-            game.contract_address,
-            WINDOW,
-            Option::Some(clock),
-        );
+    open_as_carol(game, terms_for(game, Option::Some(per_turn(5))));
 }
 
 /// A timed game with a dispute Alice opened at time 0.
@@ -684,31 +813,19 @@ fn channel_state_packs_and_unpacks_exactly() {
 #[test]
 #[should_panic(expected: 'Value exceeds 40 bits')]
 fn block_numbers_past_40_bits_are_refused() {
-    let empty = referee::channel::create(3600);
+    let opening = referee::channel::StateRef {
+        hash: 0xa,
+        seq: 0,
+        support_turn: 0,
+        due: 0,
+        outcome: referee::Outcome { finished: false, winner: 0, reason: 0 },
+    };
+    let empty = referee::channel::open(1, opening, 3600, false, 0);
     let channel = referee::Channel { anchor_block: 0x10000000000, ..empty };
     referee_dojo::models::pack_state(1, @channel);
 }
 
 // ---- Randomness from the referee ----
-
-/// A created game that asked for the referee's randomness, before Bob joins.
-fn created_rolled() -> (ICounterChannelDispatcher, felt252) {
-    let (game, _) = setup();
-    game.allow_prover(channel::TEST_CLASS_HASH.try_into().unwrap(), true);
-    caller(ALICE());
-    let id = game
-        .create(
-            TARGET,
-            BOB(),
-            public_key(PK_A),
-            chain_value(SEED_A, RNG_LEN),
-            game.contract_address,
-            WINDOW,
-            rolled_blitz(),
-        );
-    caller(BOB());
-    (game, id)
-}
 
 fn gamble() -> Span<Move<Action>> {
     array![Move::PlayRandom((Action { kind: GAMBLE, amount: 0 }, chain_value(SEED_A, RNG_LEN - 1)))]
@@ -745,49 +862,26 @@ fn the_referees_signed_tip_joins_the_terms() {
 #[should_panic(expected: ('Invalid session signature', 'ENTRYPOINT_FAILED'))]
 fn a_tip_the_referee_did_not_sign_is_refused() {
     // Bob's own chain, signed with his own key: he would know every roll.
-    let (game, id) = created_rolled();
-    let (tip, signature) = referee_tip(game, id, PK_B);
-    game.join(id, public_key(PK_B), chain_value(SEED_B, RNG_LEN), tip, signature);
+    let game = trusting();
+    let terms = terms_for(game, rolled_blitz());
+    caller(BOB());
+    game.open_game(terms, signed_by_both(@terms), tip_signature(@terms, GAME_ID, PK_B));
 }
 
 #[test]
 #[should_panic(expected: ('Invalid session signature', 'ENTRYPOINT_FAILED'))]
 fn a_tip_signed_for_another_game_is_refused() {
-    let (game, id) = created_rolled();
-    let terms = game.terms(id);
-    let tip = chain_value(SEED_REF, RNG_LEN);
-    let signature = sign(
-        tip_hash::<CounterRules>(terms.chain_id, terms.channel, id + 1, tip), PK_REF,
-    );
-    game.join(id, public_key(PK_B), chain_value(SEED_B, RNG_LEN), tip, signature);
+    let game = trusting();
+    let terms = terms_for(game, rolled_blitz());
+    game.open_game(terms, signed_by_both(@terms), tip_signature(@terms, GAME_ID + 1, PK_REF));
 }
 
 #[test]
-#[should_panic(expected: ('Referee tip needed', 'ENTRYPOINT_FAILED'))]
-fn a_game_that_asked_needs_the_referees_tip() {
-    let (game, id) = created_rolled();
-    game.join(id, public_key(PK_B), chain_value(SEED_B, RNG_LEN), 0, no_tip());
-}
-
-#[test]
-#[should_panic(expected: ('Seats reveal in this game', 'ENTRYPOINT_FAILED'))]
-fn the_joiner_cannot_add_a_referee_tip() {
-    let (game, _) = setup();
-    game.allow_prover(channel::TEST_CLASS_HASH.try_into().unwrap(), true);
-    caller(ALICE());
-    let id = game
-        .create(
-            TARGET,
-            BOB(),
-            public_key(PK_A),
-            chain_value(SEED_A, RNG_LEN),
-            game.contract_address,
-            WINDOW,
-            blitz(),
-        );
-    caller(BOB());
-    let (tip, signature) = referee_tip(game, id, PK_REF);
-    game.join(id, public_key(PK_B), chain_value(SEED_B, RNG_LEN), tip, signature);
+#[should_panic(expected: ('Invalid signature r', 'ENTRYPOINT_FAILED'))]
+fn a_referee_tip_needs_the_referees_signature() {
+    let game = trusting();
+    let terms = terms_for(game, rolled_blitz());
+    game.open_game(terms, signed_by_both(@terms), no_tip());
 }
 
 #[test]
@@ -893,9 +987,7 @@ fn only_a_game_that_asks_stores_a_referee_tip() {
     let (_, world, id) = started_with(blitz());
     assert_eq!(stored_tip(@world, id), 0);
     assert_eq!(stored(@world, id).referee_tip, 0);
-    // The creator asks: a marker until the join, then the tip the referee signed.
-    let (game, asked) = created_rolled();
-    assert_eq!(game.get_channel(asked).referee_tip, 1);
+    // The terms take the referee's randomness: the tip the referee signed.
     let (_, world, id) = started_with(rolled_blitz());
     assert_eq!(stored_tip(@world, id), chain_value(SEED_REF, RNG_LEN));
 }

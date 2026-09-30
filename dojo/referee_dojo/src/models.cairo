@@ -2,10 +2,9 @@ use referee::Outcome;
 use referee::channel::{Channel, StateRef};
 use starknet::ContractAddress;
 
-/// `ChannelUpdated.kind` values.
-pub const CREATED: u8 = 0;
-pub const JOINED: u8 = 1;
-pub const CANCELLED: u8 = 2;
+/// `ChannelUpdated.kind` values. 1 and 2 (a join and a cancel) are retired:
+/// a game opens once, on every seat's signed terms.
+pub const OPENED: u8 = 0;
 pub const DISPUTED: u8 = 3;
 pub const RECEIVED: u8 = 4;
 pub const RESOLVED: u8 = 5;
@@ -34,13 +33,12 @@ pub struct StoredRef {
 }
 
 /// One referee channel, as `get_channel` returns it: its terms and its state
-/// together. Seat 0 is the creator, seat 1 the joiner. `config` is the game's
-/// `Config`, serialized. A timed game's `referee` key and serialized
-/// `clock_settings` form its `TimeControl`, with `referee_tip`, the tip of the
-/// referee's hash chain when the game takes its randomness from the referee
-/// (before the join, just nonzero when the creator asked for that); `referee`
-/// is zero for an untimed game. Stored as `ChannelTerms`, written at create and
-/// join, `ChannelState`, packed and written on every transition, and
+/// together, with seats in the terms' order. `config` is the game's `Config`,
+/// serialized. A timed game's `referee` key and serialized `clock_settings`
+/// form its `TimeControl`, with `referee_tip`, the tip of the referee's hash
+/// chain when the game takes its randomness from the referee; `referee` is
+/// zero for an untimed game. Stored as `ChannelTerms`, written once when the
+/// game opens, `ChannelState`, packed and written on every transition, and
 /// `ChannelRng`, which only a game that takes its randomness from its referee
 /// has.
 #[derive(Copy, Drop, Serde, PartialEq, Debug)]
@@ -73,7 +71,7 @@ pub struct ChannelGame {
 }
 
 /// What a channel fixes when it opens: seats, keys, randomness tips, prover,
-/// config, time control and context. Written at create and join only.
+/// config, time control and context. Written once, when the game opens.
 #[derive(Copy, Drop, Serde)]
 #[dojo::model]
 pub struct ChannelTerms {
@@ -93,10 +91,10 @@ pub struct ChannelTerms {
     pub clock_settings: Span<felt252>,
 }
 
-/// The referee's randomness for a channel whose creator asked for it: the tip
-/// of the referee's hash chain, or before the join just a nonzero marker. Kept
-/// apart from `ChannelTerms`, so a game that reveals between its seats never
-/// reads or writes it: `ChannelState` says which games have one.
+/// The referee's randomness for a channel whose terms take it: the tip of the
+/// referee's hash chain. Kept apart from `ChannelTerms`, so a game that reveals
+/// between its seats never reads or writes it: `ChannelState` says which games
+/// have one.
 #[derive(Copy, Drop, Serde)]
 #[dojo::model]
 pub struct ChannelRng {

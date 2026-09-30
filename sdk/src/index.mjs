@@ -3,7 +3,7 @@
 import { ec, shortString } from 'starknet';
 import { poseidonHashMany } from './poseidon.mjs';
 
-export const PROTOCOL_VERSION = 5n;
+export const PROTOCOL_VERSION = 6n;
 export const NO_SEAT = 255;
 /** The actor of a `flag`, a `start` and a roll: the referee of a timed game, not a seat. */
 export const REFEREE = 254;
@@ -159,11 +159,12 @@ export function termsTypedData(game, terms) {
 }
 
 /**
- * A timed game's clock (`Clock`): `{ seats, used, stamp }`, each seat's clocks
- * as the game's time rules keep them, the time used in the current turn, and
- * the last stamp, in milliseconds.
+ * A timed game's clock (`Clock`): `{ seats, used, stamp, started }`, each
+ * seat's clocks as the game's time rules keep them, the time used in the
+ * current turn, the last stamp and the game's first stamp, in milliseconds.
  */
-export const encodeClock = (game, c) => [...span(timeOf(game).encodeClock(c.seats)), BigInt(c.used), BigInt(c.stamp)];
+export const encodeClock = (game, c) =>
+  [...span(timeOf(game).encodeClock(c.seats)), BigInt(c.used), BigInt(c.stamp), BigInt(c.started)];
 
 export function encodeEnvelope(game, env) {
   const p = env.pending;
@@ -314,7 +315,7 @@ export function open(game, terms) {
     rng_heads: terms.rng_tips.map(felt),
     rng_fresh: terms.rng_tips.map(() => true),
     rng_referee: c == null ? 0n : felt(c.rng_tip ?? 0),
-    clock: c == null ? null : { seats: timeOf(game).open(c.settings, terms.rng_tips.length), used: 0, stamp: 0 },
+    clock: c == null ? null : { seats: timeOf(game).open(c.settings, terms.rng_tips.length), used: 0, stamp: 0, started: 0 },
     outcome: { finished: false, winner: 0, reason: 0 },
     game: game.init(terms.config),
   };
@@ -345,13 +346,15 @@ export const forfeit = (seat, reason) => ({ finished: true, winner: 2 - seat, re
 // nobody. Nor does any step while the referee owes a roll (`payer` is
 // REFEREE): that wait is nobody's time. `refereeStep` is MOVE_FLAG,
 // MOVE_START, MOVE_REVEAL (the referee's roll) or null; only a roll may go
-// unstamped.
+// unstamped. The game's first stamp also sets `started`, once.
 function charge(time, settings, clock, payer, reveal, stamp, refereeStep, state) {
   if (stamp == null) {
     check(refereeStep == null || refereeStep === MOVE_REVEAL, 'Referee step needs a stamp');
     return { ...clock, stamp: 0 };
   }
   check(Number.isSafeInteger(stamp) && stamp > 0, 'Invalid stamp');
+  // The game's first stamp, whoever's step it is, is when it started.
+  if (clock.started === 0) clock = { ...clock, started: stamp };
   const isFlag = refereeStep === MOVE_FLAG;
   if (refereeStep === MOVE_START || payer === REFEREE) {
     check(stamp >= clock.stamp, 'Stamp out of order');
@@ -469,7 +472,7 @@ export function applyStep(game, context, terms, env, step, scratch = null, stamp
   // and start the next one from nothing.
   if (timed && game.due(next.game) !== turnSeat) {
     const seats = time.settle(terms.clock.settings, next.clock.seats, turnSeat, next.clock.used, false, next.game);
-    next.clock = { seats, used: 0, stamp: next.clock.stamp };
+    next.clock = { ...next.clock, seats, used: 0 };
   }
   // Only seats count as signers: a referee step acknowledges nothing.
   if (seat !== REFEREE) {
@@ -748,11 +751,11 @@ export class Session {
 
   export() {
     const steps = this.steps.map(signedStep);
-    return { version: 5, terms: this.terms, start: this.start, witness: this.startWitness, steps };
+    return { version: 6, terms: this.terms, start: this.start, witness: this.startWitness, steps };
   }
   /** Rebuild a session from `export()`, verifying every step. `lastSigned` is as for the constructor. */
   static import(game, record, { lastSigned } = {}) {
-    check(record.version === 5, 'Unsupported transcript version');
+    check(record.version === 6, 'Unsupported transcript version');
     const session = new Session(game, record.terms, { start: record.start, witness: record.witness, lastSigned });
     for (const signed of record.steps) session.receive(signed);
     return session;

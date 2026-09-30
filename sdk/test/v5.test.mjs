@@ -48,7 +48,7 @@ test('a gamble waits for the referee when the terms carry its tip', () => {
 test('a pending roll is nobody\'s time', () => {
   // The roll comes long after either seat's time would have run out.
   const late = run([add(3), gamble(1), reveal(rolls[7])], [1000, 2000, 200000]);
-  assert.deepEqual(late.clock, { seats: { banks: [60000, 60000], periods: [] }, used: 0, stamp: 200000 });
+  assert.deepEqual(late.clock, { seats: { banks: [60000, 60000], periods: [] }, used: 0, stamp: 200000, started: 1000 });
   assert.throws(() => run([add(3), gamble(1), reveal(rolls[7])], [1000, 2000, 1999]), /Stamp out of order/);
   // Nobody is flagged meanwhile, but a seat may still resign.
   const waiting = run([add(3), gamble(1)], [1000, 2000]);

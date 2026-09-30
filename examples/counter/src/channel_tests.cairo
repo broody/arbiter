@@ -1,7 +1,6 @@
 use referee::channel::{
-    ACTIVE, CANCELLED, DISPUTE, FORCED, PAUSE_SECONDS, SETTLED, WAITING, acknowledge, cancel,
-    claim_timeout, create, forced, join, open_dispute, receive, resign, resolve, resume, rolled,
-    void,
+    ACTIVE, DISPUTE, FORCED, PAUSE_SECONDS, SETTLED, acknowledge, claim_timeout, forced,
+    open as open_channel, open_dispute, receive, resign, resolve, resume, rolled, void,
 };
 use referee::{
     Channel, DRAW, Envelope, Move, REASON_ABANDON, REASON_RESIGN, REASON_VOID, REFEREE, StateRef,
@@ -31,7 +30,7 @@ fn finished() -> StateRef {
 }
 
 fn active() -> Channel {
-    join(create(WINDOW), CONTEXT, state_ref::<CounterRules>(@opening()), 10)
+    open_channel(CONTEXT, state_ref::<CounterRules>(@opening()), WINDOW, false, 10)
 }
 
 /// Dispute opened from the opening anchor and resolved into forced play.
@@ -41,26 +40,33 @@ fn forced_play() -> Channel {
 }
 
 #[test]
-fn lifecycle_starts_waiting_then_active() {
-    let channel = create(WINDOW);
-    assert_eq!(channel.status, WAITING);
+fn a_channel_opens_live_at_the_opening_state() {
     let channel = active();
     assert_eq!(channel.status, ACTIVE);
+    assert_eq!(channel.epoch, 0);
+    assert_eq!(channel.context, CONTEXT);
     assert_eq!(channel.anchor, state_ref::<CounterRules>(@opening()));
+    assert_eq!(channel.candidate, channel.anchor);
+    assert_eq!(channel.anchor_block, 10);
     assert_eq!(channel.anchor.due, 0);
-    assert_eq!(cancel(create(WINDOW)).status, CANCELLED);
-}
-
-#[test]
-#[should_panic(expected: 'Not waiting')]
-fn join_only_once() {
-    join(active(), CONTEXT, state_ref::<CounterRules>(@opening()), 11);
 }
 
 #[test]
 #[should_panic(expected: 'Invalid response window')]
 fn response_window_is_bounded() {
-    create(299);
+    open_channel(CONTEXT, state_ref::<CounterRules>(@opening()), 299, false, 10);
+}
+
+#[test]
+#[should_panic(expected: 'Invalid context')]
+fn a_channel_needs_a_context() {
+    open_channel(0, state_ref::<CounterRules>(@opening()), WINDOW, false, 10);
+}
+
+#[test]
+#[should_panic(expected: 'Invalid opening state')]
+fn a_channel_opens_only_at_an_opening_state() {
+    open_channel(CONTEXT, after(1), WINDOW, false, 10);
 }
 
 #[test]

@@ -1,33 +1,20 @@
 //! The counter game as a Dojo world. The whole channel system is one line per
 //! entrypoint on top of `referee_dojo::channel`.
-use referee::{Batch, Envelope, Move, Signature, Terms, TimeControl};
+use referee::{Batch, Envelope, Move, Signature, Terms};
 use referee_counter::{Action, Config, Counter};
 use referee_dojo::models::ChannelGame;
-use starknet::ContractAddress;
 
 #[starknet::interface]
 pub trait ICounterChannel<T> {
-    fn create(
+    /// Open a game on its terms and each seat's wallet signature over them.
+    /// `referee_signature` is the referee's over its randomness tip when the
+    /// terms take the referee's randomness, otherwise zero.
+    fn open_game(
         ref self: T,
-        target: u8,
-        invited: ContractAddress,
-        session_key: felt252,
-        rng_tip: felt252,
-        prover: ContractAddress,
-        response_seconds: u32,
-        clock: Option<TimeControl>,
-    ) -> felt252;
-    /// `referee_tip` and `referee_signature` are the referee's signed
-    /// hash-chain tip when the creator asked for its randomness, otherwise zero.
-    fn join(
-        ref self: T,
-        game_id: felt252,
-        session_key: felt252,
-        rng_tip: felt252,
-        referee_tip: felt252,
+        terms: Terms<Config>,
+        signatures: Span<Span<felt252>>,
         referee_signature: Signature,
     );
-    fn cancel(ref self: T, game_id: felt252);
     fn accept_verified(
         ref self: T,
         game_id: felt252,
@@ -74,56 +61,21 @@ pub trait ICounterChannel<T> {
 #[dojo::contract]
 pub mod channel {
     use dojo::world::WorldStorage;
-    use referee::{Batch, Envelope, Move, Signature, Terms, TimeControl};
+    use referee::{Batch, Envelope, Move, Signature, Terms};
     use referee_counter::{Action, Config, Counter, CounterRules};
     use referee_dojo::channel as binding;
     use referee_dojo::models::ChannelGame;
-    use starknet::ContractAddress;
 
     #[abi(embed_v0)]
     impl CounterChannelImpl of super::ICounterChannel<ContractState> {
-        fn create(
+        fn open_game(
             ref self: ContractState,
-            target: u8,
-            invited: ContractAddress,
-            session_key: felt252,
-            rng_tip: felt252,
-            prover: ContractAddress,
-            response_seconds: u32,
-            clock: Option<TimeControl>,
-        ) -> felt252 {
-            let mut world = self.world_default();
-            binding::create::<
-                CounterRules,
-            >(
-                ref world,
-                Config { target },
-                invited,
-                session_key,
-                rng_tip,
-                prover,
-                response_seconds,
-                clock,
-            )
-        }
-
-        fn join(
-            ref self: ContractState,
-            game_id: felt252,
-            session_key: felt252,
-            rng_tip: felt252,
-            referee_tip: felt252,
+            terms: Terms<Config>,
+            signatures: Span<Span<felt252>>,
             referee_signature: Signature,
         ) {
             let mut world = self.world_default();
-            binding::join::<
-                CounterRules,
-            >(ref world, game_id, session_key, rng_tip, referee_tip, referee_signature);
-        }
-
-        fn cancel(ref self: ContractState, game_id: felt252) {
-            let mut world = self.world_default();
-            binding::cancel(ref world, game_id);
+            binding::open_game::<CounterRules>(ref world, terms, signatures, referee_signature);
         }
 
         fn accept_verified(
@@ -251,5 +203,7 @@ pub mod channel {
     }
 }
 
+#[cfg(test)]
+mod account;
 #[cfg(test)]
 mod tests;

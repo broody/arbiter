@@ -310,6 +310,31 @@ fn start_runs_the_clock_before_the_first_move() {
 }
 
 #[test]
+fn the_first_stamp_is_when_the_game_started() {
+    assert_eq!(clock(@timed_start()).started, 0);
+    // A seat's first step or the referee's start, whichever comes first.
+    assert_eq!(clock(@run(array![add(3), add(3)], array![1000, 2000])).started, 1000);
+    assert_eq!(clock(@run(array![Move::Start, add(3)], array![700, 41000])).started, 700);
+    // A restart and a pause keep it.
+    let env = run(array![add(3), Move::Start, add(3)], array![1000, 50000, 51000]);
+    assert_eq!(clock(@env).started, 1000);
+    let t = timed_terms();
+    let forced = force::<CounterRules>(TIMED_CONTEXT, @t, env, (), 0, array![add(3)].span());
+    assert_eq!(clock(@forced).started, 1000);
+    let env = apply_steps::<
+        CounterRules,
+    >(TIMED_CONTEXT, @t, forced, (), array![add(3)].span(), array![90000].span());
+    assert_eq!(clock(@env).started, 1000);
+    // Forced play before any stamp leaves the game unstarted until one comes.
+    let forced = force::<
+        CounterRules,
+    >(TIMED_CONTEXT, @t, timed_start(), (), 0, array![add(3)].span());
+    assert_eq!(clock(@forced).started, 0);
+    // The timed fixture started at its first stamp.
+    assert_eq!(clock(@timed_expected()).started, *timed_stamps().at(0));
+}
+
+#[test]
 fn start_restarts_the_clock_without_charging() {
     // Seat 1's clock runs from 1 s; the referee restarts it at 50 s (after
     // forced play, say), so its move at 51 s costs 1 s, not 50 s.

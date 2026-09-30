@@ -17,7 +17,8 @@ pub use channel::{Channel, StateRef, state_ref};
 pub use protocol::{
     PROTOCOL_VERSION, action_hash, actor, apply_steps, approve_all, check_clock, checkpoint_hash,
     context_hash, due, force, forfeit, live_hash, open, referee_resume_hash, reopen_hash, replay,
-    rng_next, roll, seed, signing_hash, stamp_hash, state_hash, tip_hash, verify, void_hash,
+    rng_next, roll, seed, signing_hash, stamp_hash, state_hash, terms_message, tip_hash, verify,
+    void_hash,
 };
 pub use rules::GameRules;
 pub use types::{

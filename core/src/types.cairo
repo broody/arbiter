@@ -45,6 +45,9 @@ pub struct Clock {
     /// Referee time of the last stamped step, or 0 while the clock is paused:
     /// before the first stamp, and after an unstamped (forced onchain) step.
     pub stamp: u64,
+    /// Referee time of the game's first stamp, 0 until then: when the game
+    /// started, as its referee attests. A rated game takes its time from it.
+    pub started: u64,
 }
 
 /// Everything bound into a channel's context hash. `players` are wallet

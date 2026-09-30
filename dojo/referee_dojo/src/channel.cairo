@@ -1,7 +1,7 @@
 //! Entrypoint implementations for a game's Dojo system. Each wraps the pure
 //! state machine in `referee::channel` with storage, caller authentication,
 //! prover checks and signature checks. A game system calls one helper per
-//! entrypoint, e.g. `referee_dojo::channel::join::<MyRules>(ref world, ...)`.
+//! entrypoint, e.g. `referee_dojo::channel::open_game::<MyRules>(ref world, ...)`.
 use core::ec::EcPointTrait;
 use core::num::traits::Zero;
 use dojo::event::EventStorage;
@@ -9,151 +9,117 @@ use dojo::model::{Model, ModelStorage};
 use dojo::world::{IWorldDispatcherTrait, WorldStorage};
 use referee::{
     Batch, Channel, Envelope, GameRules, Move, Outcome, Signature, Terms, TimeControl, approve_all,
-    channel as machine, check_clock, checkpoint_hash, context_hash, live_hash, open,
-    referee_resume_hash, reopen_hash, replay, state_ref, tip_hash, verify, void_hash,
+    channel as machine, checkpoint_hash, context_hash, live_hash, open, referee_resume_hash,
+    reopen_hash, replay, state_ref, terms_message, tip_hash, verify, void_hash,
 };
-use starknet::syscalls::get_class_hash_at_syscall;
+use starknet::syscalls::{call_contract_syscall, get_class_hash_at_syscall};
 use starknet::{
     ContractAddress, SyscallResultTrait, get_block_number, get_block_timestamp, get_caller_address,
     get_contract_address, get_tx_info,
 };
 use crate::models::{
-    ACKNOWLEDGED, CANCELLED, CREATED, ChannelGame, ChannelRng, ChannelState, ChannelTerms,
-    ChannelUpdated, DISPUTED, FORCED, JOINED, ProverAllowed, RECEIVED, RESIGNED, RESOLVED, RESUMED,
-    ROLLED, TIMED_OUT, VOIDED, channel_of, game_of, pack_state, terms_of, unpack_state,
-    with_channel,
+    ACKNOWLEDGED, ChannelGame, ChannelRng, ChannelState, ChannelTerms, ChannelUpdated, DISPUTED,
+    FORCED, OPENED, ProverAllowed, RECEIVED, RESIGNED, RESOLVED, RESUMED, ROLLED, TIMED_OUT, VOIDED,
+    channel_of, game_of, pack_state, unpack_state,
 };
 
-/// Open a channel as seat 0. `invited` may be zero for an open game. `clock`
-/// makes the game timed, with a referee that stamps every step (`None` for an
-/// untimed game). A nonzero `clock.rng_tip` asks for the referee's randomness:
-/// the tip itself comes with `join`, signed by the referee for this game, whose
-/// id does not exist yet.
-pub fn create<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Drop<R::State>>(
-    ref world: WorldStorage,
-    config: R::Config,
-    invited: ContractAddress,
-    session_key: felt252,
-    rng_tip: felt252,
-    prover: ContractAddress,
-    response_seconds: u32,
-    clock: Option<TimeControl>,
-) -> felt252 {
-    valid_key(session_key);
-    check_clock::<R>(@clock);
-    if let Option::Some(time) = clock {
-        valid_key(time.referee);
-        assert(time.referee != session_key, 'Referee is a seat');
-    }
-    assert(rng_tip != 0, 'Invalid tip');
-    valid_prover(@world, prover);
-    let creator = get_caller_address();
-    assert(creator.is_non_zero() && invited != creator, 'Invalid players');
-    // Rejects invalid configs up front.
-    let _state = R::init(@config);
-    let mut serialized = array![];
-    config.serialize(ref serialized);
-    let id: felt252 = world.dispatcher.uuid().into();
-    let referee_rng = match clock {
-        Option::Some(time) => time.rng_tip != 0,
-        Option::None => false,
-    };
-    let channel = Channel { referee_rng, ..machine::create(response_seconds) };
-    let game = ChannelGame {
-        id,
-        player_0: creator,
-        player_1: invited,
-        key_0: session_key,
-        key_1: 0,
-        tip_0: rng_tip,
-        tip_1: 0,
-        prover,
-        config: serialized.span(),
-        status: 0,
-        epoch: 0,
-        context: 0,
-        response_seconds: 0,
-        referee: match clock {
-            Option::Some(time) => time.referee,
-            Option::None => 0,
-        },
-        clock_settings: match clock {
-            Option::Some(time) => time.settings,
-            Option::None => array![].span(),
-        },
-        referee_tip: match clock {
-            Option::Some(time) => time.rng_tip,
-            Option::None => 0,
-        },
-        anchor: channel.anchor.into(),
-        candidate: channel.candidate.into(),
-        anchor_block: 0,
-        candidate_block: 0,
-        deadline: 0,
-        acked_epoch: 0,
-        acked_deadline: 0,
-        result: channel.result.into(),
-    };
-    let game = with_channel(game, channel);
-    save_terms(ref world, @game);
-    save_tip(ref world, @game);
-    save(ref world, id, channel, CREATED);
-    id
-}
-
-/// Take seat 1. The opening state needs both randomness tips, so the channel's
-/// context and anchor are fixed here. If the creator asked for the referee's
-/// randomness, `referee_tip` is the tip of the referee's hash chain for this
-/// game and `referee_signature` the referee's signature over it (`tip_hash`):
-/// a tip a seat made up would let that seat know every roll. Otherwise both
-/// are zero.
-pub fn join<
+/// Open a game on its seats' signed terms: each seat's wallet signs
+/// `terms_message` (the SDK's `termsTypedData`), and its account must accept
+/// the signature (`is_valid_signature`, SNIP-6). Anyone may send it, usually
+/// in one transaction with the game's first call that needs the chain, its
+/// settlement say. Clients choose the game id, which opens once. A game that
+/// takes its randomness from its referee carries the referee's tip in its
+/// time control (`rng_tip`), and `referee_signature` is the referee's over it
+/// (`tip_hash`): a tip a seat made up would let that seat know every roll.
+/// Otherwise `referee_signature` is zero.
+pub fn open_game<
     impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Serde<R::State>, +Drop<R::State>,
 >(
     ref world: WorldStorage,
-    game_id: felt252,
-    session_key: felt252,
-    rng_tip: felt252,
-    referee_tip: felt252,
+    terms: Terms<R::Config>,
+    signatures: Span<Span<felt252>>,
     referee_signature: Signature,
 ) {
-    let mut game = read(@world, game_id);
-    let joiner = get_caller_address();
-    assert(joiner.is_non_zero() && joiner != game.player_0, 'Invalid players');
-    assert(game.player_1.is_zero() || game.player_1 == joiner, 'Not invited');
-    valid_key(session_key);
-    assert(session_key != game.key_0, 'Shared session key');
-    assert(session_key != game.referee, 'Referee is a seat');
-    assert(rng_tip != 0 && rng_tip != game.tip_0, 'Invalid tip');
-    valid_prover(@world, game.prover);
-    if game.referee_tip == 0 {
-        assert(referee_tip == 0, 'Seats reveal in this game');
-    } else {
-        assert(referee_tip != 0, 'Referee tip needed');
-        let message = tip_hash::<
-            R,
-        >(get_tx_info().chain_id, get_contract_address().into(), game_id, referee_tip);
-        verify(game.referee, message, referee_signature);
-    }
-    game.referee_tip = referee_tip;
-    game.player_1 = joiner;
-    game.key_1 = session_key;
-    game.tip_1 = rng_tip;
-    let terms = terms::<R>(@game);
+    let game_id = terms.game_id;
+    let chain_id = get_tx_info().chain_id;
+    assert(terms.chain_id == chain_id, 'Wrong chain');
+    assert(terms.channel == get_contract_address().into(), 'Wrong channel');
+    assert(game_id != 0, 'Invalid game id');
+    let stored: ContractAddress = world
+        .read_member(Model::<ChannelTerms>::ptr_from_keys(game_id), selector!("player_0"));
+    assert(stored.is_zero(), 'Game already open');
+    // Checks the seat count, the tips, the time control and the config.
     let opening = open::<R>(@terms);
-    let channel = machine::join(
-        channel_of(@game), context_hash::<R>(@terms), state_ref::<R>(@opening), get_block_number(),
+    assert(terms.players.len() == 2 && terms.keys.len() == 2, 'Wrong seat count');
+    assert(signatures.len() == 2, 'Wrong signature count');
+    let player_0 = address(*terms.players.at(0));
+    let player_1 = address(*terms.players.at(1));
+    assert(player_0.is_non_zero() && player_1.is_non_zero(), 'Invalid players');
+    assert(player_0 != player_1, 'Invalid players');
+    let (key_0, key_1) = (*terms.keys.at(0), *terms.keys.at(1));
+    valid_key(key_0);
+    valid_key(key_1);
+    // One signature would approve for both seats.
+    assert(key_0 != key_1, 'Shared session key');
+    let (tip_0, tip_1) = (*terms.rng_tips.at(0), *terms.rng_tips.at(1));
+    assert(tip_0 != tip_1, 'Invalid tip');
+    let prover = address(terms.prover);
+    valid_prover(@world, prover);
+    let (referee, clock_settings, referee_tip) = match terms.clock {
+        Option::Some(time) => {
+            valid_key(time.referee);
+            assert(time.referee != key_0 && time.referee != key_1, 'Referee is a seat');
+            if time.rng_tip != 0 {
+                verify(
+                    time.referee,
+                    tip_hash::<R>(chain_id, terms.channel, game_id, time.rng_tip),
+                    referee_signature,
+                );
+            }
+            (time.referee, time.settings, time.rng_tip)
+        },
+        Option::None => (0, array![].span(), 0),
+    };
+    let context = context_hash::<R>(@terms);
+    let mut seat: u32 = 0;
+    for player in terms.players {
+        accepted(
+            *player, terms_message::<R>(chain_id, game_id, context, *player), *signatures.at(seat),
+        );
+        seat += 1;
+    }
+    let mut config = array![];
+    terms.config.serialize(ref config);
+    world
+        .write_model(
+            @ChannelTerms {
+                id: game_id,
+                player_0,
+                player_1,
+                key_0,
+                key_1,
+                tip_0,
+                tip_1,
+                prover,
+                config: config.span(),
+                context,
+                response_seconds: terms.response_seconds,
+                referee,
+                clock_settings,
+            },
+        );
+    // Only a game that takes its randomness from its referee has one.
+    if referee_tip != 0 {
+        world.write_model(@ChannelRng { id: game_id, tip: referee_tip });
+    }
+    let channel = machine::open(
+        context,
+        state_ref::<R>(@opening),
+        terms.response_seconds,
+        referee_tip != 0,
+        get_block_number(),
     );
-    let game = with_channel(game, channel);
-    save_terms(ref world, @game);
-    save_tip(ref world, @game);
-    save(ref world, game_id, channel, JOINED);
-}
-
-pub fn cancel(ref world: WorldStorage, game_id: felt252) {
-    let (channel, player_0, _) = read_seats(@world, game_id);
-    assert(get_caller_address() == player_0, 'Only creator');
-    save(ref world, game_id, machine::cancel(channel), CANCELLED);
+    save(ref world, game_id, channel, OPENED);
 }
 
 /// Called by the proof adapter after it verified a native proof that replays
@@ -468,8 +434,8 @@ pub fn status(world: @WorldStorage, game_id: felt252) -> u8 {
     (times.low % 0x100).try_into().unwrap()
 }
 
-// The state machine and both seats: what disputes, timeouts, resignations and
-// cancellations need.
+// The state machine and both seats: what disputes, timeouts and resignations
+// need.
 fn read_seats(
     world: @WorldStorage, game_id: felt252,
 ) -> (Channel, ContractAddress, ContractAddress) {
@@ -532,6 +498,24 @@ fn keys(game: @ChannelGame) -> Span<felt252> {
     array![*game.key_0, *game.key_1].span()
 }
 
+// A seat's wallet signature over the terms, as its account checks it (SNIP-6):
+// `'VALID'`, or 1 from older accounts. An account must be deployed to check.
+fn accepted(player: felt252, message: felt252, signature: Span<felt252>) {
+    let mut calldata = array![message];
+    signature.serialize(ref calldata);
+    let result = call_contract_syscall(
+        address(player), selector!("is_valid_signature"), calldata.span(),
+    )
+        .unwrap_syscall();
+    assert(result.len() == 1, 'Invalid wallet signature');
+    let answer = *result.at(0);
+    assert(answer == 'VALID' || answer == 1, 'Invalid wallet signature');
+}
+
+fn address(value: felt252) -> ContractAddress {
+    value.try_into().expect('Invalid address')
+}
+
 fn valid_key(key: felt252) {
     assert(key != 0 && EcPointTrait::new_nz_from_x(key).is_some(), 'Invalid session key');
 }
@@ -541,20 +525,6 @@ fn valid_prover(world: @WorldStorage, prover: ContractAddress) {
     let class_hash = get_class_hash_at_syscall(prover).unwrap_syscall();
     let entry: ProverAllowed = world.read_model(class_hash);
     assert(entry.allowed, 'Untrusted prover class');
-}
-
-// Write a channel's terms, at create and join.
-fn save_terms(ref world: WorldStorage, game: @ChannelGame) {
-    world.write_model(@terms_of(game));
-}
-
-// Write the referee's tip, at create (a marker: the creator asked) and at
-// join (the tip the referee signed), for a game that takes its randomness
-// from its referee. No other game writes one.
-fn save_tip(ref world: WorldStorage, game: @ChannelGame) {
-    if *game.referee_tip != 0 {
-        world.write_model(@ChannelRng { id: *game.id, tip: *game.referee_tip });
-    }
 }
 
 // Write a channel's state and announce the transition.
