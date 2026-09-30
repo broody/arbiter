@@ -625,9 +625,12 @@ referee colluding with that seat could use.
   other seat winning, as today. So `alive` and `eliminate` have defaults that
   only a 2-seat game may rely on. A game with more seats must implement them,
   and the protocol's checks catch one that doesn't.
-- `StateRef` carries the live seats as a bitmask. The channel then asks only
-  live seats to approve checkpoints and `resume`, and lets any live seat that
-  isn't due claim a timeout.
+- `StateRef` carries the eliminated seats as a bitmask, so zero means nobody
+  is out, as in every 2-seat channel and every channel from before v5. A mask
+  of live seats would read there as nobody in: no approvals needed, and
+  nobody able to claim a timeout. The channel asks only seats still in to
+  approve checkpoints and `resume`, and lets any seat still in that isn't due
+  claim a timeout.
 - With more than 2 seats, an onchain timeout changes the game state. It takes
   the anchor envelope as calldata, as `force` does, through a new binding
   helper, so the 2-seat `claim_timeout` keeps its arguments. Forced play then
