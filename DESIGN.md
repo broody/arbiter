@@ -20,7 +20,7 @@ Hashfront (`~/development/hashfront`, a tactics game with combat randomness).
 |---|---|---|---|
 | `core` (Cairo) | built | nothing | `GameRules`, protocol envelope, hashing, signatures, replay, forced steps, randomness, referee clocks |
 | channel state machine (`referee::channel`) | built | `core` | Pure functions: create, join, receive a candidate, dispute, acknowledge, resolve, forced play, a posted roll, void, timeout, resume, resign |
-| `referee_dojo` (Cairo) | built | `core`, Dojo | `ChannelTerms`/`ChannelState`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint, including `acknowledge`, `resume_by_referee`, `roll` and `void`. Games list the models in `build-external-contracts` |
+| `referee_dojo` (Cairo) | built | `core`, Dojo | `ChannelTerms`/`ChannelState`/`ChannelRng`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint, including `acknowledge`, `resume_by_referee`, `roll` and `void`. Games list the models in `build-external-contracts` |
 | `referee_testing` (Cairo) | built | `core` | Test-only STARK-curve signer and hash-chain helper |
 | `referee_adapter` (Cairo 2.18) | built, tested with mocked proof facts | `core` | Generic logic for a SNIP-36 account contract that proves a replay in the virtual OS and relays it to the channel |
 | `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, clocks and `Referee`, fixtures, Poseidon in WebAssembly; native proving client (`@referee/sdk/proving`); session store and signing guard (`@referee/sdk/store`) |
@@ -315,8 +315,10 @@ fn open_dispute(ref self: ContractState, game_id: felt252, epoch: u32) {
 
 - The game adds `referee_dojo::models::{m_ChannelTerms, m_ChannelState, m_ProverAllowed,
   e_ChannelUpdated}` to `build-external-contracts`, and `sozo` registers them
-  in the game's namespace.
-- A channel is stored in two models:
+  in the game's namespace. A game that takes randomness from its referee adds
+  `m_ChannelRng`.
+- A channel is stored in two models, and a third if its creator asked for the
+  referee's randomness:
   - `ChannelTerms`, written at create and join only: 2 seats (wallet, session
     key, randomness tip), the prover, the time control, the serialized game
     `Config`, the context and the response window.
@@ -324,6 +326,12 @@ fn open_dispute(ref self: ContractState, game_id: felt252, epoch: u32) {
     candidate's (zero while it is the anchor), and two packed words for
     status, epoch, deadline, blocks, the acknowledgement, both references'
     small fields and the result.
+  - `ChannelRng`: the tip of the referee's hash chain, for a game that takes
+    its randomness from its referee. One bit of the packed state says which
+    games have one, so no other game reads or writes it. As a member of
+    `ChannelTerms` it cost every game about 0.11M gas per call that reads or
+    writes the terms: a Surround 9×9 game went from 72.85M to 73.56M with it
+    there, and takes 73.01M with it apart.
 
   Transitions that need no terms beyond the seats or the referee key read
   only those members. `get_channel` returns both as one `ChannelGame`, and

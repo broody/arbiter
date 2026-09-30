@@ -19,6 +19,7 @@ build-external-contracts = [
     "dojo::world::world_contract::world",
     "referee_dojo::models::m_ChannelTerms",
     "referee_dojo::models::m_ChannelState",
+    "referee_dojo::models::m_ChannelRng",       # only if games take randomness from their referee
     "referee_dojo::models::m_ProverAllowed",
     "referee_dojo::models::e_ChannelUpdated",
 ]
@@ -43,7 +44,9 @@ A channel is stored in two models. `ChannelTerms` holds what the channel fixes
 when it opens (seats, session keys, tips, prover, config, time control, context
 and window) and is written at `create` and `join` only. `ChannelState` holds
 the state machine in four felts (the anchor's hash, the candidate's, and two
-packed words) and is written on every transition. `get_channel` returns both
+packed words) and is written on every transition. A game whose creator asked
+for the referee's randomness has a third, `ChannelRng`, with the referee's
+hash-chain tip; no other game reads or writes it. `get_channel` returns them
 as one `ChannelGame`.
 
 Give the system write access to the namespace in `dojo_<profile>.toml`:

@@ -40,7 +40,9 @@ pub struct StoredRef {
 /// referee's hash chain when the game takes its randomness from the referee
 /// (before the join, just nonzero when the creator asked for that); `referee`
 /// is zero for an untimed game. Stored as `ChannelTerms`, written at create and
-/// join, and `ChannelState`, packed and written on every transition.
+/// join, `ChannelState`, packed and written on every transition, and
+/// `ChannelRng`, which only a game that takes its randomness from its referee
+/// has.
 #[derive(Copy, Drop, Serde, PartialEq, Debug)]
 pub struct ChannelGame {
     pub id: felt252,
@@ -89,7 +91,18 @@ pub struct ChannelTerms {
     pub response_seconds: u32,
     pub referee: felt252,
     pub clock_settings: Span<felt252>,
-    pub referee_tip: felt252,
+}
+
+/// The referee's randomness for a channel whose creator asked for it: the tip
+/// of the referee's hash chain, or before the join just a nonzero marker. Kept
+/// apart from `ChannelTerms`, so a game that reveals between its seats never
+/// reads or writes it: `ChannelState` says which games have one.
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct ChannelRng {
+    #[key]
+    pub id: felt252,
+    pub tip: felt252,
 }
 
 /// The channel state machine's fields in four felts: the anchor's hash, the
@@ -180,6 +193,7 @@ pub fn channel_of(game: @ChannelGame) -> Channel {
         deadline: *game.deadline,
         acked_epoch: *game.acked_epoch,
         acked_deadline: *game.acked_deadline,
+        referee_rng: *game.referee_tip != 0,
         result: (*game.result).into(),
     }
 }
@@ -200,9 +214,9 @@ pub fn with_channel(mut game: ChannelGame, channel: Channel) -> ChannelGame {
     game
 }
 
-/// The combined view of a channel's terms and state.
-pub fn game_of(terms: @ChannelTerms, state: @ChannelState) -> ChannelGame {
-    let channel = unpack_state(state, *terms.context, *terms.response_seconds);
+/// The combined view of a channel's terms and state, with the referee's tip
+/// (zero for a game without one).
+pub fn game_of(terms: @ChannelTerms, channel: Channel, referee_tip: felt252) -> ChannelGame {
     with_channel(
         ChannelGame {
             id: *terms.id,
@@ -220,7 +234,7 @@ pub fn game_of(terms: @ChannelTerms, state: @ChannelState) -> ChannelGame {
             response_seconds: 0,
             referee: *terms.referee,
             clock_settings: *terms.clock_settings,
-            referee_tip: *terms.referee_tip,
+            referee_tip,
             anchor: blank_ref(),
             candidate: blank_ref(),
             anchor_block: 0,
@@ -249,13 +263,13 @@ pub fn terms_of(game: @ChannelGame) -> ChannelTerms {
         response_seconds: *game.response_seconds,
         referee: *game.referee,
         clock_settings: *game.clock_settings,
-        referee_tip: *game.referee_tip,
     }
 }
 
 // Packing. `times`, low 128 bits: status (8), epoch (32), deadline (40),
 // anchor block (40); high: candidate block (40), acknowledged epoch (32) and
-// deadline (40). `refs`, low: the anchor's reference (89) and the result (17);
+// deadline (40), and whether the referee gives the randomness (1). `refs`, low: the anchor's
+// reference (89) and the result (17);
 // high: the candidate's reference (89). A reference is seq (32), support turn
 // (32), due seat (8) and its outcome (17): finished (1), winner (8), reason (8).
 // Blocks and seconds fit 40 bits for millennia.
@@ -265,6 +279,7 @@ const TWO_17: u128 = 0x20000;
 const TWO_32: u128 = 0x100000000;
 const TWO_40: u128 = 0x10000000000;
 const TWO_72: u128 = 0x1000000000000000000;
+const TWO_112: u128 = 0x10000000000000000000000000000;
 const TWO_89: u128 = 0x20000000000000000000000;
 const TWO_128: felt252 = 0x100000000000000000000000000000000;
 
@@ -276,9 +291,15 @@ pub fn pack_state(id: felt252, channel: @Channel) -> ChannelState {
     low += bits40(c.deadline) * TWO_8 * TWO_32;
     low += bits40(c.anchor_block) * TWO_8 * TWO_32 * TWO_40;
     let acked_epoch: u128 = c.acked_epoch.into();
+    let referee_rng: u128 = if c.referee_rng {
+        TWO_112
+    } else {
+        0
+    };
     let high = bits40(c.candidate_block)
         + acked_epoch * TWO_40
-        + bits40(c.acked_deadline) * TWO_40 * TWO_32;
+        + bits40(c.acked_deadline) * TWO_40 * TWO_32
+        + referee_rng;
     let refs_low = pack_ref(@c.anchor) + pack_outcome(@c.result) * TWO_89;
     let refs_high = pack_ref(@c.candidate);
     ChannelState {
@@ -316,6 +337,7 @@ pub fn unpack_state(state: @ChannelState, context: felt252, response_seconds: u3
         deadline: (low / (TWO_8 * TWO_32) % TWO_40).try_into().unwrap(),
         acked_epoch: (high / TWO_40 % TWO_32).try_into().unwrap(),
         acked_deadline: (high / (TWO_40 * TWO_32) % TWO_40).try_into().unwrap(),
+        referee_rng: high / TWO_112 % 2 == 1,
         result: unpack_outcome(refs.low / TWO_89 % TWO_17),
     }
 }

@@ -18,9 +18,10 @@ use starknet::{
     get_contract_address, get_tx_info,
 };
 use crate::models::{
-    ACKNOWLEDGED, CANCELLED, CREATED, ChannelGame, ChannelState, ChannelTerms, ChannelUpdated,
-    DISPUTED, FORCED, JOINED, ProverAllowed, RECEIVED, RESIGNED, RESOLVED, RESUMED, ROLLED,
-    TIMED_OUT, VOIDED, channel_of, game_of, pack_state, terms_of, unpack_state, with_channel,
+    ACKNOWLEDGED, CANCELLED, CREATED, ChannelGame, ChannelRng, ChannelState, ChannelTerms,
+    ChannelUpdated, DISPUTED, FORCED, JOINED, ProverAllowed, RECEIVED, RESIGNED, RESOLVED, RESUMED,
+    ROLLED, TIMED_OUT, VOIDED, channel_of, game_of, pack_state, terms_of, unpack_state,
+    with_channel,
 };
 
 /// Open a channel as seat 0. `invited` may be zero for an open game. `clock`
@@ -53,7 +54,11 @@ pub fn create<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Drop<R::S
     let mut serialized = array![];
     config.serialize(ref serialized);
     let id: felt252 = world.dispatcher.uuid().into();
-    let channel = machine::create(response_seconds);
+    let referee_rng = match clock {
+        Option::Some(time) => time.rng_tip != 0,
+        Option::None => false,
+    };
+    let channel = Channel { referee_rng, ..machine::create(response_seconds) };
     let game = ChannelGame {
         id,
         player_0: creator,
@@ -89,7 +94,9 @@ pub fn create<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Drop<R::S
         acked_deadline: 0,
         result: channel.result.into(),
     };
-    save_terms(ref world, @with_channel(game, channel));
+    let game = with_channel(game, channel);
+    save_terms(ref world, @game);
+    save_tip(ref world, @game);
     save(ref world, id, channel, CREATED);
     id
 }
@@ -137,7 +144,9 @@ pub fn join<
     let channel = machine::join(
         channel_of(@game), context_hash::<R>(@terms), state_ref::<R>(@opening), get_block_number(),
     );
-    save_terms(ref world, @with_channel(game, channel));
+    let game = with_channel(game, channel);
+    save_terms(ref world, @game);
+    save_tip(ref world, @game);
     save(ref world, game_id, channel, JOINED);
 }
 
@@ -425,12 +434,21 @@ pub fn result(world: @WorldStorage, game_id: felt252) -> Option<Outcome> {
     }
 }
 
-/// A channel's terms and state together.
+/// A channel's terms and state together, with the referee's tip if the game
+/// takes its randomness from its referee.
 pub fn read(world: @WorldStorage, game_id: felt252) -> ChannelGame {
     let terms: ChannelTerms = world.read_model(game_id);
     assert(terms.player_0.is_non_zero(), 'Unknown channel');
     let state: ChannelState = world.read_model(game_id);
-    game_of(@terms, @state)
+    let channel = unpack_state(@state, terms.context, terms.response_seconds);
+    // Only such a game has a `ChannelRng`: no other pays for reading one.
+    let referee_tip = if channel.referee_rng {
+        let rng: ChannelRng = world.read_model(game_id);
+        rng.tip
+    } else {
+        0
+    };
+    game_of(@terms, channel, referee_tip)
 }
 
 /// A channel's state machine alone, without reading its terms: its context
@@ -528,6 +546,15 @@ fn valid_prover(world: @WorldStorage, prover: ContractAddress) {
 // Write a channel's terms, at create and join.
 fn save_terms(ref world: WorldStorage, game: @ChannelGame) {
     world.write_model(@terms_of(game));
+}
+
+// Write the referee's tip, at create (a marker: the creator asked) and at
+// join (the tip the referee signed), for a game that takes its randomness
+// from its referee. No other game writes one.
+fn save_tip(ref world: WorldStorage, game: @ChannelGame) {
+    if *game.referee_tip != 0 {
+        world.write_model(@ChannelRng { id: *game.id, tip: *game.referee_tip });
+    }
 }
 
 // Write a channel's state and announce the transition.

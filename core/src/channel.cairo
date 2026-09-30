@@ -50,6 +50,10 @@ pub struct Channel {
     /// was live for (`acknowledge`); zeros otherwise.
     pub acked_epoch: u32,
     pub acked_deadline: u64,
+    /// Whether the game takes its randomness from its referee. The machine
+    /// never reads it: it is here so that a binding can keep the referee's tip
+    /// apart from the terms, and read it only for the games that have one.
+    pub referee_rng: bool,
     /// Final result once SETTLED.
     pub result: Outcome,
 }
@@ -84,6 +88,7 @@ pub fn create(response_seconds: u32) -> Channel {
         deadline: 0,
         acked_epoch: 0,
         acked_deadline: 0,
+        referee_rng: false,
         result: unfinished(),
     }
 }

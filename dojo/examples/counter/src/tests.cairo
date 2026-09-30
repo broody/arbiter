@@ -1,3 +1,4 @@
+use dojo::model::ModelStorage;
 use dojo::world::{WorldStorage, WorldStorageTrait, world};
 use dojo_cairo_test::{
     ContractDef, ContractDefTrait, NamespaceDef, TestResource, WorldStorageTestTrait,
@@ -13,7 +14,8 @@ use referee::{
 use referee_counter::{ADD, Action, Config, Counter, CounterRules, GAMBLE};
 use referee_dojo::channel::read;
 use referee_dojo::models::{
-    ChannelGame, e_ChannelUpdated, m_ChannelState, m_ChannelTerms, m_ProverAllowed,
+    ChannelGame, ChannelRng, e_ChannelUpdated, m_ChannelRng, m_ChannelState, m_ChannelTerms,
+    m_ProverAllowed,
 };
 use referee_testing::{chain_value, public_key, sign};
 use starknet::ContractAddress;
@@ -53,6 +55,7 @@ fn setup() -> (ICounterChannelDispatcher, WorldStorage) {
         resources: [
             TestResource::Model(m_ChannelTerms::TEST_CLASS_HASH),
             TestResource::Model(m_ChannelState::TEST_CLASS_HASH),
+            TestResource::Model(m_ChannelRng::TEST_CLASS_HASH),
             TestResource::Model(m_ProverAllowed::TEST_CLASS_HASH),
             TestResource::Event(e_ChannelUpdated::TEST_CLASS_HASH),
             TestResource::Contract(channel::TEST_CLASS_HASH),
@@ -662,10 +665,15 @@ fn channel_state_packs_and_unpacks_exactly() {
         deadline: max40 - 2,
         acked_epoch: 0xfffffffe,
         acked_deadline: max40 - 3,
+        referee_rng: true,
         result: referee::Outcome { finished: true, winner: 254, reason: 253 },
     };
     let packed = referee_dojo::models::pack_state(1, @channel);
     assert_eq!(referee_dojo::models::unpack_state(@packed, 0, 604800), channel);
+    // The one bit that says the referee gives the randomness stands alone.
+    let seats = referee::Channel { referee_rng: false, ..channel };
+    let packed = referee_dojo::models::pack_state(1, @seats);
+    assert_eq!(referee_dojo::models::unpack_state(@packed, 0, 604800), seats);
     // A candidate that is the anchor is stored as zero, and read back as the anchor.
     let same = referee::Channel { candidate: channel.anchor, ..channel };
     let packed = referee_dojo::models::pack_state(1, @same);
@@ -871,4 +879,35 @@ fn the_referee_takes_a_paused_game_back() {
     // Offchain again, where the referee rolls.
     let channel = stored(@world, id);
     assert_eq!((channel.status, channel.anchor.due), (ACTIVE, REFEREE));
+}
+
+/// The referee's tip as stored, apart from the terms.
+fn stored_tip(world: @WorldStorage, id: felt252) -> felt252 {
+    let rng: ChannelRng = world.read_model(id);
+    rng.tip
+}
+
+#[test]
+fn only_a_game_that_asks_stores_a_referee_tip() {
+    // Seats reveal, timed or not: nothing is written, and nothing is read back.
+    let (_, world, id) = started_with(blitz());
+    assert_eq!(stored_tip(@world, id), 0);
+    assert_eq!(stored(@world, id).referee_tip, 0);
+    // The creator asks: a marker until the join, then the tip the referee signed.
+    let (game, asked) = created_rolled();
+    assert_eq!(game.get_channel(asked).referee_tip, 1);
+    let (_, world, id) = started_with(rolled_blitz());
+    assert_eq!(stored_tip(@world, id), chain_value(SEED_REF, RNG_LEN));
+}
+
+#[test]
+fn the_referee_tip_stays_with_the_game_through_forced_play() {
+    // Every transition rewrites the packed state: the tip must still be found.
+    let (game, world, id, _) = paused();
+    let tip = chain_value(SEED_REF, RNG_LEN);
+    assert_eq!(stored(@world, id).referee_tip, tip);
+    assert_eq!(game.terms(id).clock.unwrap().rng_tip, tip);
+    set_block_timestamp(stored(@world, id).deadline);
+    game.void(id, 2, no_approvals());
+    assert_eq!(stored(@world, id).referee_tip, tip);
 }

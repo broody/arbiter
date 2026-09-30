@@ -449,6 +449,7 @@ let clock = TimeControl {
 | `deadline` | `u64` | End of the current dispute or forced-play window, or of the pause while the referee owes a roll in forced play. Otherwise 0. |
 | `acked_epoch` | `u32` | Epoch of the dispute the referee of a timed game acknowledged (`acknowledge`); 0 until one is. |
 | `acked_deadline` | `u64` | Deadline of that dispute; 0 until one is. |
+| `referee_rng` | `bool` | Whether the game takes its randomness from its referee. The machine never reads it: a binding uses it to keep the referee's tip apart from the terms. |
 | `result` | `Outcome` | The final result once `SETTLED`. |
 
 ### Transitions

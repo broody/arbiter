@@ -11,7 +11,7 @@
 
 `referee_dojo::models` ([`models.cairo`](https://github.com/broody/referee/blob/main/dojo/referee_dojo/src/models.cairo)). A game registers the models and the event in its namespace through `build-external-contracts` (see [Wrapping the helpers](#wrapping-the-helpers)).
 
-A channel is stored in two models: `ChannelTerms`, written at `create` and `join` only, and `ChannelState`, four felts written on every transition. `ChannelGame` is not a model: it is the combined view that `read` builds and a game's `get_channel` returns.
+A channel is stored in two models: `ChannelTerms`, written at `create` and `join` only, and `ChannelState`, four felts written on every transition. A game that takes its randomness from its referee has a third, `ChannelRng`. `ChannelGame` is not a model: it is the combined view that `read` builds and a game's `get_channel` returns.
 
 ### ChannelGame
 
@@ -47,14 +47,14 @@ One referee channel: its terms and its state together. Derives `Copy`, `Drop`, `
 | --- | --- |
 | `channel_of(game: @ChannelGame) -> Channel` | The channel fields as a `Channel`. |
 | `with_channel(game: ChannelGame, channel: Channel) -> ChannelGame` | `game` with its channel fields replaced by `channel`'s. |
-| `game_of(terms: @ChannelTerms, state: @ChannelState) -> ChannelGame` | The combined view: `unpack_state` with the terms' context and window, plus the terms. |
+| `game_of(terms: @ChannelTerms, channel: Channel, referee_tip: felt252) -> ChannelGame` | The combined view: the terms, the unpacked channel, and the referee's tip (zero for a game without one). |
 | `terms_of(game: @ChannelGame) -> ChannelTerms` | The terms fields of a view. |
 | `pack_state(id: felt252, channel: @Channel) -> ChannelState` | Packs a channel (below). Panics with `'Value exceeds 40 bits'` if `deadline`, `anchor_block`, `candidate_block` or `acked_deadline` is `2^40` or more. |
 | `unpack_state(state: @ChannelState, context: felt252, response_seconds: u32) -> Channel` | Unpacks a channel. `context` and `response_seconds` live in `ChannelTerms`, so the caller passes them. |
 
 ### ChannelTerms
 
-What a channel fixes when it opens. `#[dojo::model]`, keyed by `id`. `create` writes it, and `join` writes it again with seat 1, the referee's tip and the context.
+What a channel fixes when it opens. `#[dojo::model]`, keyed by `id`. `create` writes it, and `join` writes it again with seat 1 and the context.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -68,7 +68,15 @@ What a channel fixes when it opens. `#[dojo::model]`, keyed by `id`. `create` wr
 | `response_seconds` | `u32` | Window length. |
 | `referee` | `felt252` | Referee key; zero for an untimed game. |
 | `clock_settings` | `Span<felt252>` | Serialized time settings; empty for an untimed game. |
-| `referee_tip` | `felt252` | The referee's hash-chain tip, as in `ChannelGame`; zero when the seats reveal to each other. |
+
+### ChannelRng
+
+The referee's randomness for a channel whose creator asked for it. `#[dojo::model]`, keyed by `id`. Only such a game has one: `create` writes a marker, and `join` writes the tip the referee signed. `ChannelState` says which games have one (`referee_rng`), so a game whose seats reveal to each other never reads or writes it. `read` and `get_channel` return the tip as `ChannelGame.referee_tip`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | `felt252` (key) | Game id. |
+| `tip` | `felt252` | The tip of the referee's hash chain. Before `join`, just non-zero. |
 
 ### ChannelState
 
@@ -93,6 +101,7 @@ The channel state machine's fields in four felts. `#[dojo::model]`, keyed by `id
 | | 128..168 | `candidate_block` |
 | | 168..200 | `acked_epoch` |
 | | 200..240 | `acked_deadline` |
+| | 240 | `referee_rng` |
 | `refs` | 0..89 | The anchor's reference |
 | | 89..106 | `result` |
 | | 128..217 | The candidate's reference |
@@ -369,10 +378,13 @@ build-external-contracts = [
     "dojo::world::world_contract::world",
     "referee_dojo::models::m_ChannelTerms",
     "referee_dojo::models::m_ChannelState",
+    "referee_dojo::models::m_ChannelRng",
     "referee_dojo::models::m_ProverAllowed",
     "referee_dojo::models::e_ChannelUpdated",
 ]
 ```
+
+`m_ChannelRng` is only needed by a game that takes randomness from its referee.
 
 The system also needs write access to its namespace; the counter grants it in `dojo_dev.toml` with `[writers] "counter" = ["counter-channel"]`.
 
