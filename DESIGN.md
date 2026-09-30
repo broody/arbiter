@@ -512,6 +512,213 @@ latest verified transcript.
 - **Aggregation across games** is the recursion that pays: many settled games
   per proof to spread the fixed charge. It is a later optimization.
 
+## More than 2 seats (planned)
+
+*Planned, not built; it would be protocol version 5.* Referee plays exactly 2
+seats: `open` asserts `SEATS == 2` in Cairo and the SDK. This section records
+what more seats need, found by a spike that ran a 3-seat game through v4 on
+2026-09-30, and proposes how to build it. The first target is Hashfront, which
+plays 2 to 4 seats (its shipped maps have 2):
+- a turn is any number of actions, ended by END_TURN;
+- an attack's defender reveals the roll, and the attacker keeps its turn;
+- a seat is out when it loses its HQ, or its units, factories and gold;
+- the game ends when one seat is left, or after 100 rounds.
+
+The spike's game, Trio, has the same shape: END passes the turn, and ATTACK
+names a defender, who reveals.
+
+**Surround stays whole.** Surround plays 2 seats only, and v5 must not break it:
+- Every new `GameRules` function has a default, so a 2-seat game compiles
+  unchanged. Cairo 2.13 allows defaults that use the trait's types and
+  constants (checked).
+- With 2 seats the protocol keeps today's endings, `claim_timeout` and
+  `resign`. The Dojo binding keeps its models, entrypoints, `get_channel` and
+  events. New fields go in spare bits of the packed state, which read as zero
+  in existing channels.
+- Surround's results stay the same, and its gas stays at or below 72.8M for a
+  9×9 game.
+- The version bump still changes every context hash, as v4's did. The one
+  intended 2-seat change is that referee steps stop counting as signer
+  changes (below).
+
+**What already works.**
+- Encodings and hashes: `Terms` and `Envelope` carry per-seat spans, and the
+  SDK and Cairo agree on a 3-seat game's context and state hashes.
+- Replay verifies one final signature per seat, for any number of seats.
+  Checkpoint approvals are N-of-N, eliminated seats included (see
+  Eliminations).
+- `StandardTime` keeps one bank per seat, and `ClockRules::open` takes the seat
+  count.
+
+**What breaks.**
+- Seat 2 can't play in the SDK. Besides `open`, `applyStep`, replay,
+  `Session.sign` and `SessionStore.move` refuse any seat but 0 and 1, and a
+  reveal must come from one of them. `gameOutcome` refuses a winner above 2,
+  where Cairo allows up to `SEATS`.
+- Calls and signing state hold 2 seats. `finalSignatures`, `batchOf` and the
+  proving client's `NO_ACKS` carry 2 signatures, so the keeper's submissions
+  and settlements would fail onchain. The store reloads the marks of seats 0
+  and 1 only, so after a restart a third seat would lose its signing guard.
+- Endings pick the wrong winner. `forfeit` is "the other seat wins"
+  (`2 - seat`): with 3 seats, seat 0 forfeiting crowns seat 1, seat 1 forfeiting
+  crowns seat 0, and seat 2 forfeiting draws. One seat's resign ends the game
+  for everyone, and a `claim_timeout` against seat 1 crowns seat 0, whoever
+  claims it.
+- The Dojo binding stores seats in pairs (`player_0`/`player_1`,
+  `key_0`/`key_1`, `tip_0`/`tip_1`), which the SDK's `decodeChannelGame` reads.
+  - `create` takes one invitee.
+  - `join` fills seat 1 and opens the channel at once. It checks the joiner's
+    wallet, key and tip against seat 0 only.
+  - Looking up a caller refuses seats above 1. So seat 2 couldn't open a
+    dispute, resign or claim a timeout. It couldn't play its forced turn either,
+    and the timeout would then settle against it.
+- Collusion. Two seats can outrank a branch the third signed, and a colluding
+  pair knows its rolls in advance (below).
+
+**Forks and collusion.** Candidates rank by signer changes (`support_turn`).
+With 2 seats a signer change is the opponent acknowledging, so a fork that drops
+the opponent's moves holds one seat's steps and loses. With more seats, a
+coalition acknowledges its own steps:
+- In the spike, after a round, A attacks B twice and B reveals each time. A
+  never passes, so C is never due. Those four signer changes beat the honest
+  round's three, and the channel replaces the candidate C signed with the
+  fork. In Hashfront, a few attacks between two colluding seats do this.
+- A fork needs no equivocation to start. A seat may sign a `Resign` at any
+  position it never signed, however old, and replay takes it.
+- A coalition at least as large as the honest seats can match any rank that
+  counts signatures.
+
+Decided: **a game with more than 2 seats has a referee**, and its attestation
+decides between branches.
+- Replay and proofs already require the referee's attestation of the state they
+  end in. An honest referee stamps one branch, so every submission is a prefix
+  of it, and a longer prefix always outranks a shorter one.
+- The keeper's referee already keeps to one branch. It never stamps a seq it
+  has stamped before. Its branch switch (`switched`) replays the other branch
+  through `Session.receive`, which in a timed game needs the referee's own
+  attestation on every step, so it can't adopt a fork the referee never
+  stamped.
+- A coalition can't fork without the referee. Two attestations at one seq with
+  different transcripts prove that the referee equivocated, which the planned
+  referee bond could slash (roadmap item 9). The referee's trust grows from
+  time to order, and the trust model must say so.
+- Games without a referee would need fork evidence onchain instead. If `Resign`
+  were limited to the resigning seat's own turn, every fork would start with
+  the due seat signing two steps at one position. But a proof hides a fork's
+  steps, so the honest seat may never see the second signature. That is left
+  for later.
+
+Separately, referee steps should stop counting as signer changes, for 2 seats
+too. Today a `Start` between one seat's steps raises `support_turn`, which a
+referee colluding with that seat could use.
+
+**Eliminations.** One seat leaving must not end the game. Proposal:
+- The game says who is still in: `GameRules::alive(state, seat)`. The
+  protocol removes a seat with `eliminate(config, state, seat)`.
+  - `Resign`, `Flag` and an onchain timeout eliminate a seat instead of
+    calling `forfeit`.
+  - The protocol checks the seat is out afterwards, and that `due` never names
+    an eliminated seat.
+- When one seat is left and `outcome` has not ended the game, the protocol ends
+  it with `adjudicate`.
+- With 2 seats, a `Resign`, `Flag` or timeout still ends the game with the
+  other seat winning, as today. So `alive` and `eliminate` have defaults that
+  only a 2-seat game may rely on. A game with more seats must implement them,
+  and the protocol's checks catch one that doesn't.
+- `StateRef` carries the live seats as a bitmask. The channel then asks only
+  live seats to approve checkpoints and `resume`, and lets any live seat that
+  isn't due claim a timeout.
+- With more than 2 seats, an onchain timeout changes the game state. It takes
+  the anchor envelope as calldata, as `force` does, through a new binding
+  helper, so the 2-seat `claim_timeout` keeps its arguments. Forced play then
+  continues with the next due seat, on a fresh window.
+- With more than 2 seats, a wallet resign is allowed only in forced play
+  (decided). In offchain play a seat signs `Resign`, and the referee sequences
+  it.
+
+**Outcomes.** `Outcome { finished, winner, reason }` names one winner.
+Proposal:
+- Add each seat's place: 1 for first, with a shared place for draws and
+  teams.
+- A new `GameRules::placements(config, state)` supplies the places. Its default
+  derives them from `winner`, so 2-seat games don't change.
+- `winner` stays: the seat alone in first place, or `DRAW`.
+- With more than 2 seats, the Dojo binding stores the places once, at
+  settlement, beside the packed state. With 2 seats they follow from the
+  winner.
+
+**Randomness.** A seed mixes the requester's value and one revealer's. Their
+hash chains fix both in advance, so a colluding pair knows a roll before it
+signs the action. For Hashfront that is enough: the defender is the only other
+party to its fight, and a colluding defender could throw the fight anyway. A
+roll that affects everyone needs everyone's value. Decided: sets of revealers,
+in v5.
+- `apply` still names one seat. A new `GameRules::revealers(config, state,
+  requester, named)` widens that to a set of seats, as a bitmask. Its default
+  is the named seat alone, as today.
+- The seats reveal in seat order, so `Reveal` stays seat-implicit, and the
+  seed takes each value in turn.
+- A game that names every other live seat gets a roll that only all the seats
+  together could predict. It costs one step and one round trip per revealer.
+- If a named revealer is eliminated before revealing, the roll resolves from
+  the values revealed so far (decided). A colluding revealer can veto a roll
+  that way, at the price of its seat.
+
+**Seats.** `SEATS` is a constant, so a game that plays 2 to 4 would need a
+deployment per count. Proposal: `GameRules::seats(config)`, which Hashfront's
+map would set. It defaults to `SEATS`, which becomes the most seats a game
+plays. `open` and `create` check it against `terms.players`, with at most 16
+seats (decided). Everything else uses the envelope's per-seat spans.
+
+**Joining.** Proposal:
+- 2-seat channels keep `create` and `join` as they are.
+- For more seats, new binding helpers:
+  - `create` takes the config, and so the seat count, plus one optional
+    invitee per seat. The creator takes seat 0.
+  - `join` names the seat it fills. It checks the joiner's wallet, key and tip
+    against every seat: two seats sharing a key would let one signature
+    approve for both.
+- The channel opens when the last seat joins, and until then the creator may
+  cancel.
+  - The last join emits JOINED, as today, so the keeper's discovery keeps
+    working.
+  - Earlier joins emit a new kind.
+- Seats 0 and 1 stay in `ChannelTerms`. Seats from 2 up go in a
+  `ChannelSeat(id, seat)` model with the wallet, key and tip.
+  - A 2-seat game never touches it.
+  - Authenticating a caller reads one seat.
+  - `get_channel` keeps its shape, and a new view returns the other seats.
+
+**The rest of the stack.**
+- The SDK mirrors all of the above and drops its 2-seat checks.
+- `SessionStore` keeps a mark per seat.
+- The keeper's referee flags a seat and keeps stamping for the others. It must
+  keep to one branch, as it does today.
+- The adapter only replays, so it changes with the core. Its proofs carry one
+  more signature per seat.
+
+**Build order.** One protocol version, built bottom-up, one layer per change:
+1. The core and the SDK mirror together, driven by a new 3–4 seat example game
+   with fixtures from the SDK. The counter keeps covering 2 seats.
+2. The channel state machine.
+3. The Dojo binding.
+4. The adapter, the store, the keeper and the docs.
+
+Every layer keeps Surround whole (above) and passes Surround's own suites. The
+spike's collusion scenarios become tests that the new rules must reject.
+
+**Decisions** (2026-09-30).
+1. Games with more than 2 seats have a referee, in v5.
+2. At most 16 seats.
+3. Sets of revealers, in v5.
+4. A revealer eliminated before revealing: the roll resolves from the values
+   revealed so far.
+5. With more than 2 seats, a wallet resign only in forced play.
+6. Hashfront is the first game with more than 2 seats, and Surround, 2 seats
+   only, must not break.
+
+Still open: whether Hashfront rates games by place.
+
 ## Roadmap
 
 1. ~~Channel state machine as pure functions.~~ Done.
@@ -536,9 +743,8 @@ latest verified transcript.
    charged to the seat that has it, which is noise against clocks of seconds;
    `turn_ms` can serve as a grace if tighter clocks ever need one. Still to
    do: a referee bond that equivocation evidence can slash.
-10. More than 2 seats: endings as eliminations (`forfeit`), an outcome with
-    teams or placements, randomness that two colluding seats cannot predict,
-    and joining N seats.
+10. More than 2 seats: designed, not built. See
+    [More than 2 seats](#more-than-2-seats-planned).
 
 ## Development
 
