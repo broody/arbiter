@@ -1,6 +1,7 @@
 /// `last_seat` before any step has been applied.
 pub const NO_SEAT: u8 = 255;
-/// The actor of a `Flag`: the referee, which is not a seat.
+/// The actor of a `Flag`, a `Start` and a roll: the referee, which is not a
+/// seat.
 pub const REFEREE: u8 = 254;
 /// `Outcome.winner` for a drawn game. Otherwise `winner` is the winning seat + 1.
 pub const DRAW: u8 = 0;
@@ -11,6 +12,10 @@ pub const REASON_TIMEOUT: u8 = 129;
 /// The chain judged that the due seat missed its forced-play window
 /// (`channel::claim_timeout`), without any referee.
 pub const REASON_ABANDON: u8 = 130;
+/// A roll waited too long for a referee that was down, or every seat agreed to
+/// stop waiting (`channel::void`). No result: not a draw, whatever `winner`
+/// says.
+pub const REASON_VOID: u8 = 131;
 
 #[derive(Copy, Drop, Serde, PartialEq, Debug)]
 pub struct Signature {
@@ -19,12 +24,14 @@ pub struct Signature {
 }
 
 /// A timed game's time control, bound into its terms: the referee's public key,
-/// which signs stamps and flags, and the settings of the game's `ClockRules`,
-/// serialized.
+/// which signs stamps and flags, the settings of the game's `ClockRules`,
+/// serialized, and the tip of the referee's own hash chain when the game takes
+/// its randomness from the referee (zero when the seats reveal to each other).
 #[derive(Copy, Drop, Serde, PartialEq, Debug)]
 pub struct TimeControl {
     pub referee: felt252,
     pub settings: Span<felt252>,
+    pub rng_tip: felt252,
 }
 
 /// A timed game's clock. The time a turn uses adds up in `used` and is settled
@@ -61,7 +68,8 @@ pub struct Terms<C> {
 /// A step: one seat's signed move. Only `Resign` names its seat; every other
 /// move belongs to the seat the state says is due (the turn's seat, or the
 /// pending seat for `Reveal`), so the seat is never carried or signed twice.
-/// `Flag` and `Start` belong to the referee of a timed game.
+/// `Flag` and `Start` belong to the referee of a timed game, and so does a
+/// `Reveal` when the game takes its randomness from the referee.
 #[derive(Copy, Drop, Serde, PartialEq, Debug)]
 pub enum Move<A> {
     /// The due seat's game action.
@@ -69,7 +77,7 @@ pub enum Move<A> {
     /// The due seat's game action that requests randomness, with the actor's
     /// next hash-chain value.
     PlayRandom: (A, felt252),
-    /// The pending seat's next hash-chain value.
+    /// The pending seat's next hash-chain value, or the referee's.
     Reveal: felt252,
     /// The due seat replaces its hash-chain tip before the chain runs out. Only
     /// after it revealed from its current one (`Envelope.rng_fresh`).
@@ -95,7 +103,7 @@ pub struct Batch<A> {
     pub attestation: Signature,
 }
 
-/// A randomness request waiting for `seat` to reveal.
+/// A randomness request waiting for `seat` to reveal: a seat, or `REFEREE`.
 #[derive(Copy, Drop, Serde, PartialEq, Debug)]
 pub struct Pending {
     pub active: bool,
@@ -118,9 +126,11 @@ pub struct Outcome {
 pub struct Envelope<S> {
     pub seq: u32,
     pub transcript: felt252,
-    /// Number of signer changes. Ranks dispute candidates: consecutive steps by
-    /// one seat never outrank a branch the other seat acknowledged.
+    /// Number of changes of signing seat. Ranks dispute candidates: consecutive
+    /// steps by one seat never outrank a branch the other seat acknowledged.
+    /// The referee's steps count for neither seat.
     pub support_turn: u32,
+    /// The last seat that signed a step.
     pub last_seat: u8,
     pub pending: Pending,
     /// Last revealed hash-chain value per seat (the committed tip initially).
@@ -128,6 +138,9 @@ pub struct Envelope<S> {
     /// Per seat: whether its head is a tip it committed and has not revealed
     /// from yet. A seat may recommit only after a reveal.
     pub rng_fresh: Span<bool>,
+    /// The referee's last revealed hash-chain value (its committed tip
+    /// initially), or zero when the seats reveal to each other.
+    pub rng_referee: felt252,
     /// `None` for an untimed game.
     pub clock: Option<Clock>,
     pub outcome: Outcome,

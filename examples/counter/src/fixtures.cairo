@@ -4,30 +4,41 @@ use referee::{Clock, Envelope, Move, Outcome, Pending, REFEREE, Signature, Terms
 use crate::hourglass::{Hourglass, HourglassClock};
 use crate::{Action, Config, Counter};
 
-pub const CONTEXT: felt252 = 0x15149af3b1f6d4439a242d706ca95b5381e03267e514c48b00c2c4df760c16e;
-pub const STATE_HASH: felt252 = 0x16e2eca420ea810ca904bc40bdbbe0313d18dfb170a248832e930b9eb7c503b;
-pub const CHECKPOINT: felt252 = 0x1d93401ad9345c2366ed1e8978f43fa6a04e8b3670c9129e62387c3a4f337b;
+pub const CONTEXT: felt252 = 0x3692d1446de44c4fc16d0369f03ee44506dafea508adf722c391cb5a79e34b2;
+pub const STATE_HASH: felt252 = 0x45c38cbe132ea3fbca01e524eea976615f0f6758177dad325b65e63e961c380;
+pub const CHECKPOINT: felt252 = 0x32904dcdad4e1a394a70711211aadad0900e349266eedf0daf08f3371ed946a;
 /// `live_hash` at epoch 3 and deadline 12345, and `referee_resume_hash` at
 /// epoch 2 from the final state.
-pub const LIVE_HASH: felt252 = 0x29e087cf718ea976257fe8bd7ad603c6cf1f97a2f0481f4ef03bab9bb165437;
+pub const LIVE_HASH: felt252 = 0x133e4166fe51b3c4c1ef22b4dbd57977cc40e1af4c387f75cb5f82e98480dea;
 pub const REFEREE_RESUME_HASH: felt252 =
-    0x162c9c5a30e1555f34c08a1c57d5992b315d2b6efa2f6cfd122afb413eba078;
+    0x1f6aeca981acdee882db5de79a34226e0738774134c9886505108b72493958a;
 pub const RNG_LEN: u32 = 8;
 pub const SEED_0: felt252 = 0x5eed0;
 pub const SEED_1: felt252 = 0x5eed1;
 pub const REFEREE_KEY: felt252 = 0x7e7e7e;
 pub const TIMED_CONTEXT: felt252 =
-    0x11d22c4a66267091e193cb468bfb1826d5f1f8589af1753df8aa72f805176f1;
+    0x2017e23087676106cb7ba87d3c52dc3058f4d262e36e78c24c4c842a157ed90;
 pub const TIMED_STATE_HASH: felt252 =
-    0x50aad2424c1deffac0ae71d269ac0dc3bc3cc3fdfa69e9ea412906901c0a8db;
+    0x7af660c45b7391072881ef72aa7ed30851f696807bba15c88e7273548300fae;
 pub const BYOYOMI_CONTEXT: felt252 =
-    0x2529874ec41bdccde91192ae9289ae7549db9495a0d49c18763bfdda794b056;
+    0x2c1aa06bce65eecceed19d039a31288790751c3a696dd9a02c7f6f8d55382f4;
 pub const BYOYOMI_STATE_HASH: felt252 =
-    0x6370c195ebf6bb6d0d917af65188a550ba903168aa0596cc430ac6d1e694d86;
+    0x6d2074ef6dcfc85c1c271ed0da5be6ce0836b72f4c73a40c1fc5f681c53c0ac;
 pub const HOURGLASS_CONTEXT: felt252 =
-    0x7c569a121d750f89183629a1de3252dcfe8a77dc39050d696e2f3507dc9c96f;
+    0x22ccfbf3abd0cfc85539eaf919c68079b4b477332ea0457b84d3910fc25790e;
 pub const HOURGLASS_STATE_HASH: felt252 =
-    0x66cc48079d509a08793465d220c9e2eeb7f8e1b1e859d1be8f1d866ff039d93;
+    0x57904641beb5e59b6836012220c9c48497f3aafd008683ae6e050441a1ea2f;
+/// The game that takes its randomness from the referee, whose hash chain
+/// starts at `REFEREE_RNG_SEED` and has `RNG_LEN` links.
+pub const REFEREE_RNG_SEED: felt252 = 0x5eed7e;
+pub const ROLLED_CONTEXT: felt252 =
+    0x64f8187b7f1e13af38b2652cf7bc4ca61fcdfa7f4c6483f35ce33890d255ae2;
+pub const ROLLED_STATE_HASH: felt252 =
+    0x21e9c59c670775b91d80dd2ca61eda033bf31af0619f51fa9456f9ae9ff37c3;
+/// `tip_hash` of that game's tip, and `void_hash` at epoch 2 from the final
+/// state of the untimed game.
+pub const TIP_HASH: felt252 = 0x17ee448b73b6680cbbda5eda9553bd4e2a9f1a9fc97161fb5cd7ae364a09f57;
+pub const VOID_HASH: felt252 = 0x1bfc4044db26784afac401f1a2d77fbbd92e29edab847341628673cc6a403ad;
 
 pub fn terms() -> Terms<Config> {
     Terms {
@@ -84,40 +95,40 @@ pub fn seats() -> Array<u8> {
 pub fn signatures() -> Array<Signature> {
     array![
         Signature {
-            r: 0x5e2f98829caca008ccfb249aea3c873c29fbbe2098f8d11a96a762aee596a69,
-            s: 0x78d46500d340f1860d7a23fff468f1f6c73f19be0c37803e1ca81552c0c3794,
+            r: 0x5e34e2742f8d3fe37e04369a292176b6556e4932204590824cb2fef150fb000,
+            s: 0x257c74bf681496afb8a94dafdfc0a4005d44b79cd4a4f4eb0fc0fe4253195ab,
         },
         Signature {
-            r: 0x7cb004629beafb0a0bf0d1ca30eb1a3243636c2308dd5b25e67f3fc74148455,
-            s: 0x328f69e2f4ca55a114a7f44abdfd49ee0e31915088167ba3473200743f87a9c,
+            r: 0x4da65e96def4d454ea3af116f51be7dded62de77caf817cfe161db4f0c595bc,
+            s: 0x7af8652405953aff8f42d10ed9539c34aa970988d34df317f2a2f3a9c3839a1,
         },
         Signature {
-            r: 0x7997ee9accfb8e95cccce370936a8604b78640212e5cc46551bf7ba97d0312e,
-            s: 0x5e2cddfd5fc4ef11b89aa2e28c426be4f5a87e3c6f5f8687c91a11a54700078,
+            r: 0x4d8d8836e9b32910c7c1984740171a08705be7639e3057201f8fc6fb2b0eb6f,
+            s: 0x23cdefca8db16ae154b3e8aabb7e4196b85d4f8ace689d5fc92d9c39fb0e9d8,
         },
         Signature {
-            r: 0x4d4dbce6927f9f35f69d3cd1566c7cc9d749fa97e620193a78d88820ae260c3,
-            s: 0x504f9328550cf296aec294ca4820f5faf7e330b74d05940d9e56ae54159df4a,
+            r: 0x6e5f60c91e571bb394ded1d3b8bbc2691346d473c1f74e31666bf19ccbf5f57,
+            s: 0x5f70d873bc297e4a15d65811740d3670f707a36e9e59d53161f4097cf88d137,
         },
         Signature {
-            r: 0x7402a035b41716edd408f1e11abfcc6361bfa7574c49a1e5cfef4c4e9dfc356,
-            s: 0x1e15bd392e53756b69a57b9a73d901b504efbd641d7405cf31420c3d14799ed,
+            r: 0x3dfabf2953ffa3a7d0ddccfaf55dedee7a2d1b489ce4118f0c56d330a510398,
+            s: 0x60dbfb90232079cce861f5e60f82239473d791fd1faf135c11dcf8fab416054,
         },
         Signature {
-            r: 0x6233dee4b68b0132eee6798e27f131e4ebc614766d2449bea0f8b49173fe41e,
-            s: 0x557e4221f3eb110c1e4cc5ea107fcce5a36206e096dd989443830b3f84d483e,
+            r: 0x17bd5534e5de6d3cee76a526ac5aafe1736d20db201f530aee7c59415c2f631,
+            s: 0x79ddd340ce737b5b60f1ebe0b8de3d1433d920e79b11129a52409fd015c2edd,
         },
         Signature {
-            r: 0x7aaec6c8bfce53c149257744fd68f412fae1b5e114d01f9ad84bcd9b0c580d1,
-            s: 0x728fa2eae7a12c3e0f27eab0b3887e249565dc78cbbcb78ec4ad9e23582dc37,
+            r: 0x6ecde8a7bc913c0f70bd41c60672dcb918e13a1fa1d6d85f663c0c7ea056359,
+            s: 0x2974aef61f80821d564dda91b3041d200ecb6a08983f7f334e85aadfb287af7,
         },
         Signature {
-            r: 0x69c5e6045da928d7447d0546ae871b05a4c8944c1f546a96809001019c747be,
-            s: 0x6f785ecb2fbe8921a29c96789f6843d46268971844fa11dd748980d012df5e9,
+            r: 0x3eb63d3e1b9d4bb897a6afd4cc2999ac9929c83032ea6996346b8b673e6e152,
+            s: 0x367a14f0e96ed445aa64813e03aff3961018a2d155b3460f8a5e6f4cefb6f0e,
         },
         Signature {
-            r: 0x728ea503c5a70482f66f918117e6f2bc6e5591dc9859449d85c09ea011648a2,
-            s: 0x64c3f92d71b83d73eedd1fa2038ae6dab066de3d624051c3d32d4874871e83a,
+            r: 0x652c5f0c79c3aace834b4f4028de9eaeb20c5891f0f0a9f724e4e26fad1dbb4,
+            s: 0x2f941b83715d5d55c9b8c6e3ac10569747588f69ecba9e39200e408b11fdb2d,
         },
     ]
 }
@@ -148,7 +159,7 @@ fn finals_of(
 pub fn expected() -> Envelope<Counter> {
     Envelope {
         seq: 9,
-        transcript: 0xf7af7bacf8674ebe68d3943dd64d17b509809c0b793a940462ab86030cc086,
+        transcript: 0x1e739bc13b839552e040c8adc65456cbc69b0c799669b8cb38bf6d367f016f2,
         support_turn: 6,
         last_seat: 1,
         pending: Pending { active: false, seat: 0, seq: 0, entropy: 0x0 },
@@ -158,6 +169,7 @@ pub fn expected() -> Envelope<Counter> {
         ]
             .span(),
         rng_fresh: array![false, false].span(),
+        rng_referee: 0x0,
         clock: Option::None,
         outcome: Outcome { finished: true, winner: 2, reason: 1 },
         game: Counter { total: 20, next: 0, gamble: false, winner: 2, target: 20 },
@@ -167,12 +179,12 @@ pub fn expected() -> Envelope<Counter> {
 pub fn acks() -> Array<Signature> {
     array![
         Signature {
-            r: 0x32087d34d1477b7afc42785e0d400ec6fdb9ad0e598df4b34a11e7f889de2e2,
-            s: 0x27f04bca4d4e3646efbb096a274abb4f569f837b19eb03cb77aef5fe499c2f0,
+            r: 0xa12a1aab1a276b98d8e5d459967c5f563bdf8564db2be3304f32acc4d9272,
+            s: 0x168b9fe03a5994abc275c6a27ff035633378885dc10c2e13a936eb8f254451d,
         },
         Signature {
-            r: 0x2cbc497b9eb1b1c2cb9c503df213254514509084ae241010554fc0474fa58a7,
-            s: 0x2dc25b7800f008f6f76e8696f5999fcdffe5bfa1b7c9d83e5727482d378c6a3,
+            r: 0x67ab2b47c39badd9910ba954cc59e1f05e200514dc82ac56f84b5ac7bed7b39,
+            s: 0x321d8430b4ff609ccca750f37f2b6123a93e2c979214739f1e20eef9b09bd00,
         },
     ]
 }
@@ -192,6 +204,7 @@ pub fn timed_terms() -> Terms<Config> {
                         turn_ms: 30000, bank_ms: 60000, increment_ms: 2000, byoyomi: Option::None,
                     },
                 ),
+                rng_tip: 0x0,
             },
         ),
         players: array![0xa11ce, 0xb0b].span(),
@@ -229,7 +242,7 @@ pub fn timed_stamps() -> Array<u64> {
     array![1000000, 1040000, 1045000, 1065000, 1066000, 1160001]
 }
 
-/// The seat of each step (REFEREE for the flag).
+/// The seat of each step (REFEREE for the referee's own).
 pub fn timed_seats() -> Array<u8> {
     array![0, 1, 0, 0, 1, 254]
 }
@@ -237,24 +250,24 @@ pub fn timed_seats() -> Array<u8> {
 pub fn timed_signatures() -> Array<Signature> {
     array![
         Signature {
-            r: 0x3f3ceabcb0bfe03f28563a622f7532b7169e5c9eeac1553476c249c5c4ec05,
-            s: 0x2087c312a9d63e4bb3d81370655e94ed885f841d90a7986de5ee2c13ef74e97,
+            r: 0x2158e0f6ee7471799b2cbf0d43cfcdf5b624100792526705826657c8f98e5d7,
+            s: 0x73611a689cc7fd3a364865c0f927b7baac936f93ee5c3569c95d4967479bdd7,
         },
         Signature {
-            r: 0x71d332e088593aac6690902f97fe2c6c101e54d63a9d09c0992372a7376abfd,
-            s: 0x2db6229c84fc3d441273a8118a30989634ba7de848adc75238b020c637ef729,
+            r: 0x1b26fd7ac43d159f9a9790d1372e248753089bd7b487fffa1e6a22405a6dbd,
+            s: 0xc1f4fbc4240caee446f048d4786e615572c26d209c873d6629cbf3bfdce629,
         },
         Signature {
-            r: 0x31ea529d106e18669d4101566b9b5db82d67bf9066727c7dfb6b50153005e9e,
-            s: 0x5396f3242214a035d51fba27699693c3f171ee3bf4ece77347877c3f317ade6,
+            r: 0x7fa9e1af0dfb8b14af5a3a926b3a33b214c4515c73086462dc3ac8c6c9d9954,
+            s: 0x7d7145ceb859cf64e961fa0daf9c392b93984044def5c8058e245e19bef4551,
         },
         Signature {
-            r: 0x58df3912a85e01bb0bb3ff1b525bb357c5eb195fb9bf97d6870e8137a5d3f02,
-            s: 0xc8c77e00f5e902fd55d70f5b27a9b3946ca4306aaef931f5ac561a6ede79e4,
+            r: 0x7fda2d86dd896699f12fc56573e7374c3f3f3e967573529ba171691983ce7da,
+            s: 0x10cb3a14ef87b2b015571c272911ea3d1904965bb560ad56d98bb6e700aa397,
         },
         Signature {
-            r: 0x2c38c2748f7ef387bd7a901fdd7b80e36197ed880d6f3426bfd52b41c9c7742,
-            s: 0x5a5434c33e4d1ddbcd4915a1b5eca00fdf1b688971e790bc34508d362054ad1,
+            r: 0x51f6f4d87d2965b2002adb35a3d785c4977ea24f862bbeacefcf255cc31c811,
+            s: 0xe48df3961033fc2d7208c9bd8ee01347de4bedd0e787204c6eb70d5f920ae9,
         },
         Signature { r: 0x0, s: 0x0 },
     ]
@@ -264,28 +277,28 @@ pub fn timed_signatures() -> Array<Signature> {
 pub fn timed_attestations() -> Array<Signature> {
     array![
         Signature {
-            r: 0x5b19983bcee92be6a569b1e95a0e565bc0fb0f2acc3058cd4c951a319ba8ebf,
-            s: 0x1d580bbbd286727c2a3e91b5362a48699f4388425d801006b7c5bebdc3ca763,
+            r: 0x7ef3fed35b52aa3a3a5e1d1262655abe980d1f9d32461839ee7b8079a38bfc3,
+            s: 0x4cd48ad95907d5ee446c5554a46099e80c09eae7b85698649841bde31f7fd2f,
         },
         Signature {
-            r: 0x788da45ff2f94a54fcae26e97c180d789bf187ad6bda0383124f002192ea62b,
-            s: 0x5282dd2fc8c77f2058f578b0e32d8a3b58326957bcbe55bf476247024033eba,
+            r: 0x791eb47c209e5dc8b77b984494e6fa4f5f6eb00edffbd5b573f5bb129499ea3,
+            s: 0x51243098f4f15f52be17ea8f7d0627a81d3654030314968a24986b0804abc5,
         },
         Signature {
-            r: 0x457e4724dc43d4e016bc513a96f4e56363e0175b632e630443957309f00d9ec,
-            s: 0x4e503b903dfdd6b7b76bba4c2514b3cabf12b917913cfa0d4cd5907d379ff20,
+            r: 0x1808dc67a9dab5b39c271b80ff991d3f152e6f4cc11a1af91e0db5c2e792bc4,
+            s: 0x3e3411c4ba3fe569a41ceed5013bf8fbba07f1be7d76a0c5cb36fd5ac423f20,
         },
         Signature {
-            r: 0x4b0ac0ca8c8e262c7f113721d3a60dccb01c6b107b6c62e0868a49a6299b76d,
-            s: 0x397bb8509a1af08fbddb3e713a31da881cff0c2459aa26ed72249a92774574d,
+            r: 0x4f453912d81faa413f2de48f3f2027b1f46442533a5804b537532f4d7bfa7b2,
+            s: 0x712d3b888b447c8502f6d456364fa3a9e381c407512292f81fe121d3d3534da,
         },
         Signature {
-            r: 0x3aff6b0868f4b64fc3cbbc73d119014a8938c60a9ecf1f61d5425891e61050e,
-            s: 0x2f4d3e5b8ba3a3643bdf3e3b91cc47a16ae11c6291baa20a6d442f524f5a012,
+            r: 0x4d067be42a8d4b85e71ab2d9946a0bffbbffee91e0004adc57d0b22d5a9bfd1,
+            s: 0x64a5961ce3c41f041bf0863ce87e662425a31a9528e5929f4f853bb28363e7b,
         },
         Signature {
-            r: 0x86fd9d130ce366930378b569989309339ad4a68a65f8ce5ea4f7d1e1264d05,
-            s: 0x9b1b2f778401184e80391220cfd8f7839e91bf0d2aad0db7fc95cac9622f89,
+            r: 0x29ec624eba68c9fb9e7e7cbc3888f282aebf0cd0a1ef5963ae291736a06c300,
+            s: 0x2247535cf4e16bea3d9b07003b63f18c38eab26a7fa23f559953568ab2ee5e5,
         },
     ]
 }
@@ -298,9 +311,9 @@ pub fn timed_finals(from: u32, to: u32) -> Array<Signature> {
 pub fn timed_expected() -> Envelope<Counter> {
     Envelope {
         seq: 6,
-        transcript: 0x27e2148e88e54a418fa57f7ce4cff0f99164ed53fb0eabd710a8dcae2506a96,
-        support_turn: 5,
-        last_seat: 254,
+        transcript: 0x798d52f4479223338ca4e40325c03cc180c93a605b09f3f3aa81f3b54bbe0f6,
+        support_turn: 4,
+        last_seat: 1,
         pending: Pending { active: false, seat: 0, seq: 0, entropy: 0x0 },
         rng_heads: array![
             0x6816196d951eb84df8af43f8cc7b82125418952b9934a12edded2b6f60e9013,
@@ -308,6 +321,7 @@ pub fn timed_expected() -> Envelope<Counter> {
         ]
             .span(),
         rng_fresh: array![false, false].span(),
+        rng_referee: 0x0,
         clock: Option::Some(
             Clock {
                 seats: encode(
@@ -318,7 +332,7 @@ pub fn timed_expected() -> Envelope<Counter> {
             },
         ),
         outcome: Outcome { finished: true, winner: 2, reason: 129 },
-        game: Counter { total: 9, next: 0, gamble: false, winner: 0, target: 20 },
+        game: Counter { total: 11, next: 0, gamble: false, winner: 0, target: 20 },
     }
 }
 
@@ -340,6 +354,7 @@ pub fn byoyomi_terms() -> Terms<Config> {
                         byoyomi: Option::Some(Byoyomi { periods: 3, period_ms: 5000 }),
                     },
                 ),
+                rng_tip: 0x0,
             },
         ),
         players: array![0xa11ce, 0xb0b].span(),
@@ -377,7 +392,7 @@ pub fn byoyomi_stamps() -> Array<u64> {
     array![1000000, 1012000, 1026000, 1032000, 1039000, 1042000, 1052001]
 }
 
-/// The seat of each step (REFEREE for the flag).
+/// The seat of each step (REFEREE for the referee's own).
 pub fn byoyomi_seats() -> Array<u8> {
     array![0, 1, 0, 1, 0, 0, 254]
 }
@@ -385,28 +400,28 @@ pub fn byoyomi_seats() -> Array<u8> {
 pub fn byoyomi_signatures() -> Array<Signature> {
     array![
         Signature {
-            r: 0x2a06c88bd2cab919e927489f181bfce5d712573cac7fe554875c0623993a027,
-            s: 0x2d413b79f5cc564192a685de1aab76c73963b94fdde7a47085324ce0b1eaad8,
+            r: 0x7cf388785aefec004c0e93f9534666667b305741a7a76f8477ae43b0e1701fc,
+            s: 0x573434e44f281eb1b150bfe2154503c2e6167f7dab96e4e55fece3a28675334,
         },
         Signature {
-            r: 0x363392c22124c7fc8aaf27e034ef60c067459ac1bc4a0ee64bb1bffa1df810c,
-            s: 0x69a06eaff1120bf963bcd88c3589b59fe1f4e78889bda6f36dac4f1fbbd8a42,
+            r: 0x54bb6ad888c0c4c62a8b7d7e9f60307dac4ea352deb5333846a5520770b02b6,
+            s: 0x97fe9a2459305c7dbd5ba9bcca66d5598ff2dfe23eaf0f315e442b02df7093,
         },
         Signature {
-            r: 0x76e3fb54157b100e24ef37f1e28345108d11de24118d6dcded71e4d00bff8da,
-            s: 0x19985fa19870d6d9fd6f860a86c3c3ec5335244934704877f9cecd72b2a142a,
+            r: 0x3b3fa296e9056882bf36d66f09c1dd25ecdc568a9b32e464a552a72fde5b41c,
+            s: 0x4e21ecc02c6115f6f7a017a398707b33d2812e43e6d9bc42ad20660c67fde50,
         },
         Signature {
-            r: 0x117454c0b3b26b52690331c13d07c358c3ee159b13061631ce5a27818cf8d96,
-            s: 0x847a3a42d9219ca9a1a24df75c68edfce21787a07f863ce94176cd5c7978aa,
+            r: 0xb93d33f03de9b61d7ce06063ddf5c2c0fd197dfe88fad79592058fd748e871,
+            s: 0x7c4b47268442b888518d54a273a58b58495ca132c03996c248108987e42dc26,
         },
         Signature {
-            r: 0x68f960c14238005f90e74a15da29d15c722debe5f00c999f9abcf551927820d,
-            s: 0x3a9c53fbe8dbe620928439ac0708d836dbba3cb316f76d0c78ad0905e71ad9f,
+            r: 0x3b6691a65a3a4ec332cc2d02e6b12d4e34b9334bf2d86cdf42641ca9243948f,
+            s: 0x93cc65a5ac05c86ab20f3bebf0b3776d7404dc42f4f4cf40c4d80ee9b39bd7,
         },
         Signature {
-            r: 0x5d2c8a53cc0aaaa9e7efd0a68e18801fa241babf33f8718915021c351b7c20f,
-            s: 0x20d9d20ca5a9476ba6715c815ce81da996b1f5bda201f69e9b30c7db0a0f268,
+            r: 0xbd31b8086ebeae660f0b162d94cd60d612a870a895b3603bb5af3e49713244,
+            s: 0x7e1b5d35ce5e7e084000d94ee750ac0e8777a1d3075fa1af5ed90261d4364c3,
         },
         Signature { r: 0x0, s: 0x0 },
     ]
@@ -416,32 +431,32 @@ pub fn byoyomi_signatures() -> Array<Signature> {
 pub fn byoyomi_attestations() -> Array<Signature> {
     array![
         Signature {
-            r: 0xd1a4d5a8025c8f2316d6d84ecbbf913670ad69c95d9b3baf8f93508ae41f69,
-            s: 0x7c017b2eed528ae99aa1be4f6f60ae717df1c6b9404ac4021a6d4943524a041,
+            r: 0x8465de53b5cb975273c3aed331c2bad167ba310a0fa7875ec369608451e607,
+            s: 0x5ea03587b2ec8e84041788d80841984b73761a7b4ff30477516bc7196f4ad8a,
         },
         Signature {
-            r: 0x1c41717ea8f11b98663563d6af307b69015e0326543dbbe58f3c38a16bd5bfb,
-            s: 0x2f09c01375aae978bcb0183adea8ca9913266c90e668a1c1bea8c26c12ba06f,
+            r: 0xfe23e2aa3bc411d91bd351dc2e32a411a341ff4cf5264d007c3c19291a7652,
+            s: 0x6764557209a4295b66d717f172c3e195e09e6b6658a530395b7caa6998a45ec,
         },
         Signature {
-            r: 0x1f83392183e115100f6ecde8849ed1bff5c8af75f70917e8013791d872bd3d0,
-            s: 0x2d743b00a6122913b6e9b6ee9a2336d72cbfa6e30f7fe486c5e93134681e110,
+            r: 0x1d26770a94a716f32bd2f18a76550bcd1c07d52ff078cf958912d6400485f73,
+            s: 0x7b03c467e2bae9a69e23311612f061807c505fd9640a68c29e07100ffaa2121,
         },
         Signature {
-            r: 0x21f652bbfac57edba644e6c3102c923a8996ded1ea4b35877a36a896190dfb,
-            s: 0x60e9013983583af7aa9db18efbbd8f0e4ebedfd6f7d31d7869453752ba230a1,
+            r: 0x5ab32149c0c4cb80bdd9930348d9ead57b97efbfc509f5b3d3d893dabf5d318,
+            s: 0x240a68b8822b73733b463ae4c4f0f1e72d878edbb625b49d274090edb282d6e,
         },
         Signature {
-            r: 0x6b20feebb0f06af68b9700e47b363a5318a62bee12d4f5126525e845dd4e21f,
-            s: 0x1090fb851b0e50f8fb4c76aa9cca39487d511f460f738bb58d2b20618856d7c,
+            r: 0x7f9199fdcc2ef3bba1242a1c700a42be8217a6cbbcf6f00ee5bec4b7d7c16ba,
+            s: 0x5f6d0ee7712f0d416bc508fb6ebf9b18d16be5dbdf364f881fe99dc8f60f8fd,
         },
         Signature {
-            r: 0x1af72e4b579e125415ae87bef3569195850112922c4a297b899dbebf933f98f,
-            s: 0x301d4240d41ea962627e4c9728b5906171802c6995e11a1fc1fe782b2ab85b0,
+            r: 0x444b3044bf050972cc3795ddee66f3ad90e83ad9fa23c335a026cfe35cad55a,
+            s: 0x7cffad3d11a65b92ebc98cbbc892878bbd5814aa75edd2dd4b8e7b9fbdd7c02,
         },
         Signature {
-            r: 0x3d0b2b0f72d740375322eee0c61ad358ab78eec16d78b978e6ca72f5bfed226,
-            s: 0x913c058706c51ff70f11f073996031553ce9717598463430a6c4733f8a2838,
+            r: 0x1033549c86e9f2f4b0d7215312d139fdb67f9c22cac3ed7bc7005f889c67dbd,
+            s: 0x193be1649a1e7735415b71e2a5472bfb661beb561df67e5feb0c929baed1e86,
         },
     ]
 }
@@ -454,9 +469,9 @@ pub fn byoyomi_finals(from: u32, to: u32) -> Array<Signature> {
 pub fn byoyomi_expected() -> Envelope<Counter> {
     Envelope {
         seq: 7,
-        transcript: 0x5156e1d1ac92fee3508bbadad998aea31a0bea0858c951aaa5a871051177a53,
-        support_turn: 6,
-        last_seat: 254,
+        transcript: 0x90e36e555b5dac714c5f485de25e78ddc854f602a444f700c9f087b0d8ba8,
+        support_turn: 5,
+        last_seat: 0,
         pending: Pending { active: false, seat: 0, seq: 0, entropy: 0x0 },
         rng_heads: array![
             0x6816196d951eb84df8af43f8cc7b82125418952b9934a12edded2b6f60e9013,
@@ -464,6 +479,7 @@ pub fn byoyomi_expected() -> Envelope<Counter> {
         ]
             .span(),
         rng_fresh: array![false, false].span(),
+        rng_referee: 0x0,
         clock: Option::Some(
             Clock {
                 seats: encode(
@@ -474,7 +490,7 @@ pub fn byoyomi_expected() -> Envelope<Counter> {
             },
         ),
         outcome: Outcome { finished: true, winner: 1, reason: 129 },
-        game: Counter { total: 11, next: 1, gamble: false, winner: 0, target: 20 },
+        game: Counter { total: 12, next: 1, gamble: false, winner: 0, target: 20 },
     }
 }
 
@@ -489,6 +505,7 @@ pub fn hourglass_terms() -> Terms<Config> {
             TimeControl {
                 referee: 0x6f77c2d367370dd0e65b2d4927d168eb25d33e793e2917d3eb2d7e802437929,
                 settings: encode(@Hourglass { bank_ms: 10000 }),
+                rng_tip: 0x0,
             },
         ),
         players: array![0xa11ce, 0xb0b].span(),
@@ -519,7 +536,7 @@ pub fn hourglass_stamps() -> Array<u64> {
     array![1000000, 1002000, 1006000, 1015000, 1016000, 1020001]
 }
 
-/// The seat of each step (REFEREE for the flag).
+/// The seat of each step (REFEREE for the referee's own).
 pub fn hourglass_seats() -> Array<u8> {
     array![254, 0, 1, 0, 1, 254]
 }
@@ -528,20 +545,20 @@ pub fn hourglass_signatures() -> Array<Signature> {
     array![
         Signature { r: 0x0, s: 0x0 },
         Signature {
-            r: 0x22de8c875164b6a9ec0ddc801d5179c3dbb58f769d51e6a4c5230578f043d48,
-            s: 0x7c34289b00fcf4dcffa6eabc37bb8086b9cefccad78e92958938dc44c0f43df,
+            r: 0x66762d2bce676d06e90b288bf0ae58d28d7e4c8c8c13d2a3792009137f67049,
+            s: 0x6c09b4d537483bd0b65367de2caca132c47fab374ebc9e4441ada241141f9f7,
         },
         Signature {
-            r: 0x22653949447d6ab4401008d4ef0f10a8868f7bd41a030e9d57df24760ae2525,
-            s: 0x76c892acad413616c38e1449971edbf1443b330e8f0441305c826810b8870d9,
+            r: 0x77ebcc7dc1b0eaed3ad941c3a25d38872f69e515a5363c73acab8bd7e3ca823,
+            s: 0x6aa9c0249f99a054f6e8e93d6fc76bc6656fdcc10706e7e64330f1208d551ef,
         },
         Signature {
-            r: 0x19648353981aa196a5a24242371c67c2916dfca51630e19018bdaca2aaaa537,
-            s: 0x48158b604ca0686900724fd70d7c7e5c39e634ad3985a941489d958390e22ba,
+            r: 0x4c84e8c651f008615d4a1dc8c028bbab21f10c20f7dd83b58934a989b4c5af9,
+            s: 0x4d19882f5eff76a17ebae02fbb409c0f6aa8f189ebd15d2f882b3a1e8ca3179,
         },
         Signature {
-            r: 0x6935afb3c199bd24cee6660b19865e78c91dcafd7013c33b4da6186af550a9b,
-            s: 0xef3c376fa64c461b3a4cf65162c7a13b6c92381ed283c6312feb5dad28c944,
+            r: 0x3caded91600fb517a993cb404c89af24ba04ebcbbe6f267b7f0707cf624a173,
+            s: 0xbef0bb6f70b957b08bfe37c91ed31e9c25fb3b63f223636a2f02093a423612,
         },
         Signature { r: 0x0, s: 0x0 },
     ]
@@ -551,28 +568,28 @@ pub fn hourglass_signatures() -> Array<Signature> {
 pub fn hourglass_attestations() -> Array<Signature> {
     array![
         Signature {
-            r: 0x244e19798301723cbd70efaed4512b6f3b2cc2c3de13d6001b89069bf29375f,
-            s: 0x699c84faec4b35039d8fdeb36b65f78f014aa465bec6757a1fd2fcfaf81b267,
+            r: 0x7d929680fa66bd5b7f41065c87d6143b5f63c395acbe5911adeac6693501863,
+            s: 0x3e03199466d3c1d79e759adc7873c20417af40d8742716c7d83f57fd2c5f0f,
         },
         Signature {
-            r: 0x1015727956f170bc9fbb5808de216e9e282dfcdf0e6506ed308b091ba186970,
-            s: 0x38c08b40fe5ff6425065261d94e49db761b356b14dca66929d0f6c8a1250b2e,
+            r: 0x399d262c855e6570ed06ff6ae68ef95207328a3a1026a187aa06cbb297060f7,
+            s: 0x623012e1e7e5da9413965fcbcaa9ea261896a7dc077f2d5100dd2e15225a468,
         },
         Signature {
-            r: 0x322f23bb09b94d1d22321af1f9a5623e3bab77d190281dd91e6a477bab8df13,
-            s: 0x7e67b0be58de260e260a69711486a52a7a1236142342a65b65385f451c208c3,
+            r: 0x35af2e9e27e1c22a40a5121397d1feb7ed8d73cbd3802f09feae4dcbbea888c,
+            s: 0x5b2eacaeded88ca0dd0907247ba3682e4d94618ddedec613c1bf1ea9368f192,
         },
         Signature {
-            r: 0x106212d2e5cc84dd58f1ceaa6d0a2a0311fb9584c6b4b8f00c51f57c760fad,
-            s: 0x823461d2827b4a4da1da851ca9b460ae9f0cf1b0cc90cfac8f67d7464e830d,
+            r: 0x287c02374ca33e0057ddbc485e22b8e17973efad7a57d023a108fb70341129d,
+            s: 0x4d35bd60d6ba7b7dbb3545c84df0bc270904adeeddf217d6329ef024ce0c49b,
         },
         Signature {
-            r: 0xc410a6777bca66f12753143220c7855e55464bb7ace7434b349c1c2ea05644,
-            s: 0x70e02140adceb3a5f323866b3882f37737a00d9cf826069cf0f78ed914a9cf8,
+            r: 0x6f0aa4d76cbfdce001d8f13dfbe660765b0c9a20ddddb6ae9b532277e47cf2a,
+            s: 0x59d72d69b27cf3c3f51e822b6a24256a4c1b9aee0656bced2b622887937e95a,
         },
         Signature {
-            r: 0x3c08d29e920681b5c4d4b3a50d0799b444b382d32dd2d7fb97bd931ae9bd58e,
-            s: 0x7ba04ec701c98b4a690613a6879a7da9c1d5260c0a2c3faab7da496da4c3cdc,
+            r: 0x4a633a436c06e5970351b9da59b55fee38730407baffdb4a65f6eab6d0724a0,
+            s: 0x2d0dba28656ce73d11fc1265c8d2d53b79a962513083474a5150bc91d92b3fe,
         },
     ]
 }
@@ -585,9 +602,9 @@ pub fn hourglass_finals(from: u32, to: u32) -> Array<Signature> {
 pub fn hourglass_expected() -> Envelope<Counter> {
     Envelope {
         seq: 6,
-        transcript: 0x75cf8949d396a819dcf5c6613e3df9a12f0993b57d084338ef98c8e8cc495fa,
-        support_turn: 6,
-        last_seat: 254,
+        transcript: 0x2126a0d150a2367144711ca0c0166c1cb554259759bfb355eee2cfcaa01aba9,
+        support_turn: 4,
+        last_seat: 1,
         pending: Pending { active: false, seat: 0, seq: 0, entropy: 0x0 },
         rng_heads: array![
             0x13ba9cb3d0d93640c2ac9224c26501434310317b90e7076a395a28995a0f8bc,
@@ -595,11 +612,167 @@ pub fn hourglass_expected() -> Envelope<Counter> {
         ]
             .span(),
         rng_fresh: array![true, true].span(),
+        rng_referee: 0x0,
         clock: Option::Some(
             Clock {
                 seats: encode(@HourglassClock { banks: array![4000, 16000].span() }),
                 used: 0,
                 stamp: 1020001,
+            },
+        ),
+        outcome: Outcome { finished: true, winner: 2, reason: 129 },
+        game: Counter { total: 12, next: 0, gamble: false, winner: 0, target: 20 },
+    }
+}
+
+pub fn rolled_terms() -> Terms<Config> {
+    Terms {
+        chain_id: 0x534e5f54455354,
+        channel: 0xc4a11e1,
+        game_id: 0x5,
+        prover: 0xad0b7e5,
+        response_seconds: 3600,
+        clock: Option::Some(
+            TimeControl {
+                referee: 0x6f77c2d367370dd0e65b2d4927d168eb25d33e793e2917d3eb2d7e802437929,
+                settings: encode(
+                    @Standard {
+                        turn_ms: 30000, bank_ms: 60000, increment_ms: 0, byoyomi: Option::None,
+                    },
+                ),
+                rng_tip: 0x4703a6c3ec512c17158cfa1fd9a0df1a16b11c2fd3d23f628b3ea229348e69a,
+            },
+        ),
+        players: array![0xa11ce, 0xb0b].span(),
+        keys: array![
+            0x2df1db011696a4657ca38f92c517c1bfb36e567f0a401334d5f793a0bd8a687,
+            0x3c0b316d40d20edee780c640e08d0cf8239e08072fe0490a539554347fd2d15,
+        ]
+            .span(),
+        rng_tips: array![
+            0x13ba9cb3d0d93640c2ac9224c26501434310317b90e7076a395a28995a0f8bc,
+            0x3568e68e657bca3dc139b2779a9b59a9258e15e0d9dbfe6bb6598396dcda461,
+        ]
+            .span(),
+        config: Config { target: 20 },
+    }
+}
+
+pub fn rolled_steps() -> Array<Move<Action>> {
+    array![
+        Move::Play(Action { kind: 0, amount: 3 }),
+        Move::PlayRandom(
+            (
+                Action { kind: 1, amount: 0 },
+                0x4961f5f78d6a5776d0a0787c7ac7c53ad4858fae58d59847bbf2d5a62515155,
+            ),
+        ),
+        Move::Reveal(0xf4a89e71cd646b27bfe5b776a122a34a51b4ed5d501091e12ccad8e4e2674),
+        Move::PlayRandom(
+            (
+                Action { kind: 1, amount: 0 },
+                0x6816196d951eb84df8af43f8cc7b82125418952b9934a12edded2b6f60e9013,
+            ),
+        ),
+        Move::Reveal(0x568d74f9d1788106145134ce74199889279234d4747001d319200a1665f5b4e),
+        Move::Play(Action { kind: 0, amount: 1 }), Move::Flag,
+    ]
+}
+
+/// The referee's stamp on each step.
+pub fn rolled_stamps() -> Array<u64> {
+    array![1000000, 1010000, 1010000, 1015000, 1015700, 1035700, 1125701]
+}
+
+/// The seat of each step (REFEREE for the referee's own).
+pub fn rolled_seats() -> Array<u8> {
+    array![0, 1, 254, 0, 254, 1, 254]
+}
+
+pub fn rolled_signatures() -> Array<Signature> {
+    array![
+        Signature {
+            r: 0x15caa78f817ecb3e2a00afaeaa1ac51b9237037d45db4b1b10820acf17dceea,
+            s: 0x56b3f11b9ab090d88f1b3d1e2419ca297641585e562e001351556ac92f5554a,
+        },
+        Signature {
+            r: 0x3766244b022c3a6d18c2940c7d0fe0b6af5ef611abf7d46587e14a98ba4eb6d,
+            s: 0x236e00c9860adba50b1f8f7e11fd715a1af7be1298710a76a72c3c4da70c0f,
+        },
+        Signature { r: 0x0, s: 0x0 },
+        Signature {
+            r: 0x26fa0317a0ffc067bec3347ee14f26f671e01638ff1f9589926deeb483ff80d,
+            s: 0x47e6f518f0d31678dd8b99e01a6a01e00aa9ff2a9e6f15cfda362ccab04542d,
+        },
+        Signature { r: 0x0, s: 0x0 },
+        Signature {
+            r: 0x7e42626246597df6b2d209f1dbb2eefef3b936c51f027a941755b15fca031c1,
+            s: 0x1b303ccc67e58c34aee6bd2d6a8c33dc987696bf91a1ea124ca0981fbf1638d,
+        },
+        Signature { r: 0x0, s: 0x0 },
+    ]
+}
+
+/// The referee's attestation after each step.
+pub fn rolled_attestations() -> Array<Signature> {
+    array![
+        Signature {
+            r: 0x5fddc469a643cc9dac385f47af7d26e230da8b494f6a4e7859ab0fcbd15f195,
+            s: 0x25c0ee9769d1464b270f98b7f2c6ea828eed73cbe999cb0aaa475b74c6f4cca,
+        },
+        Signature {
+            r: 0x1a544c83de6b23dc3209bad980b9577a0189420784716a496247136a1a4ebd8,
+            s: 0x2f0cfd880c1c5b6b03f8822fff6744b8d24a21bd54f736b4f713862bdb18e55,
+        },
+        Signature {
+            r: 0x4ccc1273bbb6ef8e72457dd29c3fef01bedef7d97e8710b29e5e8c6fd3c29dd,
+            s: 0x5924b1873b3d2c4f6966db108168d76e96e71cc1b2e28ccde39c78c54b498aa,
+        },
+        Signature {
+            r: 0x3f33c7677e885c228d9a915a70e6b670fa9f76a3380b0e0a4aaaaa234ff7241,
+            s: 0x3dd8adaeaffd9481bf58778ab864f37aa8e5e566dc0b69e59166d4336c5eadb,
+        },
+        Signature {
+            r: 0x1697d9eded2ecb0cde51c0b13c7a2cdfabc3827dafd2d52153999d5e94424eb,
+            s: 0x35ba3065e2da4cb7e556f03160ed917015a8a6f0d4f2af2c98543ed101926b5,
+        },
+        Signature {
+            r: 0x456f31728846aebc115e6a8bca2f3a990439210160afdaef14ac62a82aa61b2,
+            s: 0x541ce72c4412b36baa78142fbbbde71e261f4b001935c56a08fbb7d59e14cba,
+        },
+        Signature {
+            r: 0x7db1d3bcf0675eb7e52c54331014a1c9a1abe4ca2e5872f0d542596315173f8,
+            s: 0x7dd92844ba847617615d6efe6e0fb9ed0f8455812792565cebc8b30673a76de,
+        },
+    ]
+}
+
+/// Each seat's last signature among steps `from..to`.
+pub fn rolled_finals(from: u32, to: u32) -> Array<Signature> {
+    finals_of(rolled_seats(), rolled_signatures(), from, to)
+}
+
+pub fn rolled_expected() -> Envelope<Counter> {
+    Envelope {
+        seq: 7,
+        transcript: 0x753dfe1db8b13fe2a26611619470581925f4b0c0d298b654f6b239df0b5cef6,
+        support_turn: 4,
+        last_seat: 1,
+        pending: Pending { active: false, seat: 0, seq: 0, entropy: 0x0 },
+        rng_heads: array![
+            0x6816196d951eb84df8af43f8cc7b82125418952b9934a12edded2b6f60e9013,
+            0x4961f5f78d6a5776d0a0787c7ac7c53ad4858fae58d59847bbf2d5a62515155,
+        ]
+            .span(),
+        rng_fresh: array![false, false].span(),
+        rng_referee: 0x568d74f9d1788106145134ce74199889279234d4747001d319200a1665f5b4e,
+        clock: Option::Some(
+            Clock {
+                seats: encode(
+                    @StandardClock { banks: array![60000, 60000].span(), periods: array![].span() },
+                ),
+                used: 0,
+                stamp: 1125701,
             },
         ),
         outcome: Outcome { finished: true, winner: 2, reason: 129 },

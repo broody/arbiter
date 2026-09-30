@@ -5,15 +5,19 @@ use referee::clocks::{
     Byoyomi, MAX_CLOCK_MS, MAX_PERIODS, Standard, StandardClock, StandardTime, decode, encode,
 };
 use referee::{
-    Batch, Clock, Envelope, Move, REASON_TIMEOUT, Signature, Terms, TimeControl, apply_steps,
-    check_clock, context_hash, force, open, replay, rng_next, state_hash,
+    Batch, Clock, Envelope, Move, REASON_TIMEOUT, REFEREE, Signature, Terms, TimeControl,
+    apply_steps, check_clock, context_hash, due, force, open, replay, rng_next, roll, state_hash,
+    tip_hash, void_hash,
 };
 use crate::fixtures::{
-    BYOYOMI_CONTEXT, BYOYOMI_STATE_HASH, CONTEXT, HOURGLASS_CONTEXT, HOURGLASS_STATE_HASH, RNG_LEN,
-    SEED_0, SEED_1, TIMED_CONTEXT, TIMED_STATE_HASH, byoyomi_attestations, byoyomi_expected,
+    BYOYOMI_CONTEXT, BYOYOMI_STATE_HASH, CONTEXT, HOURGLASS_CONTEXT, HOURGLASS_STATE_HASH,
+    REFEREE_RNG_SEED, RNG_LEN, ROLLED_CONTEXT, ROLLED_STATE_HASH, SEED_0, SEED_1, STATE_HASH,
+    TIMED_CONTEXT, TIMED_STATE_HASH, TIP_HASH, VOID_HASH, byoyomi_attestations, byoyomi_expected,
     byoyomi_finals, byoyomi_stamps, byoyomi_steps, byoyomi_terms, finals, hourglass_attestations,
-    hourglass_expected, hourglass_finals, hourglass_stamps, hourglass_steps, hourglass_terms, steps,
-    terms, timed_attestations, timed_expected, timed_finals, timed_stamps, timed_steps, timed_terms,
+    hourglass_expected, hourglass_finals, hourglass_stamps, hourglass_steps, hourglass_terms,
+    rolled_attestations, rolled_expected, rolled_finals, rolled_stamps, rolled_steps, rolled_terms,
+    steps, terms, timed_attestations, timed_expected, timed_finals, timed_stamps, timed_steps,
+    timed_terms,
 };
 use crate::hourglass::{Hourglass, HourglassClock, HourglassCounterRules};
 use crate::{ADD, Action, Config, Counter, CounterRules, GAMBLE, LIMIT};
@@ -47,7 +51,7 @@ fn reveal() -> Move<Action> {
 /// The fixture's timed terms under other standard settings.
 fn standard(settings: Standard) -> Terms<Config> {
     Terms {
-        clock: Option::Some(TimeControl { referee: 1, settings: encode(@settings) }),
+        clock: Option::Some(TimeControl { referee: 1, settings: encode(@settings), rng_tip: 0 }),
         ..timed_terms(),
     }
 }
@@ -440,7 +444,7 @@ fn a_clock_needs_a_referee() {
     let settings = Standard { turn_ms: 1000, bank_ms: 0, increment_ms: 0, byoyomi: Option::None };
     check_clock::<
         CounterRules,
-    >(@Option::Some(TimeControl { referee: 0, settings: encode(@settings) }));
+    >(@Option::Some(TimeControl { referee: 0, settings: encode(@settings), rng_tip: 0 }));
 }
 
 #[test]
@@ -449,7 +453,7 @@ fn clock_settings_must_decode_exactly() {
     let mut settings = array![1000, 0, 0, 1, 7];
     check_clock::<
         CounterRules,
-    >(@Option::Some(TimeControl { referee: 1, settings: settings.span() }));
+    >(@Option::Some(TimeControl { referee: 1, settings: settings.span(), rng_tip: 0 }));
 }
 
 fn byoyomi_start() -> Envelope<Counter> {
@@ -638,9 +642,183 @@ fn hourglass_time_flows_to_the_opponent() {
 fn hourglass_checks_its_settings() {
     let t = Terms {
         clock: Option::Some(
-            TimeControl { referee: 1, settings: encode(@Hourglass { bank_ms: 0 }) },
+            TimeControl { referee: 1, settings: encode(@Hourglass { bank_ms: 0 }), rng_tip: 0 },
         ),
         ..hourglass_terms(),
     };
     open::<HourglassCounterRules>(@t);
+}
+
+// ---- Randomness from the referee ----
+
+fn rolled_start() -> Envelope<Counter> {
+    open::<CounterRules>(@rolled_terms())
+}
+
+fn rolled_batch(from: u32, to: u32) -> Batch<Action> {
+    Batch {
+        steps: rolled_steps().span().slice(from, to - from),
+        stamps: rolled_stamps().span().slice(from, to - from),
+        signatures: rolled_finals(from, to).span(),
+        attestation: *rolled_attestations().at(to - 1),
+    }
+}
+
+fn replay_rolled(start: Envelope<Counter>, batch: Batch<Action>) -> Envelope<Counter> {
+    replay::<CounterRules>(ROLLED_CONTEXT, @rolled_terms(), start, (), batch)
+}
+
+fn run_rolled(steps: Array<Move<Action>>, stamps: Array<u64>) -> Envelope<Counter> {
+    run_with(rolled_terms(), steps, stamps)
+}
+
+/// The referee's `k`-th value: its chain walks back from its tip.
+fn referee_value(k: u32) -> felt252 {
+    chain(REFEREE_RNG_SEED, RNG_LEN - k)
+}
+
+/// The referee's `k`-th roll.
+fn rolls(k: u32) -> Move<Action> {
+    Move::Reveal(referee_value(k))
+}
+
+/// Seat 1's gamble, forced onchain after seat 0's first move: a roll is due.
+fn forced_gamble() -> Envelope<Counter> {
+    let start = run_rolled(array![add(3)], array![1000]);
+    force::<CounterRules>(ROLLED_CONTEXT, @rolled_terms(), start, (), 1, array![gamble()].span())
+}
+
+#[test]
+fn rolled_context_matches_sdk() {
+    assert_eq!(context_hash::<CounterRules>(@rolled_terms()), ROLLED_CONTEXT);
+    assert_eq!(rolled_start().rng_referee, referee_value(0));
+}
+
+#[test]
+fn tip_and_void_hashes_match_sdk() {
+    let t = rolled_terms();
+    let tip = t.clock.unwrap().rng_tip;
+    assert_eq!(tip_hash::<CounterRules>(t.chain_id, t.channel, t.game_id, tip), TIP_HASH);
+    assert_eq!(void_hash::<CounterRules>(CONTEXT, 2, STATE_HASH), VOID_HASH);
+}
+
+#[test]
+fn rolled_replay_matches_sdk() {
+    let end = replay_rolled(rolled_start(), rolled_batch(0, 7));
+    assert_eq!(end, rolled_expected());
+    assert_eq!(state_hash::<CounterRules>(@end), ROLLED_STATE_HASH);
+    assert_eq!(end.outcome.winner, 2); // seat 1: seat 0 was flagged
+}
+
+#[test]
+fn rolled_replay_splits_at_a_pending_roll() {
+    // Between a gamble and its roll: the referee attested that state too.
+    let mid = replay_rolled(rolled_start(), rolled_batch(0, 2));
+    assert!(mid.pending.active);
+    assert_eq!(due::<CounterRules>(@mid), REFEREE);
+    assert_eq!(replay_rolled(mid, rolled_batch(2, 7)), rolled_expected());
+}
+
+#[test]
+fn a_gamble_waits_for_the_referee() {
+    // The rules name the other seat; the terms have the referee reveal.
+    let env = run_rolled(array![add(3), gamble()], array![1000, 2000]);
+    assert_eq!(env.pending.seat, REFEREE);
+    let env = run_rolled(array![add(3), gamble(), rolls(1)], array![1000, 2000, 2000]);
+    assert!(!env.pending.active);
+    assert_eq!(env.rng_referee, referee_value(1));
+    assert_eq!(env.game.next, 0);
+}
+
+#[test]
+fn seats_reveal_without_a_referee_tip() {
+    let env = run(array![add(3), gamble()], array![1000, 2000]);
+    assert_eq!(env.rng_referee, 0);
+    assert_eq!(env.pending.seat, 0);
+}
+
+#[test]
+#[should_panic(expected: 'Invalid reveal')]
+fn a_seats_value_is_no_roll() {
+    // Seat 0's own next chain value, where the referee's is due.
+    run_rolled(array![add(3), gamble(), reveal()], array![1000, 2000, 3000]);
+}
+
+#[test]
+#[should_panic(expected: 'Invalid reveal')]
+fn a_roll_follows_the_referees_chain() {
+    run_rolled(array![add(3), gamble(), rolls(2)], array![1000, 2000, 3000]);
+}
+
+#[test]
+fn a_roll_charges_nobody() {
+    // The roll comes long after either seat's time would have run out.
+    let env = run_rolled(array![add(3), gamble(), rolls(1)], array![1000, 2000, 200000]);
+    assert_eq!(banks(@env), array![60000, 60000].span());
+    assert_eq!((clock(@env).used, clock(@env).stamp), (0, 200000));
+}
+
+#[test]
+#[should_panic(expected: 'Stamp out of order')]
+fn a_roll_keeps_stamps_in_order() {
+    run_rolled(array![add(3), gamble(), rolls(1)], array![1000, 2000, 1999]);
+}
+
+#[test]
+#[should_panic(expected: 'Roll pending')]
+fn nobody_is_flagged_while_a_roll_is_pending() {
+    run_rolled(array![add(3), gamble(), Move::Flag], array![1000, 2000, 999999]);
+}
+
+#[test]
+fn a_seat_may_resign_while_a_roll_is_pending() {
+    let env = run_rolled(array![add(3), gamble(), Move::Resign(0)], array![1000, 2000, 999999]);
+    assert_eq!(env.outcome.winner, 2);
+    assert_eq!(banks(@env), array![60000, 60000].span());
+}
+
+#[test]
+fn referee_steps_are_not_signer_changes() {
+    // Seat 0, seat 1, the referee's roll, seat 0: three changes of seat.
+    let env = run_rolled(
+        array![add(3), gamble(), rolls(1), add(1)], array![1000, 2000, 2000, 3000],
+    );
+    assert_eq!(env.support_turn, 3);
+    assert_eq!(env.last_seat, 0);
+    // A start around each seat's step adds nothing.
+    let env = run(array![Move::Start, add(3), Move::Start, add(3)], array![1, 2, 3, 4]);
+    assert_eq!(env.support_turn, 2);
+    assert_eq!(env.last_seat, 1);
+}
+
+#[test]
+fn a_forced_gamble_waits_for_a_posted_roll() {
+    let forced = forced_gamble();
+    assert_eq!(due::<CounterRules>(@forced), REFEREE);
+    assert_eq!(clock(@forced).stamp, 0);
+    // Anyone posts the referee's value: its chain vouches for it.
+    let env = roll::<CounterRules>(ROLLED_CONTEXT, @rolled_terms(), forced, (), referee_value(1));
+    assert!(!env.pending.active);
+    assert_eq!(env.game.next, 0);
+    assert_eq!(clock(@env).stamp, 0);
+}
+
+#[test]
+#[should_panic(expected: 'Not your step')]
+fn a_seat_cannot_force_the_roll() {
+    force::<
+        CounterRules,
+    >(ROLLED_CONTEXT, @rolled_terms(), forced_gamble(), (), 0, array![rolls(1)].span());
+}
+
+#[test]
+#[should_panic(expected: 'Invalid reveal')]
+fn a_posted_roll_must_be_the_referees() {
+    roll::<CounterRules>(ROLLED_CONTEXT, @rolled_terms(), forced_gamble(), (), referee_value(2));
+}
+
+#[test]
+#[should_panic(expected: 'No roll due')]
+fn a_roll_needs_a_request() {
+    roll::<CounterRules>(ROLLED_CONTEXT, @rolled_terms(), rolled_start(), (), referee_value(1));
 }

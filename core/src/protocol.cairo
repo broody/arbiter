@@ -7,11 +7,13 @@ use crate::types::{
     Signature, Terms, TimeControl,
 };
 
-/// Version 4: `Move::Start`, recommits only after a reveal, a transcript cap
+/// Version 5: randomness from the referee (`TimeControl.rng_tip`), and
+/// referee steps no longer count as signer changes. Version 4 added
+/// `Move::Start`, recommits only after a reveal, a transcript cap
 /// (`GameRules::max_steps`), and disputes a live referee returns to offchain
 /// play. Version 3 added optional referee clocks; version 2 made steps
 /// seat-implicit `Move`s and replays take one final signature per seat.
-pub const PROTOCOL_VERSION: felt252 = 4;
+pub const PROTOCOL_VERSION: felt252 = 5;
 
 // Stark signatures require a message below 2^251. Use an explicit 250-bit mask
 // in every language; never reinterpret a field hash as an unrestricted message.
@@ -72,6 +74,21 @@ pub fn referee_resume_hash<impl R: GameRules>(
     context: felt252, epoch: u32, state: felt252,
 ) -> felt252 {
     signing_hash(array![R::TAG, 'REFEREE_RESUME_V1', context, epoch.into(), state].span())
+}
+
+/// Message the referee signs to commit its hash-chain tip to one game, before
+/// the game's context exists: the binding checks it when the last seat joins.
+/// A tip a seat made up would let that seat know every roll.
+pub fn tip_hash<impl R: GameRules>(
+    chain_id: felt252, channel: felt252, game_id: felt252, tip: felt252,
+) -> felt252 {
+    signing_hash(array![R::TAG, 'REFEREE_TIP_V1', chain_id, channel, game_id, tip].span())
+}
+
+/// Message every seat signs to void a game whose roll waits for a referee that
+/// is down (`channel::void`), from the anchor `state`.
+pub fn void_hash<impl R: GameRules>(context: felt252, epoch: u32, state: felt252) -> felt252 {
+    signing_hash(array![R::TAG, 'REFEREE_VOID_V1', context, epoch.into(), state].span())
 }
 
 /// Message the referee of a timed game signs after each step: the transcript
@@ -160,11 +177,14 @@ pub fn open<impl R: GameRules, +Drop<R::State>>(terms: @Terms<R::Config>) -> Env
         assert(*tip != 0, 'Invalid tip');
     }
     check_clock::<R>(terms.clock);
-    let clock = match *terms.clock {
-        Option::Some(time) => Option::Some(
-            Clock { seats: R::Time::open(time.settings, R::SEATS), used: 0, stamp: 0 },
+    let (clock, rng_referee) = match *terms.clock {
+        Option::Some(time) => (
+            Option::Some(
+                Clock { seats: R::Time::open(time.settings, R::SEATS), used: 0, stamp: 0 },
+            ),
+            time.rng_tip,
         ),
-        Option::None => Option::None,
+        Option::None => (Option::None, 0),
     };
     let mut rng_fresh = array![];
     while rng_fresh.len() < R::SEATS.into() {
@@ -178,13 +198,15 @@ pub fn open<impl R: GameRules, +Drop<R::State>>(terms: @Terms<R::Config>) -> Env
         pending: idle(),
         rng_heads: rng_tips,
         rng_fresh: rng_fresh.span(),
+        rng_referee,
         clock,
         outcome: Outcome { finished: false, winner: 0, reason: 0 },
         game: R::init(terms.config),
     }
 }
 
-/// Seat due to act, including a pending reveal.
+/// Seat due to act, including a pending reveal: `REFEREE` while the referee
+/// owes a roll.
 pub fn due<impl R: GameRules>(env: @Envelope<R::State>) -> u8 {
     if *env.pending.active {
         *env.pending.seat
@@ -194,8 +216,8 @@ pub fn due<impl R: GameRules>(env: @Envelope<R::State>) -> u8 {
 }
 
 /// The seat a step belongs to: `Resign` names it; `Reveal` belongs to the
-/// pending seat; `Flag` and `Start` to the referee (`REFEREE`); every other
-/// move to the seat whose turn it is.
+/// pending seat, which is the referee when it owes a roll; `Flag` and `Start`
+/// to the referee (`REFEREE`); every other move to the seat whose turn it is.
 pub fn actor<impl R: GameRules>(env: @Envelope<R::State>, step: @Move<R::Action>) -> u8 {
     match step {
         Move::Resign(seat) => *seat,
@@ -336,7 +358,7 @@ pub fn apply_steps<
 /// Apply unsigned steps that must all belong to `seat`, e.g. a forced onchain
 /// turn whose seat the wallet caller authenticates. They carry no stamps, so a
 /// timed game's clock pauses: forced play runs on the channel's windows. The
-/// referee's steps (`Flag`, `Start`) are never a seat's.
+/// referee's steps (`Flag`, `Start`, a roll) are never a seat's.
 pub fn force<
     impl R: GameRules,
     +Copy<R::State>,
@@ -367,6 +389,34 @@ pub fn force<
     env
 }
 
+/// Apply the referee's next hash-chain value to a roll that waits for it,
+/// unstamped: in forced play anyone may post the value onchain. The chain the
+/// referee committed authenticates it, so it needs no signature.
+pub fn roll<
+    impl R: GameRules,
+    +Copy<R::State>,
+    +Drop<R::State>,
+    +Copy<R::Action>,
+    +Drop<R::Action>,
+    +Serde<R::Action>,
+    +Drop<R::Witness>,
+    +Destruct<R::Scratch>,
+>(
+    context: felt252,
+    terms: @Terms<R::Config>,
+    start: Envelope<R::State>,
+    witness: R::Witness,
+    value: felt252,
+) -> Envelope<R::State> {
+    assert(start.pending.active && start.pending.seat == REFEREE, 'No roll due');
+    let time = settings_of(terms.clock);
+    let mut scratch = R::load(terms.config, @start.game, witness);
+    let (env, _, _) = advance::<
+        R,
+    >(context, @time, terms.config, ref scratch, start, Move::Reveal(value), Option::None);
+    env
+}
+
 /// One step: its seat, its signed message, and the next envelope. `stamp` is
 /// the referee's time for the step in a timed game, `None` for an unstamped one.
 fn advance<
@@ -394,8 +444,17 @@ fn advance<
     let payer = due::<R>(@env);
     let turn_seat = R::due(@env.game);
     let referee_step = match step {
-        Move::Flag => Option::Some(true),
-        Move::Start => Option::Some(false),
+        Move::Flag => {
+            // The referee owes a roll: nobody's time is running.
+            assert(payer != REFEREE, 'Roll pending');
+            Option::Some(RefereeStep::Flag)
+        },
+        Move::Start => Option::Some(RefereeStep::Start),
+        Move::Reveal(_) => if seat == REFEREE {
+            Option::Some(RefereeStep::Roll)
+        } else {
+            Option::None
+        },
         _ => Option::None,
     };
     match time {
@@ -432,11 +491,23 @@ fn advance<
             assert(from != seat && from < R::SEATS, 'Invalid reveal seat');
             env.rng_heads = take_reveal(env.rng_heads, seat, entropy);
             env.rng_fresh = set_at(env.rng_fresh, seat, false);
-            env.pending = Pending { active: true, seat: from, seq: env.seq, entropy };
+            // A game that takes its randomness from the referee waits for the
+            // referee's value, whichever seat the rules name.
+            let revealer = if env.rng_referee == 0 {
+                from
+            } else {
+                REFEREE
+            };
+            env.pending = Pending { active: true, seat: revealer, seq: env.seq, entropy };
         },
         Move::Reveal(value) => {
-            env.rng_heads = take_reveal(env.rng_heads, seat, value);
-            env.rng_fresh = set_at(env.rng_fresh, seat, false);
+            if seat == REFEREE {
+                assert(value != 0 && rng_next(value) == env.rng_referee, 'Invalid reveal');
+                env.rng_referee = value;
+            } else {
+                env.rng_heads = take_reveal(env.rng_heads, seat, value);
+                env.rng_fresh = set_at(env.rng_fresh, seat, false);
+            }
             let seed = seed::<R>(context, env.pending.seq, env.pending.entropy, value);
             env.pending = idle();
             env.game = R::resolve(config, ref scratch, env.game, seed);
@@ -480,10 +551,13 @@ fn advance<
             env.clock = Option::Some(Clock { seats, used: 0, stamp: clock.stamp });
         }
     }
-    if env.last_seat != seat {
-        env.support_turn += 1;
+    // Only seats count as signers: a referee step acknowledges nothing.
+    if seat != REFEREE {
+        if env.last_seat != seat {
+            env.support_turn += 1;
+        }
+        env.last_seat = seat;
     }
-    env.last_seat = seat;
     env.seq += 1;
     env.transcript = poseidon_hash_span(array![env.transcript, message].span());
     (env, seat, message)
@@ -495,27 +569,30 @@ fn advance<
 /// has used more than the game's `ClockRules` allow; any other step is refused
 /// after that. An unstamped step pauses the clock, and the first stamp after a
 /// pause starts it without charging anyone. A `Start` restarts the clock at its
-/// stamp, paused or not, and charges nobody. `referee_step` is `Some(true)` for
-/// a `Flag`, `Some(false)` for a `Start`.
+/// stamp, paused or not, and charges nobody. Nor does any step while the
+/// referee owes a roll (`payer` is `REFEREE`): that wait is nobody's time. Only
+/// a roll may go unstamped among referee steps: anyone posts it onchain in
+/// forced play.
 fn charge<impl R: GameRules>(
     settings: Span<felt252>,
     clock: Clock,
     payer: u8,
     reveal: bool,
     stamp: Option<u64>,
-    referee_step: Option<bool>,
+    referee_step: Option<RefereeStep>,
     state: @R::State,
 ) -> Clock {
+    let roll = referee_step == Option::Some(RefereeStep::Roll);
     let t = match stamp {
         Option::Some(t) => t,
         Option::None => {
-            assert(referee_step.is_none(), 'Referee step needs a stamp');
+            assert(referee_step.is_none() || roll, 'Referee step needs a stamp');
             return Clock { stamp: 0, ..clock };
         },
     };
     assert(t != 0, 'Invalid stamp');
-    let flag = referee_step == Option::Some(true);
-    if referee_step == Option::Some(false) {
+    let flag = referee_step == Option::Some(RefereeStep::Flag);
+    if referee_step == Option::Some(RefereeStep::Start) || payer == REFEREE {
         assert(t >= clock.stamp, 'Stamp out of order');
         return Clock { stamp: t, ..clock };
     }
@@ -541,6 +618,14 @@ fn charge<impl R: GameRules>(
         return Clock { seats, used: clock.used, stamp: t };
     }
     Clock { used, stamp: t, ..clock }
+}
+
+// The referee's steps, as the clock tells them apart.
+#[derive(Copy, Drop, PartialEq)]
+enum RefereeStep {
+    Flag,
+    Start,
+    Roll,
 }
 
 // A timed game's `ClockRules` settings, or `None` for an untimed game.

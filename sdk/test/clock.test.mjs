@@ -43,7 +43,7 @@ test('the referee stamps each step and every seat verifies the stamps', () => {
   assert.equal(seat.stateHash(), referee.session.stateHash());
   const copy = Session.import(counter, structuredClone(seat.export()));
   assert.equal(copy.stateHash(), seat.stateHash());
-  assert.equal(copy.export().version, 4);
+  assert.equal(copy.export().version, 5);
 });
 
 test('a seat whose time runs out is flagged', () => {
@@ -148,7 +148,7 @@ test('untimed games take no stamps', () => {
 
 test('time controls round-trip through Cairo serialization', () => {
   const decoded = decodeTerms(counter, encodeTerms(counter, terms));
-  assert.deepEqual(decoded.clock, clock);
+  assert.deepEqual(decoded.clock, { ...clock, rng_tip: 0n });
   const none = { ...clock, settings: { ...settings, turn_ms: 0, bank_ms: 0 } };
   assert.throws(() => new Session(counter, { ...terms, clock: none }), /Invalid time control/);
 });
