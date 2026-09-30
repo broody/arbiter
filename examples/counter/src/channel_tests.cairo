@@ -1,10 +1,11 @@
 use referee::channel::{
-    ACTIVE, CANCELLED, DISPUTE, FORCED, SETTLED, WAITING, acknowledge, cancel, claim_timeout,
-    create, forced, join, open_dispute, receive, resign, resolve, resume,
+    ACTIVE, CANCELLED, DISPUTE, FORCED, PAUSE_SECONDS, SETTLED, WAITING, acknowledge, cancel,
+    claim_timeout, create, forced, join, open_dispute, receive, resign, resolve, resume, rolled,
+    void,
 };
 use referee::{
-    Channel, Envelope, Move, REASON_ABANDON, REASON_RESIGN, StateRef, force, open, replay,
-    state_ref,
+    Channel, DRAW, Envelope, Move, REASON_ABANDON, REASON_RESIGN, REASON_VOID, REFEREE, StateRef,
+    force, open, replay, state_ref,
 };
 use crate::fixtures::{CONTEXT, expected, finals, steps, terms};
 use crate::tests::batch;
@@ -298,4 +299,113 @@ fn acknowledgement_needs_a_dispute() {
 #[should_panic(expected: 'Stale channel epoch')]
 fn acknowledgement_names_the_epoch() {
     acknowledge(open_dispute(active(), 0, T0), 1, T0 + 10);
+}
+
+// ---- A roll that waits for the referee ----
+
+/// State `n`, as if its last step had asked the referee for randomness.
+fn awaiting_roll(n: u32) -> StateRef {
+    StateRef { due: REFEREE, ..after(n) }
+}
+
+const FORCED_AT: u64 = T0 + 3600 + 5;
+
+/// Forced play in which seat 0's step asked the referee for a roll.
+fn paused() -> Channel {
+    forced(forced_play(), 1, 0, awaiting_roll(1), FORCED_AT, 30)
+}
+
+#[test]
+fn a_forced_request_pauses_for_the_referee() {
+    let channel = paused();
+    assert_eq!(channel.status, FORCED);
+    assert_eq!(channel.anchor.due, REFEREE);
+    // Three days, not the seats' response window.
+    assert_eq!(channel.deadline, FORCED_AT + PAUSE_SECONDS);
+}
+
+#[test]
+fn a_dispute_resolved_into_a_pending_roll_pauses() {
+    let channel = receive(active(), 0, awaiting_roll(2), false, T0, 20);
+    let channel = resolve(channel, 0, T0 + WINDOW.into(), 30, true);
+    assert_eq!(channel.status, FORCED);
+    assert_eq!(channel.deadline, T0 + WINDOW.into() + PAUSE_SECONDS);
+}
+
+#[test]
+#[should_panic(expected: 'Waiting for the referee')]
+fn nobody_times_out_while_the_referee_owes_a_roll() {
+    claim_timeout(paused(), 2, 1, FORCED_AT + PAUSE_SECONDS);
+}
+
+#[test]
+#[should_panic(expected: 'Not your turn')]
+fn no_seat_plays_while_the_referee_owes_a_roll() {
+    forced(paused(), 2, 1, after(2), FORCED_AT + 10, 40);
+}
+
+#[test]
+fn a_posted_roll_restarts_the_window() {
+    let now = FORCED_AT + 86400;
+    let channel = rolled(paused(), 2, after(2), now, 40);
+    assert_eq!(channel.status, FORCED);
+    assert_eq!(channel.epoch, 3);
+    assert_eq!(channel.anchor, after(2));
+    assert_eq!(channel.deadline, now + WINDOW.into());
+}
+
+#[test]
+fn a_posted_roll_can_end_the_game() {
+    let channel = rolled(paused(), 2, finished(), FORCED_AT + 10, 40);
+    assert_eq!(channel.status, SETTLED);
+    assert_eq!(channel.result, finished().outcome);
+}
+
+#[test]
+#[should_panic(expected: 'No roll due')]
+fn a_roll_needs_a_request() {
+    rolled(forced_play(), 1, after(1), T0 + WINDOW.into() + 5, 30);
+}
+
+#[test]
+#[should_panic(expected: 'Turn deadline passed')]
+fn a_roll_after_the_pause_is_too_late() {
+    rolled(paused(), 2, after(2), FORCED_AT + PAUSE_SECONDS, 40);
+}
+
+#[test]
+fn a_pause_ends_void_after_three_days() {
+    let channel = void(paused(), 2, false, FORCED_AT + PAUSE_SECONDS);
+    assert_eq!(channel.status, SETTLED);
+    assert_eq!(channel.epoch, 3);
+    // No result: the reason says so, whatever the winner field holds.
+    assert_eq!(channel.result.reason, REASON_VOID);
+    assert_eq!(channel.result.winner, DRAW);
+}
+
+#[test]
+#[should_panic(expected: 'Pause still open')]
+fn a_pause_is_not_voided_early() {
+    void(paused(), 2, false, FORCED_AT + PAUSE_SECONDS - 1);
+}
+
+#[test]
+fn every_seat_can_void_a_pause_at_once() {
+    let channel = void(paused(), 2, true, FORCED_AT + 1);
+    assert_eq!(channel.status, SETTLED);
+    assert_eq!(channel.result.reason, REASON_VOID);
+}
+
+#[test]
+#[should_panic(expected: 'No roll due')]
+fn only_a_pending_roll_is_voided() {
+    void(forced_play(), 1, true, T0 + WINDOW.into() + 5);
+}
+
+#[test]
+fn a_paused_game_can_resume_offchain() {
+    // The referee is back (or every seat agrees): it rolls offchain.
+    let channel = resume(paused(), 2, true, FORCED_AT + 86400, 40);
+    assert_eq!(channel.status, ACTIVE);
+    assert_eq!(channel.anchor.due, REFEREE);
 }
