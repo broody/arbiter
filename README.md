@@ -24,8 +24,9 @@ stateDiagram-v2
     ACTIVE --> DISPUTE: unapproved submission, or open_dispute
     DISPUTE --> SETTLED: window ends, game finished
     DISPUTE --> FORCED: window ends, game unfinished
+    DISPUTE --> ACTIVE: window ends, unfinished, the referee acknowledged
     FORCED --> FORCED: due seat plays onchain
-    FORCED --> ACTIVE: every seat approves resuming
+    FORCED --> ACTIVE: every seat approves resuming, or the referee
     FORCED --> SETTLED: game finished, or claim_timeout
     ACTIVE --> SETTLED: resign
 ```
@@ -50,6 +51,8 @@ stateDiagram-v2
      side posts a newer history.
    - *Stalls:* either player can open a dispute. The game then moves to forced
      onchain play, and the player who misses a turn window loses on timeout.
+     In a timed game the referee flags a staller instead, and while it is live
+     it acknowledges disputes, so they return to offchain play.
    - *Gives up:* either player can resign at any time, with a signed step or a
      wallet call.
 
@@ -105,11 +108,15 @@ pub trait GameRules {
     fn resolve(config: @Config, ref scratch: Scratch, state: State, seed: felt252) -> State;
     fn due(state: @State) -> u8;
     fn outcome(state: @State) -> Option<(u8, u8)>;   // (winner seat + 1 or DRAW, reason)
+    fn max_steps(config: @Config) -> u32;            // transcript cap
+    fn adjudicate(config: @Config, state: @State) -> (u8, u8);   // the result at the cap
 }
 ```
 
-Rules must be deterministic and must panic on illegal actions. Resign, reveal,
-recommit, signatures, transcripts and disputes come from referee.
+Rules must be deterministic and must panic on illegal actions. A game bounds
+its own length in `outcome`; `max_steps` caps every transcript on top, and
+`adjudicate` ends a game that reaches it. Resign, reveal, recommit,
+signatures, transcripts and disputes come from referee.
 [`examples/counter`](examples/counter/src/lib.cairo) is a complete game, with
 dice, in about 100 lines.
 
@@ -128,7 +135,7 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 | Package | Path | What it does |
 |---|---|---|
 | `referee` | `core/` | The protocol and the channel's dispute logic as pure functions: step hashing and signatures, transcript replay, forced steps, hash-chain randomness, referee clocks, checkpoint approvals. No Dojo. Builds on Cairo 2.13 and 2.18 |
-| `referee_dojo` | `dojo/referee_dojo/` | Dojo models (`ChannelGame`, `ProverAllowed`), the `ChannelUpdated` event, and one helper per entrypoint (create, join, submit, dispute, resolve, force, resume, timeout, resign, prover allowlist) |
+| `referee_dojo` | `dojo/referee_dojo/` | Dojo models (`ChannelTerms`, `ChannelState`, `ProverAllowed`), the `ChannelUpdated` event, and one helper per entrypoint (create, join, submit, dispute, acknowledge, resolve, force, resume, timeout, resign, prover allowlist) |
 | `referee_adapter` | `adapter/referee_adapter/` | Proof adapter logic: the virtual replay that gets proved (`__execute__`) and `settle`, which checks the proof facts and relays the result. Cairo 2.18. A game's adapter contract is about 40 lines |
 | `referee_testing` | `testing/` | Test-only Cairo signer, so tests can sign messages that bind deployed addresses |
 | `@referee/sdk` | `sdk/` | JS copy of the protocol: hashing, signing, replay, a `Session` per client, a `Referee` for timed games, channel calldata codecs and proof payloads. Fixtures keep it byte-identical to the Cairo. `@referee/sdk/proving` requests a native proof of a session and builds the `settle` call. `@referee/sdk/store` persists sessions (IndexedDB or files) and refuses to sign a step that would equivocate. `@referee/sdk/keeper` talks to a keeper. Install from git: `npm install github:broody/referee#<rev>` |

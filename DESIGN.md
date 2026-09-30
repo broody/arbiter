@@ -1,6 +1,6 @@
 # Referee design
 
-Status: **draft, 2026-09-27**. Built and tested: the core crate (protocol,
+Status: **draft, 2026-09-30**. Built and tested: the core crate (protocol,
 optional referee clocks and channel state machine), the Dojo binding, the JS
 SDK mirror, and the counter example as both a pure game and a Dojo world.
 Everything marked *planned* is not.
@@ -18,8 +18,8 @@ Hashfront (`~/development/hashfront`, a tactics game with combat randomness).
 | Layer | Status | Depends on | Purpose |
 |---|---|---|---|
 | `core` (Cairo) | built | nothing | `GameRules`, protocol envelope, hashing, signatures, replay, forced steps, randomness, referee clocks |
-| channel state machine (`referee::channel`) | built | `core` | Pure functions: create, join, receive a candidate, dispute, resolve, forced play, timeout, resume, resign |
-| `referee_dojo` (Cairo) | built | `core`, Dojo | `ChannelGame`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint. Games list the models in `build-external-contracts` |
+| channel state machine (`referee::channel`) | built | `core` | Pure functions: create, join, receive a candidate, dispute, acknowledge, resolve, forced play, timeout, resume, resign |
+| `referee_dojo` (Cairo) | built | `core`, Dojo | `ChannelTerms`/`ChannelState`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint, including `acknowledge` and `resume_by_referee`. Games list the models in `build-external-contracts` |
 | `referee_testing` (Cairo) | built | `core` | Test-only STARK-curve signer and hash-chain helper |
 | `referee_adapter` (Cairo 2.18) | built, tested with mocked proof facts | `core` | Generic logic for a SNIP-36 account contract that proves a replay in the virtual OS and relays it to the channel |
 | `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, clocks and `Referee`, fixtures, Poseidon in WebAssembly; native proving client (`@referee/sdk/proving`); session store and signing guard (`@referee/sdk/store`) |
@@ -87,7 +87,7 @@ protocol steps per game action).
 | `Flag` | nothing | the referee of a timed game (`REFEREE`), once the due seat's time ran out |
 | `Start` | nothing | the referee of a timed game, to start or restart its clock |
 
-Every game gets the last six for free. The seat is implied by the state
+Every game gets every move but `Play` and `PlayRandom` for free. The seat is implied by the state
 (`actor`), so only `Resign` carries one, and only `PlayRandom` carries entropy.
 `Play` of an action that requests randomness fails with `'Randomness requested'`,
 and `PlayRandom` of one that doesn't fails with `'Unexpected entropy'`. A
@@ -320,8 +320,8 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
   Surround), with fewer storage slots and event felts on top.
 - `create` takes an `Option<TimeControl>`, checked by the game's time rules. A
   referee key must be a curve point and neither seat's session key.
-  `ChannelGame` keeps the referee key and the serialized settings, whatever the
-  rules.
+  `ChannelTerms` keeps the referee key and the serialized settings, whatever
+  the rules.
 - Callers are authenticated by wallet for create, join, cancel, dispute, forced
   play, timeout and resign. `submit_history`, `resolve`, `acknowledge` and
   `resume_by_referee` are open to anyone, for example a keeper; the last two
@@ -365,8 +365,8 @@ its constructor.
 
 **JS proving client** (`@referee/sdk/proving`), for any game:
 - `proveSession({ rpcUrl | provider, proverUrl, session, epoch, expectedClassHash })`
-  waits until the channel anchor is 10 blocks deep, checks that the session
-  starts at the anchor under the current epoch and that the prover is the
+  waits until the state it starts from is 10 blocks deep, checks that the session
+  starts at the anchor or the candidate under the current epoch and that the prover is the
   expected class, replays the session with every signature verified, sends the
   adapter's virtual transaction to a `starknet_proveTransaction` prover, and
   checks the response (`validateNativeProof`). It returns the transaction
@@ -470,7 +470,8 @@ latest verified transcript.
     name its referee key from the channel's `ChannelUpdated` events, so every
     such game has a referee even if no seat registers it.
 - **Channel reads.** A game system exposes `get_channel(game_id)`, which
-  returns the `ChannelGame` model, decoded by the SDK's `getChannel`.
+  returns the `ChannelGame` view (`ChannelTerms` and `ChannelState`
+  together), decoded by the SDK's `getChannel`.
 - **Referee.** With a referee key, the keeper referees the timed games whose
   terms name that key. The relay is where steps first arrive, so it is where
   they are stamped.
@@ -498,7 +499,7 @@ latest verified transcript.
   transcript binding keep traces small. Surround's 311-action v3 game is
   1.57M trace instructions.
 - **Checkpoint proofs otherwise.** Each proves a segment from the committed
-  anchor and commits it onchain. This works with PROOF1 today, and PROOF2 only
+  anchor, or extends the candidate within a dispute, and commits it onchain. This works with PROOF1 today, and PROOF2 only
   reduces how many are needed.
 - **No per-move recursive proving:**
   - STARK proof size barely grows with trace length: Surround's 68-action proof

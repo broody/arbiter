@@ -43,7 +43,8 @@ await keeper.submit(session, { store });                 // every pending step, 
   (`@referee/sdk/store`), so it's never the only copy.
 - It holds no player keys. Its account pays only for `submit_history`,
   `resolve`, the adapter's `settle`, and the referee's `acknowledge` and
-  `resume_by_referee`, which anyone may send.
+  `resume_by_referee`, which anyone may send, and the calls an entry's
+  `afterSettle` hook returns.
 - Anyone can run one.
 - **Except as a referee.** Players trust the keeper named in a timed game's
   terms with time: a delayed step costs its seat clock time, and seats can't
@@ -70,7 +71,7 @@ await keeper.submit(session, { store });                 // every pending step, 
   the terms (`termsTypedData(game, terms)` in `@referee/sdk`, SNIP-12), and
   `register` sends the signatures in seat order. The keeper checks each
   against the seat's account contract (`is_valid_signature`, through
-  `rpc_url`) and keeps them
+  `rpc_url`; without one it checks nothing) and keeps them
   with the game. The terms' context binds every term, session keys included,
   so the signatures bind each wallet to its key, as creating and joining a
   channel do onchain. The terms name the entry's channel value, which is no
@@ -136,10 +137,10 @@ Each `poll_seconds`, for each open game:
 | --- | --- |
 | ACTIVE, stored game finished | Submits it (`settle`). Without approvals it becomes the candidate, and is resolved after the window |
 | DISPUTE, stored game finished | Submits the next segment, if any (see below) |
-| DISPUTE, a timed game it referees | Sends `acknowledge` at once, unless the channel holds it already, so `resolve` returns the game to play instead of forced play |
+| DISPUTE, a timed game it referees | Sends `acknowledge` at once while the candidate is unfinished, unless the channel holds it already, so `resolve` returns the game to play instead of forced play |
 | DISPUTE, other games | Answers once, `answer_margin_seconds` before the deadline, with what outranks the candidate, extending it when it can (`disputeAnswer`). Again only against a newer candidate someone else submits |
 | DISPUTE, window passed | `resolve`, with the game's `afterSettle` calls when it settles the game |
-| FORCED, a timed game it referees | `resume_by_referee`, when the archive holds the anchor |
+| FORCED, a timed game it referees | `resume_by_referee`, once per epoch, before the forced-play window closes and when the archive holds the anchor |
 | FORCED, other games | Waits. Forced moves and timeouts need a player's wallet |
 | SETTLED, CANCELLED | Closes the game |
 
@@ -176,7 +177,7 @@ The API speaks JSON, with BigInts encoded as `{ "$n": "<decimal>" }`
 | `GET /games` | | open games |
 | `GET /games/:channel/:game` | | `{ record, start, seq, transcript, authorizations? }` |
 | `GET /games/:channel/:game/steps` | `?from=SEQ&wait=SECONDS` | `{ start, seq, transcript, steps }`: step records from `from`, long-polling up to `max_wait_seconds` |
-| `POST /games/:channel/:game/steps` | `{ from, steps: [{ step, signature, stamp?, attestation? }] }` | `{ seq, accepted, switched? }` |
+| `POST /games/:channel/:game/steps` | `{ from, steps: [{ step, signature, stamp?, attestation? }] }` | `{ start, seq, transcript, accepted, switched? }` |
 | `GET /games/:channel/:game/evidence` | | `{ evidence }` |
 | `GET /games/:channel/:game/events` | `?from=SEQ` | A `text/event-stream`: an event `steps` whose data is `{ start, seq, transcript, steps }` each time the archive gets steps, and a comment line every `heartbeat_seconds` |
 | `GET /info`, `GET /health` | | `/info` includes the `referee` public key, or null, the `limits`, and the `capacity`: `{ open, max_open_games, reserved_games, free, free_unreserved }` |
