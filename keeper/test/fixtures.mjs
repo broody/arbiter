@@ -60,10 +60,10 @@ export function walletSign(key, message) {
 
 /**
  * The watcher's chain interface over settable channels, recording every send.
- * `failing` names the sends that throw; `bundles` is whether a resolve's
- * after-settle calls simulate with it; `joins` (`{ game_id, block }`) and
- * `termsOf` (game id -> terms) stand in for the world's events and the
- * system's `terms`, up to block `block`.
+ * `failing` names the sends that throw, and `terms` for the terms reads;
+ * `bundles` is whether a resolve's after-settle calls simulate with it;
+ * `joins` (`{ game_id, block }`) and `termsOf` (game id -> terms) stand in for
+ * the world's events and the system's `terms`, up to block `block`.
  */
 export function fakeChain({ canSend = true } = {}) {
   const channels = new Map(), sent = [], failing = new Set(), joins = [], termsOf = new Map();
@@ -91,6 +91,7 @@ export function fakeChain({ canSend = true } = {}) {
     },
     async terms(entry, gameId) {
       this.reads.terms += 1;
+      if (failing.has('terms')) throw Error('terms failed');
       if (!termsOf.has(BigInt(gameId))) throw Error('Unknown channel');
       return structuredClone(termsOf.get(BigInt(gameId)));
     },

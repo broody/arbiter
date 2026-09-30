@@ -109,7 +109,10 @@ that key (`clock.referee`):
   watcher reads the world's `ChannelUpdated` events of kind JOINED, reads each
   new game's terms (`terms(game_id)`), and registers the timed ones that name
   its key from their opening state. Such a game gets a referee even if neither
-  seat registers it. Each join costs one terms read.
+  seat registers it. Each join costs one terms read. A registration that fails
+  for a reason that may pass, such as an RPC error or a full keeper, is kept
+  in the store and retried each round, one more terms read each time, until
+  the game registers or the archive refuses it (e.g. closed here).
 - **Stamps.** Each unstamped step is stamped when it arrives, before it is
   archived and forwarded. A step arriving after its seat's time ran out is
   refused (`Flag fell`) and the seat is flagged.
@@ -290,10 +293,10 @@ each entry's `max_steps`. Steps to a closed game get 409.
 - `node --test keeper/test/*.test.mjs`: the archive, the watcher, the referee,
   the step stream and the HTTP API against a fake chain, and the event and
   terms reads against a fake RPC provider. They include the admission attack
-  (unanchored games filling a wallet's cap), self-registration from events,
-  answering a dispute once, the fallback when an acknowledgement doesn't land,
-  starts after a join and after forced play, chained segments, no flag
-  after a step the cap refused, and the referee's tips and rolls.
+  (unanchored games filling a wallet's cap), self-registration from events and
+  its retries, answering a dispute once, the fallback when an acknowledgement
+  doesn't land, starts after a join and after forced play, chained segments,
+  no flag after a step the cap refused, and the referee's tips and rolls.
 - `node keeper/bench.mjs [STEPS]`: the latency a referee adds, from the SDK
   work per step to a step's trip through a refereeing keeper to the other
   seat's stream, with the memory and the file store.

@@ -168,8 +168,10 @@ its roll has waited 3 days (see
 ## Watcher
 
 Every `poll_seconds`, the watcher first registers the timed games that joined
-naming its referee key, on the entries with a `world`. Then, for each open
-anchored game:
+naming its referee key, on the entries with a `world`. A registration that
+fails for a reason that may pass, such as an RPC error or a full keeper, is
+kept in the store and retried each round until the game registers or the
+archive refuses it. Then, for each open anchored game:
 
 | Channel | Keeper |
 | --- | --- |
@@ -314,7 +316,8 @@ for the transactions it sends, and cap them with `max_fee_fri`.
   give logs `roll` with `outcome: failed`. One line per chain action, as `action`:
   `settle`, `answer`, `acknowledge`, `resume`, `resolve`, `close` and
   `register`, with `outcome` (`sent`, `failed`, `skipped` without an account,
-  or `joined`) and `tx`.
+  `joined`, or `refused`: a registration the archive turned down, which,
+  unlike a `failed` one, isn't retried) and `tx`.
 - **Store.** A directory of JSON files (`@referee/sdk/store/file`). A `LOCK`
   file allows one process per directory. Closed games stay in it.
 - **Limits.** `max_open_games`, `reserved_games`, `max_open_per_player` and
@@ -324,9 +327,10 @@ for the transactions it sends, and cap them with `max_fee_fri`.
   from closing an idle stream.
 - **RPC.** Each round costs one `get_channel` call per open anchored game.
   With `world` set, it also scans the world's events from where it stopped,
-  and reads the terms of each game that joined. Admitting an unanchored game
-  costs one signature check per seat, a call to its account contract. A tip
-  for an anchored game costs one `get_channel` call. Use a node you control for
+  and reads the terms of each game that joined, again each round while its
+  registration is retried. Admitting an unanchored game costs one signature
+  check per seat, a call to its account contract. A tip for an anchored game
+  costs one `get_channel` call. Use a node you control for
   many games.
 - **Ports.** The default port, 3200, is also the prover gateway's default worker
   base port. Change one if both run on one host.
@@ -336,10 +340,10 @@ for the transactions it sends, and cap them with `max_fee_fri`.
 - `node --test keeper/test/*.test.mjs`: the archive, the watcher, the referee,
   the step stream and the HTTP API against a fake chain, and the event and
   terms reads against a fake RPC provider. They cover unanchored games
-  filling a wallet's cap, registration from events, answering a dispute once,
-  the fallback when an acknowledgement doesn't land, starts after a join and
-  after forced play, chained segments, no flag after a step the cap
-  refused, and the referee's tips and rolls.
+  filling a wallet's cap, registration from events and its retries, answering
+  a dispute once, the fallback when an acknowledgement doesn't land, starts
+  after a join and after forced play, chained segments, no flag after a
+  step the cap refused, and the referee's tips and rolls.
 - `node keeper/bench.mjs [STEPS]`: the latency a referee adds, from the SDK
   work per step to a step's trip through a refereeing keeper to the other
   seat's stream, with the memory and the file store.

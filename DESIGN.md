@@ -490,7 +490,9 @@ latest verified transcript.
     a player's wallet, so it leaves them alone.
   - With an entry's `world` and `namespace`, it registers joined games that
     name its referee key from the channel's `ChannelUpdated` events, so every
-    such game has a referee even if no seat registers it.
+    such game has a referee even if no seat registers it. A registration that
+    fails for a reason that may pass (an RPC error, a full keeper) is retried
+    each round.
 - **Channel reads.** A game system exposes `get_channel(game_id)`, which
   returns the `ChannelGame` view (`ChannelTerms` and `ChannelState`
   together), decoded by the SDK's `getChannel`.
