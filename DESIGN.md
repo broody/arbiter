@@ -481,8 +481,13 @@ latest verified transcript.
     `afterSettle` hook adds calls to that `resolve` (Surround rates the game)
     when the bundle simulates, and sends them apart otherwise.
   - It returns a timed game it referees from forced play with
-    `resume_by_referee` once its archive holds the anchor. Forced moves and
-    timeout claims need a player's wallet, so it leaves them alone.
+    `resume_by_referee` once its archive holds the anchor. Forced play it did
+    not see, as when it was down, it reads back from the chain: the `force`
+    and `roll` calls in the transactions' traces, from the channel's anchor
+    back to a state it holds. It replays their steps and checks each state
+    against the channel's. That needs the entry's `world` and `namespace`, and
+    a `decodeAction` in the game's codec. Forced moves and timeout claims need
+    a player's wallet, so it leaves them alone.
   - With an entry's `world` and `namespace`, it registers joined games that
     name its referee key from the channel's `ChannelUpdated` events, so every
     such game has a referee even if no seat registers it.
@@ -514,7 +519,9 @@ latest verified transcript.
   settles a finished game through the dispute window to SETTLED, referees a
   timed game, flagging the stalling seat and settling the flag, and gives
   another its randomness: the join carries its signed tip, and the channel
-  replays its roll.
+  replays its roll. It is then stopped while a seat gambles onchain in forced
+  play, and once restarted it follows the forced call, takes the game back
+  and rolls.
 
 ## Proving strategy
 
@@ -594,10 +601,11 @@ randomness instead. It helps 2-seat games, so it came before more than 2 seats
   keeper that holds the randomness secret can unfreeze the game, which keeps
   real outages short. The next seat then gets a fresh window.
 - The referee can also take the game back (`resume_by_referee`) and roll
-  offchain. The keeper does that once its archive holds the channel's anchor,
-  which a step played onchain never reaches by itself: a seat registers its
-  session again from that anchor. Nothing does so automatically yet, and the
-  keeper does not post `roll` itself.
+  offchain, which is what the keeper does. A step played onchain never
+  reaches its archive by itself, so the keeper reads the forced calls back
+  from the chain first (see Keeper): otherwise a seat that is losing could
+  gamble onchain while the keeper is down, keep the state to itself and wait
+  for the void. The keeper does not post `roll` itself.
 - A pause has an end. The seats can all agree to void the game (they sign
   `void_hash`, `'REFEREE_VOID_V1'`), and after 3 days anyone can end it void.
   Falling back to a seat's reveal instead would let a colluding referee

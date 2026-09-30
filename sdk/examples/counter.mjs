@@ -14,6 +14,7 @@ export const counter = {
   encodeConfig: c => [BigInt(c.target)],
   decodeConfig: r => ({ target: r.num() }),
   encodeAction: a => [BigInt(a.kind), BigInt(a.amount)],
+  decodeAction: r => ({ kind: r.num(), amount: r.num() }),
   encodeState: s => [s.total, s.next, s.gamble ? 1 : 0, s.winner, s.target].map(BigInt),
   init: c => ({ total: 0, next: 0, gamble: false, winner: 0, target: c.target }),
   apply(config, s, seat, a) {

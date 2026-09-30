@@ -291,9 +291,9 @@ days ahead. During the pause:
 - anyone who holds the referee's next value posts it with `roll`, and forced
   play goes on with a fresh window for the next seat;
 - the referee, once it is back, returns the game with `resume_by_referee` and
-  rolls offchain. A keeper does this once its archive holds the channel's
-  anchor, so register your session again from the state you forced
-  (`keeper.register`). It also answers a roll it owed when it stopped;
+  rolls offchain. A keeper does this, reading the forced steps back from the
+  chain if it was down when you played them. It also answers a roll it owed
+  when it stopped;
 - both seats can sign a void approval, and anyone then calls `void`.
 
 Once the 3 days have passed, anyone may call `void` without approvals. A void

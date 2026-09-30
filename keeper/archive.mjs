@@ -18,8 +18,8 @@
 // Only open games live in memory. A settled, cancelled or evicted game stays on
 // disk, readable, and no longer counts against capacity.
 import {
-  Referee, RngChain, Session, actionHash, felt, hex, outranks, poseidon, publicKey, sign, signedStep, stateHash, tag,
-  tipHash, verify,
+  Reader, Referee, RngChain, Session, actionHash, encodeEnvelope, encodeWitness, felt, forcedOn, hex, outranks, poseidon,
+  publicKey, readStep, rebase, reveal, sign, signedStep, stateHash, tag, tipHash, verify,
 } from '../sdk/src/index.mjs';
 import { SessionStore } from '../sdk/src/store.mjs';
 
@@ -184,6 +184,44 @@ export class Archive {
       const current = await this.#load(ids)
         ?? (await this.#isClosed(key) ? fail(409, 'The game is closed here') : fail(404, 'Unknown game'));
       return this.#merge(key, current, from, records);
+    });
+  }
+
+  /**
+   * Follow forced play the keeper did not see, read back from the chain.
+   * `transitions` are the channel's `force` and `roll` calls since a state the
+   * archive holds, oldest first: `{ kind, from, to, calldata }`, with `kind`
+   * 'force' or 'roll', the state hashes the call started from and reached, and
+   * its calldata. Each call's steps are replayed from the state it started at
+   * and checked against the state the channel recorded; the transcript then
+   * starts at the last. Returns whether it does.
+   */
+  follow(ids, transitions) {
+    const key = gameKey(ids);
+    return this.#exclusive(key, async () => {
+      const current = await this.#load(ids);
+      if (!current || !transitions.length) return false;
+      const { game } = current;
+      let base = rebase(current, transitions[0].from);
+      if (!base) return false;
+      for (const { kind, to, calldata } of transitions) {
+        // The call's arguments: the game, the epoch, the state it starts from, then its steps or the roll.
+        const state = [...encodeEnvelope(game, base.start), ...encodeWitness(game, base.startWitness)];
+        const given = calldata.map(felt);
+        if (given[0] !== ids.game_id || given.length < 2 + state.length || state.some((value, i) => value !== given[2 + i]))
+          fail(409, 'The call does not start from the state the channel held');
+        const r = new Reader(given.slice(2 + state.length));
+        const steps = kind === 'roll' ? [reveal(r.next())] : Array.from({ length: r.num() }, () => readStep(game, r));
+        r.done();
+        base = forcedOn(base, steps);
+        if (base.stateHash() !== felt(to)) fail(409, 'The steps played onchain do not reach the channel\'s state');
+      }
+      await this.store.save(base, { replace: true });
+      this.#adopt(key, base);
+      this.#wake(key);
+      this.log({ game: key, event: 'followed', calls: transitions.length, seq: base.env.seq });
+      await this.#roll(key);
+      return true;
     });
   }
 

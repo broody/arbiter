@@ -25,6 +25,7 @@ A game codec is a plain object that mirrors the game's `GameRules` in JS. The SD
 | `encodeConfig` | `(config)` | Cairo Serde of `Config`, as felts. Used by `encodeTerms`. |
 | `decodeConfig` | `(reader)` | Reads a `Config` from a [`Reader`](#reader). Used by `readTerms`, `decodeTerms`, `decodeSnapshot` and `decodeChannelGame`. |
 | `encodeAction` | `(action)` | Cairo Serde of `Action`. Part of every step message and of replay calldata. |
+| `decodeAction` | `(reader)` | Optional. Reads an `Action` from a [`Reader`](#reader). Used by `readStep`, as a keeper does to follow forced play. |
 | `encodeState` | `(state)` | Cairo Serde of `State`. Part of the state hash and of envelope calldata. |
 | `init` | `(config)` | The opening state. |
 | `apply` | `(config, state, seat, action, scratch)` | Applies `seat`'s action. Returns `[state, request]`: the new state, and `null` or the seat that must reveal randomness. In a game that takes its randomness from the referee, the referee reveals instead, whichever seat is named. |
@@ -543,6 +544,22 @@ rebase(session, anchorHash)
 ```
 
 A new `Session` that starts at the state whose `stateHash` is `anchorHash`, with the steps after it and the same `lastSigned`. Returns `null` if the session's history never reaches that state. Proofs and onchain replays start from the channel's anchor or its candidate, so `historyCall` and `proveSession` take a session rebased on one of them. The new session's witness is `game.witness` of the scratch at that state, or the session's start witness when the state is its start.
+
+## forcedOn
+
+```js
+forcedOn(base, steps)
+```
+
+A new `Session` that starts where `steps` end, played onchain in forced play from `base`'s start: unsigned and unstamped. A keeper uses it to follow forced play it did not see: it rebases on the state a `force` or `roll` call started from, reads the call's steps with `readStep`, and checks the new session's `stateHash()` against the channel's anchor.
+
+## readStep
+
+```js
+readStep(game, reader)
+```
+
+A step read from a [`Reader`](#reader), the inverse of `encodeStep`. Throws `The game codec has no decodeAction` for a `play` or `playRandom` step when the codec lacks `decodeAction`.
 
 ## Disputes and segments
 

@@ -69,6 +69,7 @@ Each encoder returns the felts that Cairo's `Serde` would write, as BigInts.
 | `encodeConfig(config)` | `Config`, inside the terms and so inside the context hash |
 | `decodeConfig(reader)` | `Config`, read from a `Reader`, when decoding terms, snapshots or channels read from the chain |
 | `encodeAction(action)` | `Action`, inside every step message and in replay calldata |
+| `decodeAction(reader)` | `Action`, read from a `Reader`. Optional: a keeper needs it to read steps played onchain back from calldata |
 | `encodeState(state)` | `State`, inside the envelope, whose hash is the state hash |
 | `encodeWitness(witness)` | `Witness`. Required when the game has `load`. A game without it has the unit witness `()`, which encodes to nothing |
 

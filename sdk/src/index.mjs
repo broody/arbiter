@@ -951,6 +951,22 @@ export function rebase(session, anchorHash) {
   }
 }
 
+/**
+ * A session that starts where `steps`, played onchain in forced play from
+ * `base`'s start (unsigned and unstamped), end. For following forced play from
+ * the chain: `rebase` to the state a `force` or `roll` call started from, read
+ * its steps from the call (`readStep`), and check the result's state hash
+ * against the channel's anchor.
+ */
+export function forcedOn(base, steps) {
+  const { game, terms, context } = base;
+  let env = base.start;
+  const scratch = load(game, terms.config, env.game, base.startWitness);
+  for (const step of steps) env = applyStep(game, context, terms, env, step, scratch).env;
+  const witness = steps.length === 0 || !game.witness ? base.startWitness : structuredClone(game.witness(scratch));
+  return new Session(game, terms, { start: env, witness, lastSigned: base.lastSigned });
+}
+
 /** `session` cut to its first `n` steps after its start: a segment to submit. */
 export function prefix(session, n) {
   if (n >= session.steps.length) return session;
@@ -1043,6 +1059,29 @@ function readTimeControl(game, r) {
   const decoded = { referee, settings: timeOf(game).decodeSettings(settings), rng_tip: r.next() };
   settings.done();
   return decoded;
+}
+
+/**
+ * A step (Cairo `Move<A>`) from a Reader, the inverse of `encodeStep`. It
+ * needs the game's `decodeAction(reader)`, which only reading steps back from
+ * calldata uses, as a keeper does to follow forced play.
+ */
+export function readStep(game, r) {
+  const action = () => {
+    check(typeof game.decodeAction === 'function', 'The game codec has no decodeAction');
+    return game.decodeAction(r);
+  };
+  const kind = r.num();
+  switch (kind) {
+    case MOVE_PLAY: return play(action());
+    case MOVE_PLAY_RANDOM: { const a = action(); return playRandom(a, r.next()); }
+    case MOVE_REVEAL: return reveal(r.next());
+    case MOVE_RECOMMIT: return recommit(r.next());
+    case MOVE_RESIGN: return resign(r.num());
+    case MOVE_FLAG: return flag();
+    case MOVE_START: return start();
+    default: throw Error('Unknown move');
+  }
 }
 
 /** A game's `decodeConfig(reader)` reads its `Config` from a Reader. */

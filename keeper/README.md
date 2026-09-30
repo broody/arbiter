@@ -160,9 +160,9 @@ hash-chain tip (`clock.rng_tip`). No seat then has to be online to reveal.
 - **Restarts and forced play.** On start it answers a roll it owed when it
   stopped. A roll a seat asked for onchain, in forced play, is answered as
   soon as the channel resumes; the `start` still follows the start grace. The
-  keeper resumes the channel only once its archive holds the anchor, so a seat
-  must first register its session again from the state it forced
-  (`keeper.register`). The keeper doesn't post `roll` onchain itself.
+  keeper resumes the channel once its archive holds the anchor, and reads
+  forced play it did not see back from the chain (see Watcher). It doesn't
+  post `roll` onchain itself.
   If the keeper stays down, anyone holding its next value may post it onchain
   (`roll`), and after 3 days the game can be ended void.
 
@@ -177,9 +177,22 @@ Each `poll_seconds`, for each open game:
 | DISPUTE, a timed game it referees | Sends `acknowledge` at once while the candidate is unfinished, unless the channel holds it already, so `resolve` returns the game to play instead of forced play |
 | DISPUTE, other games | Answers once, `answer_margin_seconds` before the deadline, with what outranks the candidate, extending it when it can (`disputeAnswer`). Again only against a newer candidate someone else submits |
 | DISPUTE, window passed | `resolve`, with the game's `afterSettle` calls when it settles the game |
-| FORCED, a timed game it referees | `resume_by_referee`, once per epoch, before the forced-play window closes and when the archive holds the anchor |
+| FORCED, a timed game it referees | `resume_by_referee`, once per epoch, before the forced-play window closes and when the archive holds the anchor. If it doesn't, the keeper first follows the forced play from the chain (below) |
 | FORCED, other games | Waits. Forced moves and timeouts need a player's wallet |
 | SETTLED, CANCELLED | Closes the game |
+
+**Following forced play.** Steps played onchain never reach the archive by
+themselves, and the keeper may have been down when they were played. For a
+game it referees, it reads them back, once per anchor:
+- It walks from the channel's anchor to a state the archive holds: the
+  `ChannelUpdated` events in the anchor's block, each `force` or `roll` call
+  in those transactions' traces, and the channel as it was one block earlier.
+- It replays each call's steps from the state the call started at, and checks
+  the result against the state the channel recorded. The transcript then
+  starts at the anchor, and the keeper takes the game back as usual.
+- It needs the entry's `world` and `namespace`, a node that serves traces and
+  past state, and `decodeAction(reader)` in the game's codec. Without them a
+  seat can still register its session again from the anchor.
 
 A referee whose acknowledgement isn't onchain by `answer_margin_seconds`
 before the deadline answers as for other games: forced play then starts from
@@ -247,7 +260,8 @@ each entry's `max_steps`. Steps to a closed game get 409.
   - `start_grace_seconds` (default 120) and `answer_margin_seconds` (default
     600), per entry or at the top level.
   - `world` and `namespace`: the Dojo world and namespace of an anchored
-    entry, for registering joined games (see Referee). Scanning starts at
+    entry, for registering joined games (see Referee) and following forced
+    play (see Watcher). Scanning starts at
     `from_block`, or at the chain's head the first time, and resumes where it
     stopped.
   - The game's system exposes `acknowledge`, `resume_by_referee` and
@@ -289,6 +303,8 @@ each entry's `max_steps`. Steps to a closed game get 409.
   resolves it to SETTLED, and referees a timed game: it flags the stalling seat
   and settles the flag with reason TIMEOUT. It also gives a game its
   randomness: the join carries its signed tip, it rolls for a gamble, and the
-  channel replays the roll. It passed with katana 1.7.1 and sozo 1.8.0 in
+  channel replays the roll. Last, the keeper is stopped while a seat gambles
+  onchain in forced play, and once restarted it follows the forced call, takes
+  the game back and rolls. It passed with katana 1.7.1 and sozo 1.8.0 in
   about a minute and a half. sozo 1.8.5 fails to deploy the world on katana
   1.7.1.

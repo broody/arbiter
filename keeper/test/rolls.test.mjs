@@ -1,19 +1,23 @@
 // The keeper as the source of a timed game's randomness: it signs the tip of
 // a hash chain for each game that asks, rolls as soon as it stamps a gamble,
 // refuses a game whose tip is not its own, and answers a roll it owed when it
-// stopped or one a seat asked for onchain. Node's mock timers drive its clock.
+// stopped or one a seat asked for onchain, which it reads back from the chain
+// if it was down meanwhile. Node's mock timers drive its clock.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  MOVE_FLAG, MOVE_PLAY_RANDOM, MOVE_REVEAL, MOVE_START, REFEREE, ZERO_SIGNATURE, applySteps, playRandom, publicKey,
-  rngChain, signedStep, stateHash, tipHash, verify,
+  MOVE_FLAG, MOVE_PLAY_RANDOM, MOVE_REVEAL, MOVE_START, REFEREE, ZERO_SIGNATURE, applySteps, encodeEnvelope, encodeSteps,
+  playRandom, publicKey, reveal, rngChain, signedStep, stateHash, tipHash, verify,
 } from '../../sdk/src/index.mjs';
 import { KeeperClient } from '../../sdk/src/keeper.mjs';
 import { SessionStore, memoryBackend } from '../../sdk/src/store.mjs';
 import { GAMBLE } from '../../sdk/examples/counter.mjs';
 import { Archive, KeeperError } from '../archive.mjs';
 import { startKeeper } from '../server.mjs';
-import { CHAIN, CHANNEL, REFEREE_KEY, RNG_SECRET, Session, add, counter, keys, timed } from './fixtures.mjs';
+import { ACTIVE, FORCED, startWatcher } from '../watch.mjs';
+import {
+  CHAIN, CHANNEL, REFEREE_KEY, RNG_SECRET, Session, add, channelOf, counter, entry, fakeChain, keys, timed,
+} from './fixtures.mjs';
 
 const T0 = 1_000_000;
 const ids = { chain_id: CHAIN, channel: CHANNEL, game_id: 7n }, config = { target: 20 };
@@ -164,4 +168,72 @@ test('clients fetch the referee\'s signed tip over HTTP', async () => {
     assert.ok(verify(tipHash(counter, CHAIN, CHANNEL, 7n, rng_tip), signature, publicKey(REFEREE_KEY)));
     assert.equal(rng_tip, (await k.archive.tip(ids, config)).rng_tip);
   } finally { await k.close(); }
+});
+
+test('a keeper that was down reads forced play back from the chain, takes the game back and rolls', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: T0 });
+  const chain = fakeChain(), logs = [];
+  const { archive, alice } = await table(memoryBackend());
+  const watcher = startWatcher({ archive, chain, entries: new Map([[CHANNEL, entry({ world: 0x3031dn, namespace: 'counter' })]]),
+    intervalMs: 0, log: e => logs.push(e) });
+  const round = async () => { await watcher.tick(); await watcher.idle(); };
+  const hash = env => stateHash(counter, env);
+  try {
+    // While the keeper was away, a dispute from the opening ended in forced play, where seat 0 gambled onchain.
+    // Its step after the opening, which the keeper had stamped, never reached the channel.
+    const opening = alice.start, force = [gamble(0)];
+    const waiting = applySteps(counter, alice.context, alice.terms, opening, null, force);
+    const calldata = [7n, 1n, ...encodeEnvelope(counter, opening), ...encodeSteps(counter, force)];
+    chain.channels.set(7n, channelOf(alice, { status: FORCED, epoch: 2, anchor: waiting, deadline: 9000 }));
+    const asked = [];
+    chain.forcedPlay = async (e, gameId, holds) => {
+      asked.push(gameId);
+      return holds(hash(opening)) ? [{ kind: 'force', from: hash(opening), to: hash(waiting), calldata }] : null;
+    };
+    await round();
+    // It followed the forced call to the anchor, which waits for its roll, and returned the game to play.
+    assert.deepEqual(logs.filter(l => l.action === 'follow').map(l => [l.outcome, l.calls, l.seq]), [['followed', 1, 1]]);
+    assert.deepEqual(chain.sent.map(s => [s.via, s.epoch]), [['resume', 2]]);
+    const session = await archive.session(ids);
+    assert.equal(hash(session.start), hash(waiting));
+    // Back offchain, it rolled at once.
+    assert.deepEqual(session.steps.map(s => [s.step.kind, s.seat]), [[MOVE_REVEAL, REFEREE]]);
+    assert.equal(session.due(), 1);
+    chain.channels.set(7n, channelOf(alice, { status: ACTIVE, epoch: 3, anchor: waiting }));
+    await round();
+    assert.deepEqual([asked.length, chain.sent.length], [1, 1]);
+  } finally { archive.stop(); }
+});
+
+test('the archive follows only calls that start where the channel was and end where it is', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: T0 });
+  const { archive, alice } = await table(memoryBackend());
+  const twin = await table(memoryBackend());
+  const hash = env => stateHash(counter, env);
+  try {
+    // From the state after seat 0's stamped step, seat 1 gambles onchain.
+    const from = alice.env, force = [gamble(1)];
+    const waiting = applySteps(counter, alice.context, alice.terms, from, null, force);
+    const forced = { kind: 'force', from: hash(from), to: hash(waiting),
+      calldata: [7n, 1n, ...encodeEnvelope(counter, from), ...encodeSteps(counter, force)] };
+    await archive.forced(ids, 2);
+    // A call for another game, from another state, or that does not reach the channel's state is refused.
+    await rejects(archive.follow(ids, [{ ...forced, calldata: [8n, ...forced.calldata.slice(1)] }]), 409, /does not start from/);
+    await rejects(archive.follow(ids, [{ ...forced, calldata: forced.calldata.with(2, 99n) }]), 409, /does not start from/);
+    await rejects(archive.follow(ids, [{ ...forced, to: 0xbadn }]), 409, /do not reach the channel's state/);
+    assert.equal(await archive.follow(ids, [{ ...forced, from: 0xbadn }]), false);
+    assert.equal((await archive.session(ids)).start.seq, 0);
+    assert.equal(await archive.follow(ids, [forced]), true);
+    let session = await archive.session(ids);
+    assert.deepEqual([session.start.seq, hash(session.start), session.steps.length], [2, hash(waiting), 0]);
+    // Then someone posts the referee's value onchain: that call ends with the value.
+    // (A keeper with the same secret gives the same game the same chain.)
+    await twin.archive.append(ids, 1, [signedStep(twin.alice.sign(gamble(1), keys[1]))]);
+    const value = (await twin.archive.steps(ids, 2)).steps[0].step.value;
+    const rolledTo = applySteps(counter, alice.context, alice.terms, waiting, null, [reveal(value)]);
+    const posted = { kind: 'roll', from: hash(waiting), to: hash(rolledTo), calldata: [7n, 2n, ...encodeEnvelope(counter, waiting), value] };
+    assert.equal(await archive.follow(ids, [posted]), true);
+    session = await archive.session(ids);
+    assert.deepEqual([session.start.seq, hash(session.start), session.due()], [3, hash(rolledTo), 0]);
+  } finally { archive.stop(); twin.archive.stop(); }
 });

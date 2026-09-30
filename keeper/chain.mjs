@@ -1,15 +1,16 @@
-// The keeper's Starknet side: read channels, terms and the joins in a world's
-// events, and send `submit_history`, `resolve`, proved `settle`, `acknowledge`
-// and `resume_by_referee` transactions from the keeper's own account. The
+// The keeper's Starknet side: read channels, terms, the joins in a world's
+// events and the calls of forced play it did not see, and send
+// `submit_history`, `resolve`, proved `settle`, `acknowledge` and
+// `resume_by_referee` transactions from the keeper's own account. The
 // keeper holds no player keys; the calls it sends are open to anyone, and the
 // only signatures it adds are its referee's.
 import { Account, RpcProvider, hash } from 'starknet';
-import { decodeTerms, hex, poseidon } from '../sdk/src/index.mjs';
+import { decodeTerms, felt, hex, poseidon } from '../sdk/src/index.mjs';
 import { contractCall, getChannel, historyCall, proveSession } from '../sdk/src/proving.mjs';
 
 /** Default entrypoint names: referee_dojo's (e.g. the counter's system). */
 export const ENTRYPOINTS = { get_channel: 'get_channel', submit_history: 'submit_history', resolve: 'resolve',
-  acknowledge: 'acknowledge', resume_by_referee: 'resume_by_referee', terms: 'terms' };
+  acknowledge: 'acknowledge', resume_by_referee: 'resume_by_referee', terms: 'terms', force: 'force', roll: 'roll' };
 
 /** `ChannelUpdated.kind` values (referee_dojo::models). */
 export const UPDATES = { CREATED: 0, JOINED: 1, CANCELLED: 2, DISPUTED: 3, RECEIVED: 4, RESOLVED: 5, FORCED: 6, RESUMED: 7,
@@ -36,6 +37,24 @@ export function channelUpdate(data) {
   const [kind, epoch, seq, status, deadline, state_hash, winner, reason] = d.slice(2 + n);
   return { game_id, kind: Number(kind), epoch: Number(epoch), seq: Number(seq), status: Number(status),
     deadline: Number(deadline), state_hash, winner: Number(winner), reason: Number(reason) };
+}
+
+// A channel in forced play (referee::channel::FORCED).
+const FORCED = 3;
+
+// The calls a traced transaction made to `channel` for game `gameId` with one
+// of `selectors`, in order, however deep (a paymaster or a session wraps them).
+function channelCalls(trace, channel, gameId, selectors) {
+  const found = [];
+  const walk = call => {
+    if (!call) return;
+    if (call.contract_address !== undefined && BigInt(call.contract_address) === channel
+      && selectors.has(BigInt(call.entry_point_selector)) && call.calldata?.length && BigInt(call.calldata[0]) === gameId)
+      found.push(call);
+    for (const inner of call.calls ?? []) walk(inner);
+  };
+  walk(trace?.execute_invocation);
+  return found;
 }
 
 // Estimated resources times 1.5: estimates skip parts of account validation.
@@ -105,6 +124,58 @@ export function starknetChain({ rpcUrl, provider = new RpcProvider({ nodeUrl: rp
         continuation_token = page.continuation_token;
       } while (continuation_token);
       return { games, to };
+    },
+    /**
+     * The `force` and `roll` calls that took the channel of game `gameId` to
+     * its anchor, oldest first, back to a state `holds(hash)` accepts: each
+     * `{ kind, from, to, calldata }`, with `kind` 'force' or 'roll', the state
+     * hashes the call started from and reached, and its calldata. Null when
+     * the chain does not show that (another transition set the anchor, or
+     * forced play did not start from a state `holds` accepts). Reads the
+     * world's events, the transactions' traces, and the channel as it was
+     * before each call.
+     */
+    async forcedPlay(entry, gameId, holds, limit = 64) {
+      const id = BigInt(gameId), channelAddress = felt(entry.channel);
+      const kinds = new Map([[UPDATES.FORCED, 'force'], [UPDATES.ROLLED, 'roll']]);
+      const selector = kind => BigInt(hash.getSelectorFromName(names(entry)[kind]));
+      const selectors = new Set(['force', 'roll'].map(selector));
+      const keys = [[hex(EVENT_EMITTED)], [hex(dojoSelector(entry.namespace, 'ChannelUpdated'))], [hex(entry.channel)]];
+      const out = [];
+      let channel = await this.channel(entry, gameId);
+      while (!holds(channel.anchor.hash)) {
+        const block = channel.anchor_block;
+        if (channel.status !== FORCED || block === 0 || out.length >= limit) return null;
+        // What the channel held before that block, and the game's updates in it.
+        const before = await getChannel(provider, entry.game, entry.channel, gameId, { block: block - 1, entrypoint: names(entry).get_channel });
+        const updates = [];
+        let continuation_token;
+        do {
+          const page = await provider.getEvents({ address: hex(entry.world), from_block: { block_number: block },
+            to_block: { block_number: block }, keys, chunk_size: 100, ...(continuation_token ? { continuation_token } : {}) });
+          for (const event of page.events) {
+            const update = channelUpdate(event.data);
+            if (update.game_id === id) updates.push({ ...update, tx: event.transaction_hash });
+          }
+          continuation_token = page.continuation_token;
+        } while (continuation_token);
+        // Each must be a forced step or a posted roll, from the state before to the anchor.
+        const calls = new Map(), hops = [];
+        let from = felt(before.anchor.hash);
+        for (const update of updates) {
+          const kind = kinds.get(update.kind);
+          if (!kind) return null;
+          if (!calls.has(update.tx)) calls.set(update.tx, channelCalls(await provider.getTransactionTrace(update.tx), channelAddress, id, selectors));
+          const call = calls.get(update.tx).shift();
+          if (!call || BigInt(call.entry_point_selector) !== selector(kind)) return null;
+          hops.push({ kind, from, to: update.state_hash, calldata: call.calldata.map(BigInt) });
+          from = update.state_hash;
+        }
+        if (!hops.length || from !== felt(channel.anchor.hash)) return null;
+        out.unshift(...hops);
+        channel = before;
+      }
+      return out;
     },
     /** Whether `address`'s account contract accepts `signature` over SNIP-12 `typedData`. */
     verifyMessage: (address, typedData, sig) => provider.verifyMessageInStarknet(typedData, sig, address),

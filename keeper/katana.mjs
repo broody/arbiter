@@ -2,24 +2,27 @@
 // transactions: it answers a stale dispute and resolves it into forced play,
 // settles a finished game and resolves it to SETTLED, referees a timed game
 // whose stalling seat it flags and settles, and gives another its randomness,
-// which the channel replays. keeper/katana.sh starts Katana and deploys the
-// world first.
+// which the channel replays. Then it is stopped while a seat gambles onchain in
+// forced play, and started again: it reads the forced call back from the
+// chain, takes the game back and rolls. keeper/katana.sh starts Katana and
+// deploys the world first.
 //
-//   node keeper/katana.mjs RPC_URL CHANNEL_ADDRESS
+//   node keeper/katana.mjs RPC_URL CHANNEL_ADDRESS WORLD_ADDRESS
 import assert from 'node:assert/strict';
 import { Account, RpcProvider } from 'starknet';
 import { ADD, GAMBLE, counter } from '../sdk/examples/counter.mjs';
 import {
-  MOVE_REVEAL, REASON_TIMEOUT, REFEREE, Session, decodeTerms, encodeTimeControl, hex, play, playRandom, publicKey, rngChain,
+  MOVE_REVEAL, REASON_TIMEOUT, REFEREE, Session, applySteps, decodeTerms, encodeEnvelope, encodeSteps, encodeTimeControl,
+  hex, play, playRandom, publicKey, rngChain,
 } from '../sdk/src/index.mjs';
 import { KeeperClient } from '../sdk/src/keeper.mjs';
 import { contractCall, getChannel, rpc } from '../sdk/src/proving.mjs';
 import { memoryBackend } from '../sdk/src/store.mjs';
 import { loadConfig, startKeeper } from './server.mjs';
-import { DISPUTE, FORCED, SETTLED } from './watch.mjs';
+import { ACTIVE, DISPUTE, FORCED, SETTLED } from './watch.mjs';
 
-const [RPC, CHANNEL] = process.argv.slice(2);
-if (!RPC || !CHANNEL) { console.error('usage: node keeper/katana.mjs RPC_URL CHANNEL_ADDRESS'); process.exit(2); }
+const [RPC, CHANNEL, WORLD] = process.argv.slice(2);
+if (!RPC || !CHANNEL || !WORLD) { console.error('usage: node keeper/katana.mjs RPC_URL CHANNEL_ADDRESS WORLD_ADDRESS'); process.exit(2); }
 const provider = new RpcProvider({ nodeUrl: RPC });
 // Katana's funded dev accounts: the world owner, two players and the keeper.
 const [owner, alice, bob, keeperAccount] = await rpc(RPC, 'dev_predeployedAccounts', []);
@@ -74,13 +77,15 @@ await send(owner, 'allow_prover', [owner.classHash, 1]);
 const actions = [];
 const config = await loadConfig({
   chain_id: hex(BigInt(await provider.getChainId())), rpc_url: RPC, port: 0, poll_seconds: 1,
-  games: [{ channel: CHANNEL, module: '../sdk/examples/counter.mjs', export: 'counter' }],
+  games: [{ channel: CHANNEL, module: '../sdk/examples/counter.mjs', export: 'counter', world: WORLD, namespace: 'counter' }],
   account: { address: keeperAccount.address, private_key_env: 'KEEPER_PRIVATE_KEY' },
   referee: { private_key_env: 'KEEPER_REFEREE_KEY', rng_secret_env: 'KEEPER_RNG_SECRET' },
 }, { base: new URL('.', import.meta.url).pathname,
   env: { KEEPER_PRIVATE_KEY: keeperAccount.privateKey, KEEPER_REFEREE_KEY: hex(REFEREE_KEY), KEEPER_RNG_SECRET: '0x5ec2e7' } });
-const keeper = await startKeeper(config, { backend: memoryBackend(), log: e => { if (e.action) actions.push(e); } });
-const client = new KeeperClient(keeper.url);
+// One store for the keeper's two lives.
+const backend = memoryBackend(), log = e => { if (e.action) actions.push(e); };
+let keeper = await startKeeper(config, { backend, log });
+let client = new KeeperClient(keeper.url);
 
 try {
   // A stale dispute: Alice disputes from the opening anchor after four signed steps.
@@ -148,6 +153,32 @@ try {
   assert.deepEqual(paid.result, d.session.env.outcome);
   await until('the keeper to close the game', () => keeper.archive.open().length === 1);
   console.log(`game ${d.id}: the keeper rolled a ${rolled} for seat 1's gamble and the channel replayed it; seat ${paid.result.winner - 1} won`);
+
+  // The keeper is down while a game it gives randomness goes to forced play,
+  // where Alice gambles onchain: the channel waits for the referee's roll.
+  const rolledClock = { referee: publicKey(REFEREE_KEY), rng_tip: 1n,
+    settings: { turn_ms: 60000, bank_ms: 0, increment_ms: 0, byoyomi: null } };
+  const e = await newGame(0x5eed20n, rolledClock);
+  await client.register(e.session);
+  await keeper.close();
+  await send(alice, 'open_dispute', [e.id, 0]);
+  await passWindow();
+  await send(bob, 'resolve', [e.id, 0]);
+  const gamble = [playRandom({ kind: GAMBLE, amount: 0 }, rngChain(0x5eed20n, 8)[7])];
+  await send(alice, 'force', [e.id, 1, ...encodeEnvelope(counter, e.session.start), ...encodeSteps(counter, gamble)]);
+  const paused = await channel(e.id);
+  assert.deepEqual([paused.status, paused.epoch, paused.anchor.due], [FORCED, 2, REFEREE]);
+  // Back up, the keeper reads the forced call from the chain, takes the game
+  // back and rolls, though no seat told it what was played.
+  keeper = await startKeeper(config, { backend, log });
+  client = new KeeperClient(keeper.url);
+  const back = await until('the keeper to take the game back', channelWhere(e.id, x => x.status === ACTIVE && x.epoch === 3));
+  const waiting = applySteps(counter, e.session.context, e.session.terms, e.session.start, null, gamble);
+  const resumed = new Session(counter, e.session.terms, { start: waiting });
+  assert.equal(back.anchor.hash, resumed.stateHash());
+  await until('the roll', async () => { await client.pull(resumed); return resumed.steps.length > 0; });
+  assert.deepEqual([resumed.steps[0].step.kind, resumed.steps[0].seat, resumed.env.pending.active], [MOVE_REVEAL, REFEREE, false]);
+  console.log(`game ${e.id}: the keeper, down while seat 0 gambled onchain, followed the forced call, resumed the game and rolled a ${resumed.env.game.total}`);
   console.log(`keeper actions: ${actions.map(e => `${e.action}${e.via ? `/${e.via}` : ''}${e.ms ? ` ${e.ms} ms` : ''}`).join(', ')}`);
   assert.equal(actions.filter(e => e.outcome === 'failed').length, 0);
 } finally {

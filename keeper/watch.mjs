@@ -5,7 +5,8 @@
 //   transcript is long (see `disputeAnswer`);
 // - as the referee of a timed game, acknowledges a dispute at once, so that
 //   the game returns to play after the window instead of forced play, and
-//   returns a game from forced play itself;
+//   returns a game from forced play itself, first reading back from the chain
+//   any forced play it did not see (e.g. while it was down);
 // - answers any other dispute once, near its deadline, from the latest state:
 //   the fallback, too, when a referee's acknowledgement has not landed;
 // - resolves a dispute once its window has passed (anyone may), with the
@@ -93,7 +94,8 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
 
   const sentIn = (key, epoch) => {
     let sent = memos.get(key);
-    if (sent?.epoch !== epoch) memos.set(key, sent = { epoch, against: new Set(), ours: new Set(), ack: null, resumed: null });
+    if (sent?.epoch !== epoch)
+      memos.set(key, sent = { epoch, against: new Set(), ours: new Set(), ack: null, resumed: null, followed: null });
     return sent;
   };
   const holds = (key, session) => hash => {
@@ -141,7 +143,7 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
     const key = gameKey(ids), entry = entries.get(ids.channel);
     // An unanchored game has no channel to watch.
     if (!entry || entry.anchored === false) return;
-    const session = await archive.session(ids);
+    let session = await archive.session(ids);
     if (!session) return;
     const channel = await chain.channel(entry, ids.game_id);
     // The referee's clock stops for forced play, and restarts after it.
@@ -150,6 +152,21 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
       else if (channel.status === ACTIVE || channel.status === DISPUTE) await archive.resumed(ids, channel.epoch);
     }
     const sent = sentIn(key, channel.epoch);
+    // Forced play the keeper did not see, as when it was down: read its calls
+    // back from the chain, once per anchor, so the referee can take the game
+    // back from there (and answer a roll a seat asked for onchain).
+    if (channel.status === FORCED && archive.referees(ids) && chain.forcedPlay && entry.world
+      && sent.followed !== channel.anchor.hash && !holds(key, session)(channel.anchor.hash)) {
+      sent.followed = channel.anchor.hash;
+      const entryLog = { game: key, action: 'follow', epoch: channel.epoch };
+      try {
+        const calls = await chain.forcedPlay(entry, ids.game_id, holds(key, session));
+        if (calls?.length && await archive.follow(ids, calls)) {
+          session = await archive.session(ids);
+          log({ ...entryLog, calls: calls.length, seq: session.env.seq, outcome: 'followed' });
+        } else log({ ...entryLog, outcome: 'skipped', error: 'the chain does not show how forced play reached the anchor' });
+      } catch (e) { log({ ...entryLog, outcome: 'failed', error: e.message }); }
+    }
     const decision = decide(channel, session, now, { settle, referee: archive.referees(ids), sent, maxSteps: segmentSteps(entry),
       margin: entry.answer_margin_seconds ?? 600, holds: holds(key, session) });
     if (decision.action === 'close') {

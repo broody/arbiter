@@ -153,7 +153,7 @@ See [Randomness](/concepts/randomness#randomness-from-the-referee).
 | A game registers naming its key and a randomness tip | Refuses it (409) unless the tip is the tip of its own chain for that game: it could not roll for it |
 | It stamps a step that asks for randomness | Appends its roll at once: its next chain value, with the same stamp. The roll charges no one, and no flag falls while a roll is pending |
 | It starts with a roll pending | Answers the roll it owed when it stopped, stamped where the clock stopped |
-| A seat asked for a roll onchain, in forced play | Rolls once the channel is back in play and the archive holds that state. The `start` still follows the start grace |
+| A seat asked for a roll onchain, in forced play | Rolls once the channel is back in play and the archive holds that state, which the watcher reads back from the chain if the keeper did not see it. The `start` still follows the start grace |
 
 Each chain comes from the secret and the game's ids (chain, channel and game
 id), so the keeper stores nothing and rebuilds the same chain after a restart.
@@ -178,7 +178,7 @@ anchored game:
 | `DISPUTE`, a timed game it referees, candidate unfinished | Sends `acknowledge` at once, unless the channel holds it already |
 | `DISPUTE`, other games | Answers once, `answer_margin_seconds` before the deadline, with what outranks the candidate, extending it when its history holds it (`disputeAnswer`). Again only against a newer candidate someone else submits |
 | `DISPUTE`, window passed | `resolve`, with the game's `afterSettle` calls when it settles the game |
-| `FORCED`, a timed game it referees | `resume_by_referee`, once, when the archive holds the anchor and the forced-play window is open. While a roll waits for the referee, that window is the 3-day pause |
+| `FORCED`, a timed game it referees | `resume_by_referee`, once, when the archive holds the anchor and the forced-play window is open. While a roll waits for the referee, that window is the 3-day pause. If the archive lacks the anchor, the watcher first follows the forced play from the chain: the `force` and `roll` calls in the transactions' traces, back to a state it holds, replayed and checked against the channel's states. That needs `world` and `namespace` on the entry and `decodeAction` in the game's codec |
 | `FORCED`, other games | Waits: forced moves and timeouts need a player's wallet |
 | `SETTLED`, `CANCELLED` | Closes the game |
 
@@ -262,7 +262,8 @@ Start from [`keeper/config.example.json`](https://github.com/broody/referee/blob
   takes no `prover`.
 - `prover` is optional. Without it, every segment is an onchain replay of at
   most `replay_max_steps` steps.
-- `world` and `namespace` let a referee register joined games itself.
+- `world` and `namespace` let a referee register joined games itself, and
+  follow forced play it did not see.
   Scanning starts at `from_block`, or at the chain's head the first time, and
   resumes where it stopped.
 - `account` is optional. Without it the keeper only watches. Keys come from

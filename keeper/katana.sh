@@ -28,4 +28,5 @@ read -r address key < <(call dev_predeployedAccounts | node -e \
   && sozo build -p referee_counter_dojo >/dev/null \
   && sozo migrate --rpc-url "$RPC" --account-address "$address" --private-key "$key" >/dev/null)
 channel=$(node -e 'console.log(require("./dojo/manifest_dev.json").contracts.find(c => c.tag === "counter-channel").address)')
-node keeper/katana.mjs "$RPC" "$channel"
+world=$(node -e 'console.log(require("./dojo/manifest_dev.json").world.address)')
+node keeper/katana.mjs "$RPC" "$channel" "$world"

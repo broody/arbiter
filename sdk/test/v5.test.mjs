@@ -6,8 +6,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  REFEREE, Referee, RngChain, Session, applySteps, contextHash, flag, flagAt, open, play, playRandom, publicKey,
-  resign, reveal, rngChain, sign, start, stateHash, tag, tipHash, verify, voidHash,
+  REFEREE, Reader, Referee, RngChain, Session, applySteps, contextHash, encodeStep, flag, flagAt, forcedOn, open, play,
+  playRandom, publicKey, readStep, recommit, resign, reveal, rngChain, sign, start, stateHash, tag, tipHash, verify,
+  voidHash,
 } from '../src/index.mjs';
 import { ADD, GAMBLE, counter } from '../examples/counter.mjs';
 
@@ -138,4 +139,21 @@ test('the referee signs its tip for one game, and the seats sign a void', () => 
   const voided = voidHash(counter, context, 1, state);
   assert.ok(verify(voided, sign(voided, keys[0]), publicKey(keys[0])));
   assert.notEqual(voided, voidHash(counter, context, 2, state));
+});
+
+test('steps read back from calldata, and a session follows steps played onchain', () => {
+  // Every move round-trips through its Cairo encoding.
+  const moves = [add(3), gamble(1), reveal(rolls[7]), recommit(0x77n), resign(1), flag(), start()];
+  const r = new Reader(moves.flatMap(move => encodeStep(counter, move)));
+  assert.deepEqual(moves.map(() => readStep(counter, r)), moves);
+  r.done();
+  const { decodeAction, ...opaque } = counter;
+  assert.throws(() => readStep(opaque, new Reader(encodeStep(counter, add(3)))), /no decodeAction/);
+  // Forced play: seat 0's step, stamped, then seat 1's gamble and the posted roll, both onchain.
+  const session = new Session(counter, terms);
+  session.stamp(session.sign(add(3), keys[0]), T0, refereeKey);
+  const onchain = [gamble(1), reveal(rolls[7])];
+  const followed = forcedOn(new Session(counter, terms, { start: session.env }), onchain);
+  assert.equal(followed.stateHash(), stateHash(counter, applySteps(counter, context, terms, session.env, null, onchain)));
+  assert.deepEqual([followed.start.seq, followed.steps.length, followed.due()], [3, 0, 0]);
 });
