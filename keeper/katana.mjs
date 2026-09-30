@@ -1,14 +1,17 @@
 // The keeper against a local Katana running the counter Dojo world, with real
 // transactions: it answers a stale dispute and resolves it into forced play,
-// settles a finished game and resolves it to SETTLED, and referees a timed game
-// whose stalling seat it flags and settles. keeper/katana.sh starts Katana and
-// deploys the world first.
+// settles a finished game and resolves it to SETTLED, referees a timed game
+// whose stalling seat it flags and settles, and gives another its randomness,
+// which the channel replays. keeper/katana.sh starts Katana and deploys the
+// world first.
 //
 //   node keeper/katana.mjs RPC_URL CHANNEL_ADDRESS
 import assert from 'node:assert/strict';
 import { Account, RpcProvider } from 'starknet';
-import { ADD, counter } from '../sdk/examples/counter.mjs';
-import { REASON_TIMEOUT, Session, decodeTerms, encodeTimeControl, hex, play, publicKey, rngChain } from '../sdk/src/index.mjs';
+import { ADD, GAMBLE, counter } from '../sdk/examples/counter.mjs';
+import {
+  MOVE_REVEAL, REASON_TIMEOUT, REFEREE, Session, decodeTerms, encodeTimeControl, hex, play, playRandom, publicKey, rngChain,
+} from '../sdk/src/index.mjs';
 import { KeeperClient } from '../sdk/src/keeper.mjs';
 import { contractCall, getChannel, rpc } from '../sdk/src/proving.mjs';
 import { memoryBackend } from '../sdk/src/store.mjs';
@@ -47,7 +50,9 @@ async function passWindow() {
 
 /**
  * Alice creates and Bob joins a counter game, timed when `clock` is given;
- * returns its id and a session on the chain's terms.
+ * returns its id and a session on the chain's terms. A nonzero `clock.rng_tip`
+ * asks for the referee's randomness: Bob then joins with the keeper's signed
+ * tip for the game.
  */
 async function newGame(seed, clock = null) {
   const tips = [rngChain(seed, 8)[8], rngChain(seed + 1n, 8)[8]];
@@ -55,7 +60,8 @@ async function newGame(seed, clock = null) {
   const created = await send(alice, 'create', [20, bob.address, publicKey(sessionKeys[0]), tips[0], owner.address, WINDOW, ...time]);
   const trace = await provider.getTransactionTrace(created);
   const id = BigInt(trace.execute_invocation.calls.find(c => BigInt(c.contract_address) === BigInt(CHANNEL)).result[0]);
-  await send(bob, 'join', [id, publicKey(sessionKeys[1]), tips[1]]);
+  const tip = clock?.rng_tip ? await client.tip({ channel: CHANNEL, game_id: id }) : { rng_tip: 0n, signature: { r: 0n, s: 0n } };
+  await send(bob, 'join', [id, publicKey(sessionKeys[1]), tips[1], tip.rng_tip, tip.signature.r, tip.signature.s]);
   const terms = decodeTerms(counter, (await provider.callContract(contractCall(CHANNEL, 'terms', [id]))).map(BigInt));
   return { id, session: new Session(counter, terms) };
 }
@@ -70,9 +76,9 @@ const config = await loadConfig({
   chain_id: hex(BigInt(await provider.getChainId())), rpc_url: RPC, port: 0, poll_seconds: 1,
   games: [{ channel: CHANNEL, module: '../sdk/examples/counter.mjs', export: 'counter' }],
   account: { address: keeperAccount.address, private_key_env: 'KEEPER_PRIVATE_KEY' },
-  referee: { private_key_env: 'KEEPER_REFEREE_KEY' },
+  referee: { private_key_env: 'KEEPER_REFEREE_KEY', rng_secret_env: 'KEEPER_RNG_SECRET' },
 }, { base: new URL('.', import.meta.url).pathname,
-  env: { KEEPER_PRIVATE_KEY: keeperAccount.privateKey, KEEPER_REFEREE_KEY: hex(REFEREE_KEY) } });
+  env: { KEEPER_PRIVATE_KEY: keeperAccount.privateKey, KEEPER_REFEREE_KEY: hex(REFEREE_KEY), KEEPER_RNG_SECRET: '0x5ec2e7' } });
 const keeper = await startKeeper(config, { backend: memoryBackend(), log: e => { if (e.action) actions.push(e); } });
 const client = new KeeperClient(keeper.url);
 
@@ -117,6 +123,31 @@ try {
   assert.deepEqual(timedOut.result, { finished: true, winner: 1, reason: REASON_TIMEOUT });
   await until('the keeper to close the game', () => keeper.archive.open().length === 1);
   console.log(`game ${c.id}: the keeper refereed it, flagged seat 1 and settled the flag; seat 0 won on time`);
+
+  // A timed game that takes its randomness from the keeper. Bob joined with
+  // the keeper's signed tip; he gambles, the keeper rolls as it stamps, and
+  // the channel replays the roll when the keeper settles the finished game.
+  const d = await newGame(0x5eed10n, { referee: publicKey(REFEREE_KEY), rng_tip: 1n,
+    settings: { turn_ms: 60000, bank_ms: 0, increment_ms: 0, byoyomi: null } });
+  assert.ok(d.session.terms.clock.rng_tip > 1n);
+  await client.register(d.session);
+  const move = async step => {
+    d.session.sign(step, sessionKeys[d.session.due()]);
+    await client.submit(d.session);
+  };
+  await move(play({ kind: ADD, amount: 3 }));
+  await move(playRandom({ kind: GAMBLE, amount: 0 }, rngChain(0x5eed11n, 8)[7]));
+  const roll = d.session.steps.at(-1);
+  assert.deepEqual([roll.step.kind, roll.seat, d.session.env.pending.active], [MOVE_REVEAL, REFEREE, false]);
+  const rolled = d.session.env.game.total - 3;
+  while (!d.session.env.outcome.finished) await move(play({ kind: ADD, amount: Math.min(3, 20 - d.session.env.game.total) }));
+  const replayed = await until('the keeper to settle', channelWhere(d.id, x => x.status === DISPUTE && x.candidate.seq === d.session.env.seq));
+  assert.equal(replayed.candidate.hash, d.session.stateHash());
+  await passWindow();
+  const paid = await until('settlement', channelWhere(d.id, x => x.status === SETTLED));
+  assert.deepEqual(paid.result, d.session.env.outcome);
+  await until('the keeper to close the game', () => keeper.archive.open().length === 1);
+  console.log(`game ${d.id}: the keeper rolled a ${rolled} for seat 1's gamble and the channel replayed it; seat ${paid.result.winner - 1} won`);
   console.log(`keeper actions: ${actions.map(e => `${e.action}${e.via ? `/${e.via}` : ''}${e.ms ? ` ${e.ms} ms` : ''}`).join(', ')}`);
   assert.equal(actions.filter(e => e.outcome === 'failed').length, 0);
 } finally {

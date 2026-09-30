@@ -134,7 +134,14 @@ test('config loads game codecs and needs the account key from the environment', 
   const referee = { private_key_env: 'TEST_REFEREE_KEY' };
   await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [GAME], referee }, { base, env: {} }), /Set TEST_REFEREE_KEY/);
   assert.deepEqual((await loadConfig({ chain_id: 'SN_TEST', games: [GAME], referee }, { base, env: { TEST_REFEREE_KEY: '0x7e' } })).referee,
-    { privateKey: '0x7e' });
+    { privateKey: '0x7e', rngSecret: null });
+  // A referee that gives randomness names the secret it comes from.
+  const rolling = { ...referee, rng_secret_env: 'TEST_RNG_SECRET' };
+  const env = { TEST_REFEREE_KEY: '0x7e', TEST_RNG_SECRET: '0x5ec' };
+  await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [GAME], referee: rolling }, { base, env: { TEST_REFEREE_KEY: '0x7e' } }),
+    /Set TEST_RNG_SECRET/);
+  assert.deepEqual((await loadConfig({ chain_id: 'SN_TEST', games: [GAME], referee: rolling }, { base, env })).referee,
+    { privateKey: '0x7e', rngSecret: '0x5ec' });
   await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [{ ...GAME, export: 'nope' }] }, { base }), /no game codec named nope/);
   await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [] }, { base }), /at least one/);
   await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [{ ...GAME, anchored: false, prover: { url: 'x', class_hash: '0x1' } }] }, { base }),

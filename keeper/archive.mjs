@@ -10,9 +10,17 @@
 // started, and flags a seat whose time runs out. It never stamps a step at a
 // seq it has already stamped, so it attests one branch only.
 //
+// With a randomness secret too, it gives such games their randomness: it signs
+// the tip of a hash chain for each game that asks (`tip`), and reveals the
+// chain's next value as soon as it stamps a step that asks for a roll. Each
+// chain comes from the secret and the game's ids, so nothing is stored.
+//
 // Only open games live in memory. A settled, cancelled or evicted game stays on
 // disk, readable, and no longer counts against capacity.
-import { Referee, Session, actionHash, felt, hex, outranks, publicKey, signedStep, stateHash, verify } from '../sdk/src/index.mjs';
+import {
+  Referee, RngChain, Session, actionHash, felt, hex, outranks, poseidon, publicKey, sign, signedStep, stateHash, tag,
+  tipHash, verify,
+} from '../sdk/src/index.mjs';
 import { SessionStore } from '../sdk/src/store.mjs';
 
 export { outranks };
@@ -39,9 +47,11 @@ const position = session => ({ seq: session.start.seq, transcript: session.start
  *   `reservedGames` of capacity.
  *
  * `verify(session, authorizations)` checks a new game's terms against its
- * channel; `anchorHash(ids)` reads the channel's anchor. Both throw a
- * KeeperError to refuse. `referee` (`{ privateKey }`) makes the archive the
- * referee of the timed games that name its key; `now()` is its wall clock in
+ * channel; `anchorHash(ids)` reads the channel's anchor; `created(ids)` reads
+ * the `{ config, clock }` a channel was created with. Each throws a
+ * KeeperError to refuse. `referee` (`{ privateKey, rngSecret }`) makes the
+ * archive the referee of the timed games that name its key, and with
+ * `rngSecret` the source of their randomness; `now()` is its wall clock in
  * milliseconds. At most `maxOpenGames` games are open at once, and each wallet
  * plays at most `maxOpenPerPlayer` unanchored ones, which close once finished
  * or after `unanchoredTtlMs` without a step.
@@ -51,13 +61,14 @@ export class Archive {
   #locks = new Map(); // key -> promise tail
   #listeners = new Map(); // key -> Set of wake functions
   #referees = new Map(); // key -> Referee, for the timed games this archive referees
+  #chains = new Map(); // key -> RngChain, the referee's hash chain for a game
   #timers = new Map(); // key -> timeout that flags the due seat, or starts the clock
   #clocks = new Map(); // key -> { epoch, phase }: in forced play onchain, resumed from it, or started since
   #graces = new Map(); // key -> wall time at which the referee starts the clock itself
   #casual = new Map(); // key -> { players, touched }, for unanchored games
   #players = new Map(); // wallet -> open unanchored games it plays
 
-  constructor(backend, { games, chainId, verify: verifyTerms, anchorHash, maxSteps = 4096, maxGames = 10000,
+  constructor(backend, { games, chainId, verify: verifyTerms, anchorHash, created, maxSteps = 4096, maxGames = 10000,
     maxOpenGames = maxGames, reservedGames = 0, maxOpenPerPlayer = 4, unanchoredTtlMs = 86_400_000, startGraceMs = 120_000,
     referee = null, now = Date.now, log = () => {} }) {
     this.backend = backend;
@@ -68,9 +79,11 @@ export class Archive {
         startGraceMs: entry.startGraceMs ?? startGraceMs, admit: entry.admit ?? null }];
     }));
     this.chainId = felt(chainId);
-    Object.assign(this, { verifyTerms, anchorHash, maxOpenGames, reservedGames, maxOpenPerPlayer, unanchoredTtlMs, now, log });
+    Object.assign(this, { verifyTerms, anchorHash, created, maxOpenGames, reservedGames, maxOpenPerPlayer, unanchoredTtlMs,
+      now, log });
     this.refereeKey = referee ? felt(referee.privateKey) : null;
     this.referee = referee ? publicKey(referee.privateKey) : null;
+    this.rngSecret = referee?.rngSecret != null ? felt(referee.rngSecret) : null;
     this.known = new Map(); // key -> ids, for open games
   }
 
@@ -154,6 +167,7 @@ export class Archive {
       this.#adopt(key, incoming);
       this.#wake(key);
       this.log({ game: key, event: 'reanchored', start: incoming.start.seq, seq: incoming.env.seq });
+      await this.#roll(key);
       return { ...summary(incoming), reanchored: true };
     });
   }
@@ -184,6 +198,29 @@ export class Archive {
   close(ids, status) {
     const key = gameKey(ids);
     return this.#exclusive(key, () => this.#close(key, status));
+  }
+
+  /**
+   * The tip of the referee's hash chain for the game `ids`, with the referee's
+   * signature over it (`tipHash`): what the last seat brings to `join` when
+   * the creator asked for the referee's randomness. The same game always gets
+   * the same tip. The chain covers every roll the game's config allows: an
+   * anchored game's config is read from its channel, another's is `config`.
+   */
+  async tip(ids, config) {
+    if (this.referee === null || this.rngSecret === null) fail(404, 'This keeper gives no randomness');
+    const entry = this.#entry(ids.channel);
+    if (entry.anchored && this.created) {
+      const created = await this.created(ids);
+      const clock = created.clock;
+      if (clock == null || felt(clock.referee) !== this.referee || felt(clock.rng_tip ?? 0) === 0n)
+        fail(409, 'The game did not ask this referee for randomness');
+      config = created.config;
+    }
+    let chain;
+    try { chain = this.#chain(ids, config); } catch (e) { fail(400, `Invalid config: ${e.message}`); }
+    const message = tipHash(entry.game, ids.chain_id, ids.channel, ids.game_id, chain.tip);
+    return { rng_tip: chain.tip, signature: sign(message, this.refereeKey) };
   }
 
   /** Whether this archive referees the game `ids` (once loaded). */
@@ -234,6 +271,8 @@ export class Archive {
       this.#graces.delete(key);
       this.#arm(key);
       this.log({ game: key, event: 'resumed', epoch });
+      // A roll a seat asked for onchain is answered at once.
+      await this.#roll(key);
       return true;
     });
   }
@@ -296,6 +335,8 @@ export class Archive {
     const clock = await this.backend.get(`${CLOCK}${key}`);
     if (clock) this.#clocks.set(key, clock);
     this.#adopt(key, session);
+    // A roll the keeper owed when it stopped.
+    await this.#roll(key);
     return session;
   }
 
@@ -327,6 +368,11 @@ export class Archive {
     if (!room(0)) await this.sweep();
     if (this.known.size >= this.maxOpenGames) fail(503, 'The keeper is full');
     await this.verifyTerms?.(session, authorizations);
+    // We can roll only from our own chain for this game.
+    const clock = terms.clock;
+    if (this.referee !== null && clock != null && felt(clock.referee) === this.referee && felt(clock.rng_tip ?? 0) !== 0n
+      && (this.rngSecret === null || this.#chain(ids, terms.config).tip !== felt(clock.rng_tip)))
+      fail(409, 'The game\'s randomness tip is not this referee\'s');
     const priority = room(0) ? 0 : Number(await entry.admit?.(ids, terms)) || 0;
     if (!room(priority)) fail(503, this.known.size < this.maxOpenGames
       ? 'The keeper is full: its reserved capacity is for priority games' : 'The keeper is full');
@@ -356,7 +402,7 @@ export class Archive {
   // Drop an open game from memory.
   #forget(key) {
     this.#disarm(key);
-    for (const map of [this.#referees, this.#loaded, this.#clocks, this.#graces, this.known]) map.delete(key);
+    for (const map of [this.#referees, this.#chains, this.#loaded, this.#clocks, this.#graces, this.known]) map.delete(key);
     const casual = this.#casual.get(key);
     if (!casual) return;
     this.#casual.delete(key);
@@ -395,7 +441,52 @@ export class Archive {
     this.#loaded.set(key, session);
     this.#referees.delete(key);
     if (this.referee !== null && session.timed && felt(session.terms.clock.referee) === this.referee && this.known.has(key))
-      this.#referees.set(key, new Referee(session, this.refereeKey, { now: this.now() }));
+      this.#referees.set(key, new Referee(session, this.refereeKey, { now: this.now(), rng: this.#rng(session) }));
+    this.#arm(key);
+  }
+
+  // The referee's hash chain for a game: from the randomness secret and the
+  // game's ids, with a value for every roll its config allows (a roll takes
+  // two steps). Rebuilt when needed, which costs one hash per value.
+  #chain(ids, config) {
+    const key = gameKey(ids), length = Math.floor(this.gameFor(ids.channel).maxSteps(config) / 2) + 2;
+    let chain = this.#chains.get(key);
+    if (chain?.length !== length) {
+      const seed = poseidon([tag('KEEPER_RNG_V1'), this.rngSecret, ids.chain_id, ids.channel, ids.game_id]);
+      chain = new RngChain(seed, length);
+      // The chains of games that never registered don't pile up.
+      for (const old of this.#chains.keys()) {
+        if (this.#chains.size < this.known.size + 1024) break;
+        if (!this.known.has(old)) this.#chains.delete(old);
+      }
+      this.#chains.set(key, chain);
+    }
+    return chain;
+  }
+
+  // What a Referee rolls from, in a game that takes its randomness from us.
+  #rng(session) {
+    const { terms } = session;
+    if (this.rngSecret === null || felt(terms.clock.rng_tip ?? 0) === 0n) return null;
+    return { before: head => this.#chain(this.ids(terms.channel, terms.game_id), terms.config).before(head) };
+  }
+
+  // Answer a roll the transcript waits for: one the keeper owed when it
+  // stopped, or one a seat asked for onchain in forced play. Not while the
+  // channel is still in forced play: nothing is stamped then.
+  async #roll(key) {
+    const referee = this.#referees.get(key);
+    if (!referee || this.#clocks.get(key)?.phase === 'forced') return;
+    let record;
+    try { record = referee.roll(this.now()); } catch (e) {
+      this.log({ game: key, event: 'roll', outcome: 'failed', error: e.message });
+      return;
+    }
+    if (!record) return;
+    await this.store.save(referee.session);
+    this.#wake(key);
+    this.log({ game: key, event: 'rolled', seq: record.seq });
+    await this.#settled(key, referee.session);
     this.#arm(key);
   }
 
@@ -504,7 +595,7 @@ export class Archive {
           // period to no one, as it does after the keeper's own downtime.
           if (this.#clocks.get(key)?.phase === 'resumed') {
             await this.#setClock(key, { epoch: clock.epoch, phase: 'started' });
-            referee = new Referee(current, this.refereeKey, { now });
+            referee = new Referee(current, this.refereeKey, { now, rng: this.#rng(current) });
             this.#referees.set(key, referee);
             this.log({ game: key, event: 'restarted', seq: at, epoch: clock.epoch });
           }

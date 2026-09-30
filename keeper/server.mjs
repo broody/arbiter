@@ -13,7 +13,9 @@
 // account only pays for calls anyone may send. With a referee key it also
 // referees the timed games that name that key: it stamps their steps, starts
 // their clocks and flags a seat whose time runs out, which players trust it to
-// do on time. It registers such games itself when they join onchain.
+// do on time. It registers such games itself when they join onchain. With a
+// randomness secret it also gives those games their randomness, which players
+// trust it not to leak.
 //
 // A game module may export, next to its codec, `admit(ids, terms)`, which
 // ranks a new game for the keeper's reserved capacity, and
@@ -29,6 +31,7 @@
 //   GET  /games/:channel/:game/steps        ?from=SEQ&wait=SECONDS (long poll)
 //   GET  /games/:channel/:game/events       ?from=SEQ (server-sent events: `steps`)
 //   POST /games/:channel/:game/steps        { from, steps: [{ step, signature, stamp?, attestation? }] }
+//   POST /games/:channel/:game/tip          { config? } -> the referee's signed randomness tip
 //   GET  /games/:channel/:game/evidence     equivocation evidence
 //   GET  /info, GET /health
 import { createServer } from 'node:http';
@@ -96,7 +99,10 @@ export async function loadConfig(raw, { base = process.cwd(), env = process.env 
     const name = config.referee.private_key_env ?? 'KEEPER_REFEREE_KEY';
     const privateKey = env[name];
     if (!privateKey) throw Error(`Set ${name} to the referee's private key`);
-    config.referee = { privateKey };
+    // The secret the referee's randomness comes from, if it gives any.
+    const secretName = config.referee.rng_secret_env;
+    if (secretName && !env[secretName]) throw Error(`Set ${secretName} to the referee's randomness secret`);
+    config.referee = { privateKey, rngSecret: secretName ? env[secretName] : null };
   }
   if (config.account) {
     const privateKey = env[config.account.private_key_env ?? 'KEEPER_PRIVATE_KEY'];
@@ -157,6 +163,11 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
       const entry = entries.get(ids.channel);
       return entry.anchored ? (await chain.channel(entry, ids.game_id)).anchor.hash : null;
     }),
+    created: chain && (async ids => {
+      let channel;
+      try { channel = await chain.channel(entries.get(ids.channel), ids.game_id); } catch { fail(404, 'No such game onchain'); }
+      return { config: channel.config, clock: channel.clock };
+    }),
   });
   const watcher = chain && config.poll_seconds > 0
     ? startWatcher({ archive, chain, entries, intervalMs: config.poll_seconds * 1000, settle: config.settle, log })
@@ -181,6 +192,7 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
   const info = () => ({
     chain_id: config.chain_id, watching: watcher !== null, sending: Boolean(chain?.canSend),
     referee: archive.referee === null ? null : hex(archive.referee),
+    randomness: archive.referee !== null && archive.rngSecret !== null,
     games: [...entries.values()].map(e => ({ channel: hex(e.channel), tag: e.game.tag, anchored: e.anchored, prover: Boolean(e.prover) })),
     limits: { max_open_games: archive.maxOpenGames, reserved_games: archive.reservedGames,
       max_open_per_player: archive.maxOpenPerPlayer, max_steps: config.max_steps, max_body_bytes: config.max_body_bytes,
@@ -208,6 +220,7 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
         ...(authorizations ? { authorizations } : {}) };
     }
     if (leaf === 'evidence' && method === 'GET') return { evidence: await archive.evidence(ids) };
+    if (leaf === 'tip' && method === 'POST') return archive.tip(ids, body?.config);
     if (leaf !== 'steps') fail(404, 'Not found');
     if (method === 'POST') return archive.append(ids, body?.from, body?.steps);
     if (method !== 'GET') fail(405, 'Method not allowed');

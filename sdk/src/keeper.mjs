@@ -25,6 +25,18 @@ export class KeeperClient {
     return this.#call('POST', '/games', { record: session.export(), ...(authorizations ? { authorizations } : {}) });
   }
 
+  /**
+   * The keeper's randomness tip for the game `ids` (`{ chain_id, channel,
+   * game_id }`), as `{ rng_tip, signature }`: the tip of the referee's hash
+   * chain and the referee's signature over it (`tipHash`). The last seat brings
+   * both to `join` when the creator asked for the referee's randomness. A game
+   * that no channel anchors passes its `config`, and puts the tip in its terms
+   * (`clock.rng_tip`); each seat checks the signature before it signs them.
+   */
+  tip(ids, { config } = {}) {
+    return this.#call('POST', `${path(ids)}/tip`, config === undefined ? {} : { config });
+  }
+
   /** Send `session`'s steps from seq `from` (default: every step). */
   send(session, from = session.start.seq) {
     from = Math.max(from, session.start.seq);

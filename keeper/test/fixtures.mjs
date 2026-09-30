@@ -17,7 +17,9 @@ export const add = amount => play({ kind: ADD, amount });
 export const REFEREE_KEY = 0x7e7e7en;
 /** A timed game refereed with REFEREE_KEY: 30 s per turn and a 60 s bank, so a seat's time runs out 90 s into its turn. */
 export const timed = (game_id = 7n) => ({ ...terms(game_id),
-  clock: { referee: publicKey(REFEREE_KEY), settings: { turn_ms: 30000, bank_ms: 60000, increment_ms: 0, byoyomi: null } } });
+  clock: { referee: publicKey(REFEREE_KEY), settings: { turn_ms: 30000, bank_ms: 60000, increment_ms: 0, byoyomi: null }, rng_tip: 0n } });
+/** The secret the refereeing keeper's randomness comes from. */
+export const RNG_SECRET = 0x5ec2e7n;
 export { resign };
 
 /** Each seat in turn adds `amounts`, signing with its own key. */
