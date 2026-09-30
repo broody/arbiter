@@ -594,7 +594,10 @@ randomness instead. It helps 2-seat games, so it came before more than 2 seats
   keeper that holds the randomness secret can unfreeze the game, which keeps
   real outages short. The next seat then gets a fresh window.
 - The referee can also take the game back (`resume_by_referee`) and roll
-  offchain, which is what the keeper does.
+  offchain. The keeper does that once its archive holds the channel's anchor,
+  which a step played onchain never reaches by itself: a seat registers its
+  session again from that anchor. Nothing does so automatically yet, and the
+  keeper does not post `roll` itself.
 - A pause has an end. The seats can all agree to void the game (they sign
   `void_hash`, `'REFEREE_VOID_V1'`), and after 3 days anyone can end it void.
   Falling back to a seat's reveal instead would let a colluding referee

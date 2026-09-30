@@ -159,7 +159,10 @@ hash-chain tip (`clock.rng_tip`). No seat then has to be online to reveal.
   referee with a randomness tip that isn't its own: it couldn't roll for it.
 - **Restarts and forced play.** On start it answers a roll it owed when it
   stopped. A roll a seat asked for onchain, in forced play, is answered as
-  soon as the channel resumes; the `start` still follows the start grace.
+  soon as the channel resumes; the `start` still follows the start grace. The
+  keeper resumes the channel only once its archive holds the anchor, so a seat
+  must first register its session again from the state it forced
+  (`keeper.register`). The keeper doesn't post `roll` onchain itself.
   If the keeper stays down, anyone holding its next value may post it onchain
   (`roll`), and after 3 days the game can be ended void.
 
