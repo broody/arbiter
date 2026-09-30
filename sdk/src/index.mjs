@@ -1079,9 +1079,10 @@ export function decodeChannelGame(game, values) {
   Object.assign(result, {
     status: r.num(), epoch: r.num(), context: r.next(), response_seconds: r.num(),
   });
-  // `referee` is zero for an untimed game.
-  const referee = r.next(), settings = r.span();
-  result.clock = referee === 0n ? null : { referee, settings: timeOf(game).decodeSettings(new Reader(settings)) };
+  // `referee` is zero for an untimed game. Before the join, `rng_tip` is just
+  // nonzero when the creator asked for the referee's randomness.
+  const referee = r.next(), settings = r.span(), rng_tip = r.next();
+  result.clock = referee === 0n ? null : { referee, settings: timeOf(game).decodeSettings(new Reader(settings)), rng_tip };
   Object.assign(result, {
     anchor: readRef(r), candidate: readRef(r), anchor_block: r.num(), candidate_block: r.num(), deadline: r.num(),
     acked_epoch: r.num(), acked_deadline: r.num(), result: readOutcome(r),

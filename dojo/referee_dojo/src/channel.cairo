@@ -10,7 +10,7 @@ use dojo::world::{IWorldDispatcherTrait, WorldStorage};
 use referee::{
     Batch, Channel, Envelope, GameRules, Move, Outcome, Signature, Terms, TimeControl, approve_all,
     channel as machine, check_clock, checkpoint_hash, context_hash, live_hash, open,
-    referee_resume_hash, reopen_hash, replay, state_ref, verify,
+    referee_resume_hash, reopen_hash, replay, state_ref, tip_hash, verify, void_hash,
 };
 use starknet::syscalls::get_class_hash_at_syscall;
 use starknet::{
@@ -19,13 +19,15 @@ use starknet::{
 };
 use crate::models::{
     ACKNOWLEDGED, CANCELLED, CREATED, ChannelGame, ChannelState, ChannelTerms, ChannelUpdated,
-    DISPUTED, FORCED, JOINED, ProverAllowed, RECEIVED, RESIGNED, RESOLVED, RESUMED, TIMED_OUT,
-    channel_of, game_of, pack_state, terms_of, unpack_state, with_channel,
+    DISPUTED, FORCED, JOINED, ProverAllowed, RECEIVED, RESIGNED, RESOLVED, RESUMED, ROLLED,
+    TIMED_OUT, VOIDED, channel_of, game_of, pack_state, terms_of, unpack_state, with_channel,
 };
 
 /// Open a channel as seat 0. `invited` may be zero for an open game. `clock`
 /// makes the game timed, with a referee that stamps every step (`None` for an
-/// untimed game).
+/// untimed game). A nonzero `clock.rng_tip` asks for the referee's randomness:
+/// the tip itself comes with `join`, signed by the referee for this game, whose
+/// id does not exist yet.
 pub fn create<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Drop<R::State>>(
     ref world: WorldStorage,
     config: R::Config,
@@ -74,6 +76,10 @@ pub fn create<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Drop<R::S
             Option::Some(time) => time.settings,
             Option::None => array![].span(),
         },
+        referee_tip: match clock {
+            Option::Some(time) => time.rng_tip,
+            Option::None => 0,
+        },
         anchor: channel.anchor.into(),
         candidate: channel.candidate.into(),
         anchor_block: 0,
@@ -89,11 +95,20 @@ pub fn create<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Drop<R::S
 }
 
 /// Take seat 1. The opening state needs both randomness tips, so the channel's
-/// context and anchor are fixed here.
+/// context and anchor are fixed here. If the creator asked for the referee's
+/// randomness, `referee_tip` is the tip of the referee's hash chain for this
+/// game and `referee_signature` the referee's signature over it (`tip_hash`):
+/// a tip a seat made up would let that seat know every roll. Otherwise both
+/// are zero.
 pub fn join<
     impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Serde<R::State>, +Drop<R::State>,
 >(
-    ref world: WorldStorage, game_id: felt252, session_key: felt252, rng_tip: felt252,
+    ref world: WorldStorage,
+    game_id: felt252,
+    session_key: felt252,
+    rng_tip: felt252,
+    referee_tip: felt252,
+    referee_signature: Signature,
 ) {
     let mut game = read(@world, game_id);
     let joiner = get_caller_address();
@@ -104,6 +119,16 @@ pub fn join<
     assert(session_key != game.referee, 'Referee is a seat');
     assert(rng_tip != 0 && rng_tip != game.tip_0, 'Invalid tip');
     valid_prover(@world, game.prover);
+    if game.referee_tip == 0 {
+        assert(referee_tip == 0, 'Seats reveal in this game');
+    } else {
+        assert(referee_tip != 0, 'Referee tip needed');
+        let message = tip_hash::<
+            R,
+        >(get_tx_info().chain_id, get_contract_address().into(), game_id, referee_tip);
+        verify(game.referee, message, referee_signature);
+    }
+    game.referee_tip = referee_tip;
     game.player_1 = joiner;
     game.key_1 = session_key;
     game.tip_1 = rng_tip;
@@ -240,6 +265,57 @@ pub fn force<
     save(ref world, game_id, channel, FORCED);
 }
 
+/// Post the referee's value for the roll the anchor waits for, during forced
+/// play. Anyone may: the referee's hash chain vouches for the value, so it
+/// needs no signature. The next seat gets a fresh window.
+pub fn roll<
+    impl R: GameRules,
+    +Serde<R::Config>,
+    +Drop<R::Config>,
+    +Serde<R::State>,
+    +Copy<R::State>,
+    +Drop<R::State>,
+    +Serde<R::Action>,
+    +Copy<R::Action>,
+    +Drop<R::Action>,
+    +Drop<R::Witness>,
+    +Destruct<R::Scratch>,
+>(
+    ref world: WorldStorage,
+    game_id: felt252,
+    epoch: u32,
+    start: Envelope<R::State>,
+    witness: R::Witness,
+    value: felt252,
+) {
+    let game = read(@world, game_id);
+    assert(state_ref::<R>(@start).hash == game.anchor.hash, 'Wrong anchor state');
+    let terms = terms::<R>(@game);
+    let end = referee::roll::<R>(game.context, @terms, start, witness, value);
+    let channel = machine::rolled(
+        channel_of(@game), epoch, state_ref::<R>(@end), get_block_timestamp(), get_block_number(),
+    );
+    save(ref world, game_id, channel, ROLLED);
+}
+
+/// End a game whose roll waits for a referee that is down, with no result
+/// (`REASON_VOID`): at once with every seat's approval (`void_hash`), or by
+/// anyone once the pause has run out.
+pub fn void<impl R: GameRules>(
+    ref world: WorldStorage, game_id: felt252, epoch: u32, acks: Span<Signature>,
+) {
+    let channel = read_state(@world, game_id);
+    let terms = Model::<ChannelTerms>::ptr_from_keys(game_id);
+    let key_0: felt252 = world.read_member(terms, selector!("key_0"));
+    let key_1: felt252 = world.read_member(terms, selector!("key_1"));
+    let context: felt252 = world.read_member(terms, selector!("context"));
+    let approved = approve_all(
+        array![key_0, key_1].span(), void_hash::<R>(context, epoch, channel.anchor.hash), acks,
+    );
+    let channel = machine::void(channel, epoch, approved, get_block_timestamp());
+    save(ref world, game_id, channel, VOIDED);
+}
+
 /// Return to offchain play from forced play with every seat's approval.
 pub fn resume<impl R: GameRules>(
     ref world: WorldStorage, game_id: felt252, epoch: u32, acks: Span<Signature>,
@@ -306,7 +382,13 @@ pub fn terms<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>>(
         clock: if *game.referee == 0 {
             Option::None
         } else {
-            Option::Some(TimeControl { referee: *game.referee, settings: *game.clock_settings })
+            Option::Some(
+                TimeControl {
+                    referee: *game.referee,
+                    settings: *game.clock_settings,
+                    rng_tip: *game.referee_tip,
+                },
+            )
         },
         players: array![(*game.player_0).into(), (*game.player_1).into()].span(),
         keys: keys(game),

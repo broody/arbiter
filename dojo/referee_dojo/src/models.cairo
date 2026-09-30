@@ -14,6 +14,8 @@ pub const RESUMED: u8 = 7;
 pub const TIMED_OUT: u8 = 8;
 pub const RESIGNED: u8 = 9;
 pub const ACKNOWLEDGED: u8 = 10;
+pub const ROLLED: u8 = 11;
+pub const VOIDED: u8 = 12;
 
 #[derive(Copy, Drop, Serde, Introspect, DojoStore, PartialEq, Debug)]
 pub struct StoredOutcome {
@@ -34,9 +36,11 @@ pub struct StoredRef {
 /// One referee channel, as `get_channel` returns it: its terms and its state
 /// together. Seat 0 is the creator, seat 1 the joiner. `config` is the game's
 /// `Config`, serialized. A timed game's `referee` key and serialized
-/// `clock_settings` form its `TimeControl`; `referee` is zero for an untimed
-/// game. Stored as `ChannelTerms`, written at create and join, and
-/// `ChannelState`, packed and written on every transition.
+/// `clock_settings` form its `TimeControl`, with `referee_tip`, the tip of the
+/// referee's hash chain when the game takes its randomness from the referee
+/// (before the join, just nonzero when the creator asked for that); `referee`
+/// is zero for an untimed game. Stored as `ChannelTerms`, written at create and
+/// join, and `ChannelState`, packed and written on every transition.
 #[derive(Copy, Drop, Serde, PartialEq, Debug)]
 pub struct ChannelGame {
     pub id: felt252,
@@ -54,6 +58,7 @@ pub struct ChannelGame {
     pub response_seconds: u32,
     pub referee: felt252,
     pub clock_settings: Span<felt252>,
+    pub referee_tip: felt252,
     pub anchor: StoredRef,
     pub candidate: StoredRef,
     pub anchor_block: u64,
@@ -84,6 +89,7 @@ pub struct ChannelTerms {
     pub response_seconds: u32,
     pub referee: felt252,
     pub clock_settings: Span<felt252>,
+    pub referee_tip: felt252,
 }
 
 /// The channel state machine's fields in four felts: the anchor's hash, the
@@ -214,6 +220,7 @@ pub fn game_of(terms: @ChannelTerms, state: @ChannelState) -> ChannelGame {
             response_seconds: 0,
             referee: *terms.referee,
             clock_settings: *terms.clock_settings,
+            referee_tip: *terms.referee_tip,
             anchor: blank_ref(),
             candidate: blank_ref(),
             anchor_block: 0,
@@ -242,6 +249,7 @@ pub fn terms_of(game: @ChannelGame) -> ChannelTerms {
         response_seconds: *game.response_seconds,
         referee: *game.referee,
         clock_settings: *game.clock_settings,
+        referee_tip: *game.referee_tip,
     }
 }
 

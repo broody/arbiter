@@ -77,7 +77,7 @@ test('submit_history replays from the start against final signatures', async () 
 
   const ref = [0x11n, 5n, 3n, 1n, 0n, 0n, 0n];
   const stored = [terms.game_id, 0xa11cen, 0xb0bn, 1n, 2n, 3n, 4n, terms.prover, 1n, 20n, 2n, 3n, 0xc0n, 3600n, 0n, 0n,
-    ...ref, ...ref, 55n, 55n, 900n, 0n, 0n, 0n, 0n, 0n];
+    0n, ...ref, ...ref, 55n, 55n, 900n, 0n, 0n, 0n, 0n, 0n];
   const provider = { callContract: async (c, block) => {
     assert.deepEqual([c.contractAddress, c.entrypoint, c.calldata, block], [hex(terms.channel), 'get_channel', [hex(terms.game_id)], 'latest']);
     return stored.map(hex);

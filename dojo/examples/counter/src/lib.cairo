@@ -17,7 +17,16 @@ pub trait ICounterChannel<T> {
         response_seconds: u32,
         clock: Option<TimeControl>,
     ) -> felt252;
-    fn join(ref self: T, game_id: felt252, session_key: felt252, rng_tip: felt252);
+    /// `referee_tip` and `referee_signature` are the referee's signed
+    /// hash-chain tip when the creator asked for its randomness, otherwise zero.
+    fn join(
+        ref self: T,
+        game_id: felt252,
+        session_key: felt252,
+        rng_tip: felt252,
+        referee_tip: felt252,
+        referee_signature: Signature,
+    );
     fn cancel(ref self: T, game_id: felt252);
     fn accept_verified(
         ref self: T,
@@ -46,6 +55,10 @@ pub trait ICounterChannel<T> {
         start: Envelope<Counter>,
         steps: Span<Move<Action>>,
     );
+    /// Post the referee's value for a roll that forced play waits for.
+    fn roll(ref self: T, game_id: felt252, epoch: u32, start: Envelope<Counter>, value: felt252);
+    /// End a game whose roll waits for a referee that is down, with no result.
+    fn void(ref self: T, game_id: felt252, epoch: u32, acks: Span<Signature>);
     fn resume(ref self: T, game_id: felt252, epoch: u32, acks: Span<Signature>);
     /// A timed game's referee returns it from forced play on its own.
     fn resume_by_referee(ref self: T, game_id: felt252, epoch: u32, signature: Signature);
@@ -94,9 +107,18 @@ pub mod channel {
             )
         }
 
-        fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip: felt252) {
+        fn join(
+            ref self: ContractState,
+            game_id: felt252,
+            session_key: felt252,
+            rng_tip: felt252,
+            referee_tip: felt252,
+            referee_signature: Signature,
+        ) {
             let mut world = self.world_default();
-            binding::join::<CounterRules>(ref world, game_id, session_key, rng_tip);
+            binding::join::<
+                CounterRules,
+            >(ref world, game_id, session_key, rng_tip, referee_tip, referee_signature);
         }
 
         fn cancel(ref self: ContractState, game_id: felt252) {
@@ -158,6 +180,22 @@ pub mod channel {
         ) {
             let mut world = self.world_default();
             binding::force::<CounterRules>(ref world, game_id, epoch, start, (), steps);
+        }
+
+        fn roll(
+            ref self: ContractState,
+            game_id: felt252,
+            epoch: u32,
+            start: Envelope<Counter>,
+            value: felt252,
+        ) {
+            let mut world = self.world_default();
+            binding::roll::<CounterRules>(ref world, game_id, epoch, start, (), value);
+        }
+
+        fn void(ref self: ContractState, game_id: felt252, epoch: u32, acks: Span<Signature>) {
+            let mut world = self.world_default();
+            binding::void::<CounterRules>(ref world, game_id, epoch, acks);
         }
 
         fn resume(ref self: ContractState, game_id: felt252, epoch: u32, acks: Span<Signature>) {

@@ -42,7 +42,9 @@ pub fn terms_for(
         let settings = Standard {
             turn_ms: 30000, bank_ms: 60000, increment_ms: 2000, byoyomi: Option::None,
         };
-        Option::Some(TimeControl { referee: public_key(PK_REF), settings: encode(@settings) })
+        Option::Some(
+            TimeControl { referee: public_key(PK_REF), settings: encode(@settings), rng_tip: 0 },
+        )
     } else {
         Option::None
     };

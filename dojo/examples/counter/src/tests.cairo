@@ -3,12 +3,12 @@ use dojo_cairo_test::{
     ContractDef, ContractDefTrait, NamespaceDef, TestResource, WorldStorageTestTrait,
     spawn_test_world,
 };
-use referee::channel::{ACTIVE, DISPUTE, FORCED, SETTLED};
+use referee::channel::{ACTIVE, DISPUTE, FORCED, PAUSE_SECONDS, SETTLED};
 use referee::clocks::{Standard, encode};
 use referee::{
-    Batch, Envelope, Move, REASON_ABANDON, REASON_TIMEOUT, REFEREE, Signature, Terms, TimeControl,
-    action_hash, actor, apply_steps, checkpoint_hash, context_hash, force, live_hash, open,
-    referee_resume_hash, reopen_hash, stamp_hash, state_hash,
+    Batch, Envelope, Move, REASON_ABANDON, REASON_TIMEOUT, REASON_VOID, REFEREE, Signature, Terms,
+    TimeControl, action_hash, actor, apply_steps, checkpoint_hash, context_hash, force, live_hash,
+    open, referee_resume_hash, reopen_hash, roll, stamp_hash, state_hash, tip_hash, void_hash,
 };
 use referee_counter::{ADD, Action, Config, Counter, CounterRules, GAMBLE};
 use referee_dojo::channel::read;
@@ -25,6 +25,7 @@ const PK_B: felt252 = 0x4d5e6f;
 const PK_REF: felt252 = 0x7e7e7e;
 const SEED_A: felt252 = 0x5eed0;
 const SEED_B: felt252 = 0x5eed1;
+const SEED_REF: felt252 = 0x5eed7e;
 const RNG_LEN: u32 = 16;
 const WINDOW: u32 = 3600;
 const TARGET: u8 = 20;
@@ -80,13 +81,33 @@ fn blitz() -> Option<TimeControl> {
     let settings = Standard {
         turn_ms: 30000, bank_ms: 60000, increment_ms: 2000, byoyomi: Option::None,
     };
-    Option::Some(TimeControl { referee: public_key(PK_REF), settings: encode(@settings) })
+    Option::Some(
+        TimeControl { referee: public_key(PK_REF), settings: encode(@settings), rng_tip: 0 },
+    )
+}
+
+/// `blitz`, asking for the referee's randomness: at create a nonzero tip asks,
+/// and the referee's signed tip comes with the join.
+fn rolled_blitz() -> Option<TimeControl> {
+    Option::Some(TimeControl { rng_tip: 1, ..blitz().unwrap() })
+}
+
+fn no_tip() -> Signature {
+    Signature { r: 0, s: 0 }
+}
+
+/// The tip of the referee's hash chain for game `id`, signed with `key` as
+/// the referee signs it.
+fn referee_tip(game: ICounterChannelDispatcher, id: felt252, key: felt252) -> (felt252, Signature) {
+    let terms = game.terms(id);
+    let tip = chain_value(SEED_REF, RNG_LEN);
+    (tip, sign(tip_hash::<CounterRules>(terms.chain_id, terms.channel, id, tip), key))
 }
 
 /// Standard settings that allow `turn_ms` per turn, refereed by `referee`.
 fn per_turn(referee: felt252) -> TimeControl {
     let settings = Standard { turn_ms: 30000, bank_ms: 0, increment_ms: 0, byoyomi: Option::None };
-    TimeControl { referee, settings: encode(@settings) }
+    TimeControl { referee, settings: encode(@settings), rng_tip: 0 }
 }
 
 fn started_with(clock: Option<TimeControl>) -> (ICounterChannelDispatcher, WorldStorage, felt252) {
@@ -104,7 +125,15 @@ fn started_with(clock: Option<TimeControl>) -> (ICounterChannelDispatcher, World
             clock,
         );
     caller(BOB());
-    game.join(id, public_key(PK_B), chain_value(SEED_B, RNG_LEN));
+    let (tip, signature) = match clock {
+        Option::Some(time) => if time.rng_tip == 0 {
+            (0, no_tip())
+        } else {
+            referee_tip(game, id, PK_REF)
+        },
+        Option::None => (0, no_tip()),
+    };
+    game.join(id, public_key(PK_B), chain_value(SEED_B, RNG_LEN), tip, signature);
     (game, world, id)
 }
 
@@ -459,7 +488,7 @@ fn the_referee_is_not_the_joiner() {
             blitz(),
         );
     caller(BOB());
-    game.join(id, public_key(PK_REF), chain_value(SEED_B, RNG_LEN));
+    game.join(id, public_key(PK_REF), chain_value(SEED_B, RNG_LEN), 0, no_tip());
 }
 
 #[test]
@@ -650,4 +679,196 @@ fn block_numbers_past_40_bits_are_refused() {
     let empty = referee::channel::create(3600);
     let channel = referee::Channel { anchor_block: 0x10000000000, ..empty };
     referee_dojo::models::pack_state(1, @channel);
+}
+
+// ---- Randomness from the referee ----
+
+/// A created game that asked for the referee's randomness, before Bob joins.
+fn created_rolled() -> (ICounterChannelDispatcher, felt252) {
+    let (game, _) = setup();
+    game.allow_prover(channel::TEST_CLASS_HASH.try_into().unwrap(), true);
+    caller(ALICE());
+    let id = game
+        .create(
+            TARGET,
+            BOB(),
+            public_key(PK_A),
+            chain_value(SEED_A, RNG_LEN),
+            game.contract_address,
+            WINDOW,
+            rolled_blitz(),
+        );
+    caller(BOB());
+    (game, id)
+}
+
+fn gamble() -> Span<Move<Action>> {
+    array![Move::PlayRandom((Action { kind: GAMBLE, amount: 0 }, chain_value(SEED_A, RNG_LEN - 1)))]
+        .span()
+}
+
+/// Forced play in which Alice gambled onchain: the channel waits for the
+/// referee's roll (epoch 2). Also returns the anchor's state.
+fn paused() -> (ICounterChannelDispatcher, WorldStorage, felt252, Envelope<Counter>) {
+    let (game, world, id) = started_with(rolled_blitz());
+    caller(ALICE());
+    game.open_dispute(id, 0);
+    set_block_timestamp(WINDOW.into());
+    game.resolve(id, 0);
+    let terms = game.terms(id);
+    game.force(id, 1, opening(@terms), gamble());
+    let context = context_hash::<CounterRules>(@terms);
+    let waiting = force::<CounterRules>(context, @terms, opening(@terms), (), 0, gamble());
+    (game, world, id, waiting)
+}
+
+#[test]
+fn the_referees_signed_tip_joins_the_terms() {
+    let (game, world, id) = started_with(rolled_blitz());
+    let terms = game.terms(id);
+    let tip = chain_value(SEED_REF, RNG_LEN);
+    assert_eq!(terms.clock.unwrap().rng_tip, tip);
+    assert_eq!(stored(@world, id).referee_tip, tip);
+    assert_eq!(stored(@world, id).context, context_hash::<CounterRules>(@terms));
+    assert_eq!(opening(@terms).rng_referee, tip);
+}
+
+#[test]
+#[should_panic(expected: ('Invalid session signature', 'ENTRYPOINT_FAILED'))]
+fn a_tip_the_referee_did_not_sign_is_refused() {
+    // Bob's own chain, signed with his own key: he would know every roll.
+    let (game, id) = created_rolled();
+    let (tip, signature) = referee_tip(game, id, PK_B);
+    game.join(id, public_key(PK_B), chain_value(SEED_B, RNG_LEN), tip, signature);
+}
+
+#[test]
+#[should_panic(expected: ('Invalid session signature', 'ENTRYPOINT_FAILED'))]
+fn a_tip_signed_for_another_game_is_refused() {
+    let (game, id) = created_rolled();
+    let terms = game.terms(id);
+    let tip = chain_value(SEED_REF, RNG_LEN);
+    let signature = sign(
+        tip_hash::<CounterRules>(terms.chain_id, terms.channel, id + 1, tip), PK_REF,
+    );
+    game.join(id, public_key(PK_B), chain_value(SEED_B, RNG_LEN), tip, signature);
+}
+
+#[test]
+#[should_panic(expected: ('Referee tip needed', 'ENTRYPOINT_FAILED'))]
+fn a_game_that_asked_needs_the_referees_tip() {
+    let (game, id) = created_rolled();
+    game.join(id, public_key(PK_B), chain_value(SEED_B, RNG_LEN), 0, no_tip());
+}
+
+#[test]
+#[should_panic(expected: ('Seats reveal in this game', 'ENTRYPOINT_FAILED'))]
+fn the_joiner_cannot_add_a_referee_tip() {
+    let (game, _) = setup();
+    game.allow_prover(channel::TEST_CLASS_HASH.try_into().unwrap(), true);
+    caller(ALICE());
+    let id = game
+        .create(
+            TARGET,
+            BOB(),
+            public_key(PK_A),
+            chain_value(SEED_A, RNG_LEN),
+            game.contract_address,
+            WINDOW,
+            blitz(),
+        );
+    caller(BOB());
+    let (tip, signature) = referee_tip(game, id, PK_REF);
+    game.join(id, public_key(PK_B), chain_value(SEED_B, RNG_LEN), tip, signature);
+}
+
+#[test]
+fn a_forced_gamble_pauses_for_the_referee() {
+    let (_, world, id, waiting) = paused();
+    let channel = stored(@world, id);
+    assert_eq!((channel.status, channel.epoch), (FORCED, 2));
+    assert_eq!(channel.anchor.due, REFEREE);
+    assert_eq!(channel.anchor.hash, state_hash::<CounterRules>(@waiting));
+    assert_eq!(channel.deadline, WINDOW.into() + PAUSE_SECONDS);
+}
+
+#[test]
+#[should_panic(expected: ('Waiting for the referee', 'ENTRYPOINT_FAILED'))]
+fn nobody_times_out_during_the_pause() {
+    let (game, world, id, _) = paused();
+    set_block_timestamp(stored(@world, id).deadline);
+    caller(BOB());
+    game.claim_timeout(id, 2);
+}
+
+#[test]
+fn anyone_posts_the_referees_roll() {
+    let (game, world, id, waiting) = paused();
+    let terms = game.terms(id);
+    let value = chain_value(SEED_REF, RNG_LEN - 1);
+    set_block_timestamp(WINDOW.into() + 86400);
+    caller(CAROL());
+    game.roll(id, 2, waiting, value);
+    let end = roll::<
+        CounterRules,
+    >(context_hash::<CounterRules>(@terms), @terms, waiting, (), value);
+    let channel = stored(@world, id);
+    assert_eq!((channel.status, channel.epoch), (FORCED, 3));
+    assert_eq!(channel.anchor.hash, state_hash::<CounterRules>(@end));
+    // The roll passed the turn to Bob, who gets a fresh window.
+    assert_eq!(channel.anchor.due, 1);
+    assert_eq!(channel.deadline, WINDOW.into() + 86400 + WINDOW.into());
+}
+
+#[test]
+#[should_panic(expected: ('Invalid reveal', 'ENTRYPOINT_FAILED'))]
+fn a_roll_must_be_the_referees_next_value() {
+    let (game, _, id, waiting) = paused();
+    // Bob's next chain value is not the referee's.
+    game.roll(id, 2, waiting, chain_value(SEED_B, RNG_LEN - 1));
+}
+
+#[test]
+fn a_pause_ends_void_after_three_days() {
+    let (game, world, id, _) = paused();
+    set_block_timestamp(stored(@world, id).deadline);
+    caller(CAROL());
+    game.void(id, 2, no_approvals());
+    let channel = stored(@world, id);
+    assert_eq!((channel.status, channel.result.reason), (SETTLED, REASON_VOID));
+    assert_eq!(channel.result.winner, 0);
+}
+
+#[test]
+#[should_panic(expected: ('Pause still open', 'ENTRYPOINT_FAILED'))]
+fn one_seat_cannot_void_a_pause_early() {
+    let (game, world, id, _) = paused();
+    set_block_timestamp(stored(@world, id).deadline - 1);
+    game.void(id, 2, no_approvals());
+}
+
+#[test]
+fn both_seats_void_a_pause_at_once() {
+    let (game, world, id, _) = paused();
+    let context = context_hash::<CounterRules>(@game.terms(id));
+    let anchor = stored(@world, id).anchor.hash;
+    caller(CAROL());
+    game.void(id, 2, approvals(void_hash::<CounterRules>(context, 2, anchor)));
+    let channel = stored(@world, id);
+    assert_eq!((channel.status, channel.result.reason), (SETTLED, REASON_VOID));
+}
+
+#[test]
+fn the_referee_takes_a_paused_game_back() {
+    let (game, world, id, waiting) = paused();
+    let context = context_hash::<CounterRules>(@game.terms(id));
+    let anchor = state_hash::<CounterRules>(@waiting);
+    caller(CAROL());
+    game
+        .resume_by_referee(
+            id, 2, sign(referee_resume_hash::<CounterRules>(context, 2, anchor), PK_REF),
+        );
+    // Offchain again, where the referee rolls.
+    let channel = stored(@world, id);
+    assert_eq!((channel.status, channel.anchor.due), (ACTIVE, REFEREE));
 }
