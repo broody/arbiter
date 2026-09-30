@@ -523,12 +523,26 @@ attack waits for the defender. A timed game already has its referee on every
 step, so the referee can supply the randomness instead. This helps 2-seat
 games, so it comes before more than 2 seats (next section).
 - **Commitment.** The referee commits its own hash chain in the terms, like a
-  seat.
-- **Rolls.** When the referee stamps a `PlayRandom`, it reveals its next value,
-  and the seed mixes that with the requester's. No seat reveals, so a roll
-  resolves as soon as it is stamped.
-- **Per game.** A game opts in. Player commit-reveal stays the default: it
-  needs no trusted party, and games without a referee rely on it.
+  seat: `TimeControl.rng_tip`, zero when the seats reveal.
+- **The tip is the referee's.** A seat that made the tip up would know every
+  roll, so the referee signs it for the one game
+  (`'REFEREE_TIP_V1'`, chain id, channel, game id, tip) and the channel checks
+  that signature. The game id exists only after `create`, so the creator asks
+  for referee randomness there and `join` brings the signed tip.
+- **One secret.** The referee derives each game's chain from one randomness
+  secret and the game's ids, long enough for the game's `max_steps`, so it
+  never recommits. A backup needs that secret, not the signing key.
+- **Rolls.** While the referee owes a roll, `pending.seat` is `REFEREE`, and
+  its value is an ordinary `Reveal`: checked against its chain, mixed with the
+  requester's value into the seed, and charged to nobody's clock. The referee
+  stamps a `PlayRandom` and reveals in one go, so a roll resolves as soon as it
+  is stamped. No seat reveals.
+- **Per game.** The terms opt in, not the rules: a game's `apply` still names
+  a seat to reveal, and the protocol has the referee reveal instead. Player
+  commit-reveal stays the default: it needs no trusted party, and games
+  without a referee rely on it.
+- **Ranking.** Referee steps no longer count as signer changes
+  (`support_turn`): a roll would otherwise add two.
 - **Trust.** The referee can't bias a roll, since its values are fixed in
   advance, and it can't know a roll before the requester's step arrives. But
   a referee colluding with the requester could leak the roll before the action
@@ -553,10 +567,13 @@ games, so it comes before more than 2 seats (next section).
   against the referee's committed chain, so it needs no signature. A backup
   keeper that holds the referee's chain secret can unfreeze the game, which
   keeps real outages short.
-- A pause has an end. The seats can all agree to void the game, and after 3
-  days it ends void, with no result (a new reason). Falling back to a seat's
-  reveal instead would let a colluding referee re-roll by going quiet. Void
-  only lets it cancel a game, and only by stalling visibly for 3 days.
+- A pause has an end. The seats can all agree to void the game (they sign
+  `'REFEREE_VOID_V1'`), and after 3 days anyone can end it void. Falling back
+  to a seat's reveal instead would let a colluding referee re-roll by going
+  quiet. Void only lets it cancel a game, and only by stalling visibly for 3
+  days.
+- Void is not a draw. It settles with `REASON_VOID = 131` and no winner, and
+  reward code must check the reason.
 
 ## More than 2 seats (planned)
 
