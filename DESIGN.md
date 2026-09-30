@@ -132,6 +132,9 @@ acknowledged.
 - When `apply` requests randomness, the actor sends `PlayRandom` with its next
   chain value as `entropy`. The named seat then sends `Reveal`, and the game gets
   `seed = poseidon(TAG, 'REFEREE_SEED_V1', context, seq, requester, revealer)`.
+- Rolls happen offchain, as ordinary signed steps: there is no VRF or onchain
+  beacon. The chain holds the committed tips, in the terms. Replay and proofs
+  check each revealed value against its seat's chain and recompute each seed.
 - Neither seat can predict the seed before the second reveal, and neither can
   bias it.
 - Withholding a reveal only stalls, and a stall ends in a forced reveal or a
@@ -527,19 +530,16 @@ plays 2 to 4 seats (its shipped maps have 2):
 The spike's game, Trio, has the same shape: END passes the turn, and ATTACK
 names a defender, who reveals.
 
-**Surround stays whole.** Surround plays 2 seats only, and v5 must not break it:
-- Every new `GameRules` function has a default, so a 2-seat game compiles
-  unchanged. Cairo 2.13 allows defaults that use the trait's types and
-  constants (checked).
-- With 2 seats the protocol keeps today's endings, `claim_timeout` and
-  `resign`. The Dojo binding keeps its models, entrypoints, `get_channel` and
-  events. New fields go in spare bits of the packed state, which read as zero
-  in existing channels.
-- Surround's results stay the same, and its gas stays at or below 72.8M for a
-  9×9 game.
-- The version bump still changes every context hash, as v4's did. The one
-  intended 2-seat change is that referee steps stop counting as signer
-  changes (below).
+**Surround.** Neither Surround nor referee is in production, so v5 may break
+the API. Surround, 2 seats only, is updated alongside each layer, and must:
+- pass its own suites, with the same results;
+- stay at or below 72.8M gas for a 9×9 game.
+
+With 2 seats, a resign, flag or timeout still ends the game with the other
+seat winning. `alive`, `eliminate` and `placements` have defaults, so a 2-seat
+game needn't write them. Cairo 2.13 allows defaults that use the trait's types
+and constants (checked). The version bump changes every context hash, as v4's
+did, and worlds are redeployed rather than migrated.
 
 **What already works.**
 - Encodings and hashes: `Terms` and `Envelope` carry per-seat spans, and the
@@ -626,15 +626,13 @@ referee colluding with that seat could use.
   only a 2-seat game may rely on. A game with more seats must implement them,
   and the protocol's checks catch one that doesn't.
 - `StateRef` carries the eliminated seats as a bitmask, so zero means nobody
-  is out, as in every 2-seat channel and every channel from before v5. A mask
-  of live seats would read there as nobody in: no approvals needed, and
-  nobody able to claim a timeout. The channel asks only seats still in to
-  approve checkpoints and `resume`, and lets any seat still in that isn't due
-  claim a timeout.
-- With more than 2 seats, an onchain timeout changes the game state. It takes
-  the anchor envelope as calldata, as `force` does, through a new binding
-  helper, so the 2-seat `claim_timeout` keeps its arguments. Forced play then
-  continues with the next due seat, on a fresh window.
+  is out: the safe default. A mask of live seats left at zero would read as
+  nobody in: no approvals needed, and nobody able to claim a timeout. The
+  channel asks only seats still in to approve checkpoints and `resume`, and
+  lets any seat still in that isn't due claim a timeout.
+- `claim_timeout` takes the anchor envelope as calldata, as `force` does,
+  because with more than 2 seats a timeout changes the game state. Forced play
+  then continues with the next due seat, on a fresh window.
 - With more than 2 seats, a wallet resign is allowed only in forced play
   (decided). In offchain play a seat signs `Resign`, and the referee sequences
   it.
@@ -644,7 +642,7 @@ Proposal:
 - Add each seat's place: 1 for first, with a shared place for draws and
   teams.
 - A new `GameRules::placements(config, state)` supplies the places. Its default
-  derives them from `winner`, so 2-seat games don't change.
+  derives them from `winner`, so a 2-seat game needn't write it.
 - `winner` stays: the seat alone in first place, or `DRAW`.
 - With more than 2 seats, the Dojo binding stores the places once, at
   settlement, beside the packed state. With 2 seats they follow from the
@@ -656,9 +654,8 @@ signs the action. For Hashfront that is enough: the defender is the only other
 party to its fight, and a colluding defender could throw the fight anyway. A
 roll that affects everyone needs everyone's value. Decided: sets of revealers,
 in v5.
-- `apply` still names one seat. A new `GameRules::revealers(config, state,
-  requester, named)` widens that to a set of seats, as a bitmask. Its default
-  is the named seat alone, as today.
+- `apply` returns the set of seats that must reveal, as a bitmask, instead of
+  one seat.
 - The seats reveal in seat order, so `Reveal` stays seat-implicit, and the
   seed takes each value in turn.
 - A game that names every other live seat gets a roll that only all the seats
@@ -667,30 +664,49 @@ in v5.
   the values revealed so far (decided). A colluding revealer can veto a roll
   that way, at the price of its seat.
 
-**Seats.** `SEATS` is a constant, so a game that plays 2 to 4 would need a
-deployment per count. Proposal: `GameRules::seats(config)`, which Hashfront's
-map would set. It defaults to `SEATS`, which becomes the most seats a game
-plays. `open` and `create` check it against `terms.players`, with at most 16
-seats (decided). Everything else uses the envelope's per-seat spans.
+**Referee randomness** (open). Player commit-reveal stays the default. It needs
+no trusted party, and 2-seat games without a referee rely on it. A refereed
+game could opt into randomness from its referee instead:
+- The referee commits its own hash chain in the terms, like a seat. When it
+  stamps a `PlayRandom`, it reveals its next value, and the seed mixes that
+  with the requester's. No other seat reveals.
+- A roll then resolves when the referee stamps it, with no round trip to
+  another player. Today, Hashfront's defender must be online to reveal. With
+  more than 2 seats, no coalition of players can predict a roll, and the
+  extra reveals and the eliminated revealer's veto go away.
+- The referee can't bias a roll, and can't know one before the requester's
+  step arrives. But a referee colluding with the requester could leak the
+  roll before the action is signed. Randomness joins time and order in what
+  the referee is trusted with.
+- A roll pending while the referee is down can't resolve without its value.
+  Falling back to a seat's reveal would let a colluding referee re-roll by
+  going down, so the roll has to wait for that value. How it waits, and what
+  happens if the referee never returns, is the open question.
+- A VRF would do the same with no chain for the referee to keep, but each roll
+  would cost a proof check (elliptic-curve operations) instead of a hash.
+  Cartridge's VRF resolves inside one transaction, so it doesn't fit offchain
+  play.
 
-**Joining.** Proposal:
-- 2-seat channels keep `create` and `join` as they are.
-- For more seats, new binding helpers:
-  - `create` takes the config, and so the seat count, plus one optional
-    invitee per seat. The creator takes seat 0.
-  - `join` names the seat it fills. It checks the joiner's wallet, key and tip
-    against every seat: two seats sharing a key would let one signature
-    approve for both.
+**Seats.** `SEATS` is a constant, so a game that plays 2 to 4 would need a
+deployment per count. Proposal: `GameRules::seats(config)` replaces `SEATS`, so
+Hashfront's map can set it; a 2-seat game returns 2. `open` and `create` check
+it against `terms.players`, with at most 16 seats (decided). Everything else
+uses the envelope's per-seat spans.
+
+**Joining.** Proposal: one set of entrypoints for every seat count.
+- `create` takes the config, and so the seat count, plus one optional invitee
+  per seat. The creator takes seat 0.
+- `join` names the seat it fills. It checks the joiner's wallet, key and tip
+  against every seat: two seats sharing a key would let one signature approve
+  for both.
 - The channel opens when the last seat joins, and until then the creator may
   cancel.
   - The last join emits JOINED, as today, so the keeper's discovery keeps
     working.
   - Earlier joins emit a new kind.
-- Seats 0 and 1 stay in `ChannelTerms`. Seats from 2 up go in a
-  `ChannelSeat(id, seat)` model with the wallet, key and tip.
-  - A 2-seat game never touches it.
-  - Authenticating a caller reads one seat.
-  - `get_channel` keeps its shape, and a new view returns the other seats.
+- Every seat is stored the same way: a `ChannelSeat(id, seat)` row per seat,
+  or lists in `ChannelTerms`, whichever measures cheaper. `get_channel` and the
+  SDK's `decodeChannelGame` change shape.
 
 **The rest of the stack.**
 - The SDK mirrors all of the above and drops its 2-seat checks.
@@ -707,7 +723,7 @@ seats (decided). Everything else uses the envelope's per-seat spans.
 3. The Dojo binding.
 4. The adapter, the store, the keeper and the docs.
 
-Every layer keeps Surround whole (above) and passes Surround's own suites. The
+Surround is updated at each layer and keeps its results and gas (above). The
 spike's collusion scenarios become tests that the new rules must reject.
 
 **Decisions** (2026-09-30).
@@ -717,10 +733,14 @@ spike's collusion scenarios become tests that the new rules must reject.
 4. A revealer eliminated before revealing: the roll resolves from the values
    revealed so far.
 5. With more than 2 seats, a wallet resign only in forced play.
-6. Hashfront is the first game with more than 2 seats, and Surround, 2 seats
-   only, must not break.
+6. Hashfront is the first game with more than 2 seats. Surround stays at 2.
+7. Breaking changes are fine. Neither Surround nor referee is in production,
+   and Surround is updated alongside.
 
-Still open: whether Hashfront rates games by place.
+Still open:
+- whether Hashfront rates games by place;
+- referee randomness (above), and its rule for a roll pending while the
+  referee is down.
 
 ## Roadmap
 
