@@ -1,8 +1,11 @@
 # Randomness
 
 Games with dice, shuffles or hit chances need randomness that neither player can
-predict or bias, without an oracle. Referee builds it from two committed hash
-chains: each roll mixes one fresh value from each seat.
+predict or bias, without an oracle. Referee builds it from committed hash
+chains: each roll mixes one fresh value from the seat that acts and one from a
+revealer. The revealer is the other seat by default. A timed game can have its
+referee reveal instead, so no seat has to be online for a roll (see
+[Randomness from the referee](#randomness-from-the-referee)).
 
 ## Hash chains
 
@@ -26,6 +29,9 @@ const chain = rngChain(seed, 64)   // chain[64] is the tip; reveal chain[63], ch
 ```
 
 ## A roll
+
+By default the seats reveal to each other. An untimed game always works this
+way.
 
 ```mermaid
 sequenceDiagram
@@ -64,6 +70,125 @@ sequenceDiagram
 The seed also mixes in the context and the request's `seq`, so two games, or
 two rolls in one game, never share a seed even if the chain values collided.
 
+## Randomness from the referee
+
+A timed game can take its randomness from its referee. The seat that acts
+still attaches its own chain value, and the referee reveals in place of the
+other seat. The referee already stamps every step of a timed game, so it rolls
+as it stamps, and no seat waits for the other.
+
+### Opting in
+
+The terms opt in, not the rules. `TimeControl.rng_tip` is the tip of the
+referee's own hash chain, or zero when the seats reveal to each other:
+
+| The terms' `clock` | Who reveals |
+| --- | --- |
+| `None`: an untimed game | The seat your `apply` names |
+| `rng_tip` is zero | The seat your `apply` names |
+| `rng_tip` is non-zero | The referee, whichever seat your `apply` names |
+
+The opening envelope copies the tip into `rng_referee`, the referee's chain
+head. Your rules don't change: `apply` still returns `Some(other_seat)`.
+
+### A roll from the referee
+
+```mermaid
+sequenceDiagram
+  participant A as Alice (acts)
+  participant R as Referee
+  participant B as Bob
+  Note over A: her action needs a roll:<br/>apply returns Some(Bob)
+  A->>R: PlayRandom((action, a = Alice's next chain value))
+  Note over R: stamps it. Pending:<br/>the referee must reveal
+  Note over R: Reveal(r = the referee's<br/>next chain value)
+  R->>A: both steps, stamped and attested
+  R->>B: both steps, stamped and attested
+  Note over A,B: seed = poseidon(TAG, 'REFEREE_SEED_V1', context, seq, a, r)<br/>resolve(seed) finishes the action
+```
+
+1. Alice sends her action as `PlayRandom` with her next chain value, as
+   before.
+2. The step records a pending request for the referee: `pending.seat` is
+   `REFEREE` (254), and so is `due`. No seat is due.
+3. The referee's value is an ordinary `Reveal(value)`. It's valid when
+   `rng_next(value)` equals `rng_referee`, which then moves down to `value`.
+   Anything else fails with `'Invalid reveal'`. The protocol mixes it with
+   Alice's value by the same `seed` function, and calls your `resolve`.
+
+That `Reveal` is a **roll**. It's a referee step, like `Flag` and `Start`:
+
+- **It carries no seat signature.** In a replay, the referee's hash chain
+  authenticates the value, and the referee's attestation covers the step.
+- **It charges nobody.** The wait for a roll is nobody's time, and the next
+  seat's time runs from the roll's stamp.
+- **Nobody is flagged meanwhile.** While the referee owes a roll, a `Flag`
+  fails with `'Roll pending'`. A seat may still `Resign`.
+- **It isn't a signer change.** `support_turn` and `last_seat` only follow
+  seats.
+
+### The referee's tip
+
+The tip must be the referee's. A tip a seat made up would let that seat know
+every roll. So the referee signs its tip for one game:
+
+```text
+message = signing_hash(TAG, 'REFEREE_TIP_V1', chain_id, channel, game_id, tip)
+```
+
+The message names the game by its ids, because the game's context doesn't
+exist until the last seat joins. The channel checks the signature at `join`:
+
+1. The creator asks for the referee's randomness with a non-zero
+   `clock.rng_tip` at `create`. The game id doesn't exist yet, so the real tip
+   can't be given there.
+2. The last seat gets the referee's tip for that game, with its signature, and
+   passes both to `join`. A keeper serves them (`KeeperClient.tip`).
+3. `join` verifies the signature with the referee's key (`tip_hash`) and puts
+   the tip in the terms. A tip signed for another game, or by another key, is
+   refused.
+
+[Add a clock](/guide/clocks#take-randomness-from-the-referee) walks through
+it. A game that no channel anchors has the tip in the terms its wallets sign,
+and each seat checks the signature before it signs them (`tipHash` in the
+SDK).
+
+The referee has no `Recommit`: that step belongs to a seat. Its chain must
+last the whole game. A keeper's chain has a value for every roll the game's
+`max_steps` allows.
+
+### What the referee can and can't do
+
+- **It can't bias a roll.** Its values were fixed when its tip was committed.
+  It has exactly one valid next value.
+- **It can't know a roll before the step arrives.** The seed mixes in the
+  requester's chain value, which the referee first sees with the signed step.
+- **It knows its own next value ahead of time.** A referee that colluded with
+  the requester could leak that value before the action is signed, and the
+  requester would know the roll in advance. Players trust it not to.
+  Randomness joins time in what the referee is trusted with.
+- **It can cancel a game, but not re-roll.** A referee that withholds a roll
+  gets no second one: the game pauses, and at worst ends void.
+
+Seat commit-reveal needs no trusted party, and stays the default.
+
+### If the referee is down
+
+A game that waits for the referee's roll pauses:
+
+- **Offchain**, nothing moves without the referee anyway, since every step of a
+  timed game needs its stamp. A restarted keeper answers a roll it owed.
+- **In forced play**, a seat may play a `PlayRandom` onchain. No seat is due
+  after it, so nobody can be timed out, and forced play pauses for up to 3
+  days (`PAUSE_SECONDS`). During the pause anyone can post the referee's value
+  onchain (`roll`), or the referee can take the game back offchain
+  (`resume_by_referee`) and roll there. Otherwise the game ends **void**: at
+  once if both seats agree, or by anyone once the pause has run out.
+
+A void game has no result (`REASON_VOID`, 131). It isn't a draw, even though
+its `winner` is 0. See
+[The channel and disputes](/concepts/channel#a-roll-that-waits-for-the-referee).
+
 ## Running out: `Recommit`
 
 A chain of length `len` supplies `len` values. Before it runs out, the due seat
@@ -96,5 +221,9 @@ function nextValue(session, seat, { seed, length }) {
   return chain[at - 1]
 }
 ```
+
+In a game that takes its randomness from the referee, a seat uses its chain
+only for the value it attaches to `playRandom`. It never sends a `reveal`: the
+roll arrives from the referee.
 
 See [Build the client](/guide/client#randomness).

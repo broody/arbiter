@@ -8,15 +8,15 @@ service over one piece of state, the latest verified transcript of each game:
 | **Archive** | Keeps each game's signed transcript, verified step by step, in a file store |
 | **Transport** | Forwards steps between the seats: clients send theirs and long-poll for the other's, or follow a stream of server-sent events. A player who refreshes, switches device or comes back online restores the game from here |
 | **Watcher** | Reads each open game's channel. It answers disputes once, resolves expired ones and settles finished games, in segments when long, from the keeper's own account |
-| **Referee** (optional) | With a referee key, it registers the timed games that join naming that key, stamps their steps, starts their clocks, flags a seat whose time runs out, acknowledges their disputes and returns them from forced play |
+| **Referee** (optional) | With a referee key, it registers the timed games that join naming that key, stamps their steps, starts their clocks, flags a seat whose time runs out, acknowledges their disputes and returns them from forced play. With a randomness secret too, it gives the games that ask their randomness |
 
 ```mermaid
 flowchart LR
-  A["Alice's client"] -- "register, send, submit" --> AR
+  A["Alice's client"] -- "register, tip, send, submit" --> AR
   B["Bob's client"] -- "pull (long poll), follow (SSE)" --> AR
   subgraph Keeper
     AR["Archive<br/>(verify, branch, evidence)"]
-    RF["Referee<br/>(stamp, start, flag)"]
+    RF["Referee<br/>(stamp, start, flag, roll)"]
     W["Watcher"]
     AR <--> RF
     AR <--> W
@@ -43,7 +43,10 @@ Clients use it through `@referee/sdk/keeper` (see
   `acknowledge` and `resume_by_referee`; and for the calls a game's
   `afterSettle` hook adds.
 - As a referee, it's trusted with time in the games that name it (see
-  [Clocks and the referee](/concepts/clocks)).
+  [Clocks and the referee](/concepts/clocks)), and with the rolls of the games
+  that take their randomness from it: it can't bias a roll, but it knows its
+  own next value ahead of time, and players trust it not to leak it (see
+  [Randomness](/concepts/randomness#randomness-from-the-referee)).
 - Anyone can run one, and a game can use several.
 
 It needs no indexer. It watches the games clients register, and, as a referee
@@ -137,6 +140,31 @@ not charged for the keeper's downtime.
 A keeper that is not a game's referee archives and forwards only stamped
 steps, and settles and answers disputes as usual.
 
+### Randomness
+
+A referee started with a randomness secret (`referee.rng_secret_env`) also
+gives a timed game its rolls, when the game's terms carry the tip of the
+keeper's hash chain (`clock.rng_tip`). No seat then has to be online to reveal.
+See [Randomness](/concepts/randomness#randomness-from-the-referee).
+
+| When | Keeper |
+| --- | --- |
+| A client asks for a game's tip (`POST …/tip`) | Answers `{ rng_tip, signature }`: the tip of its chain for that game, and the referee's signature over it for that game alone. For an anchored game it reads the created game from the channel first, and answers only if the creator asked this referee for randomness. The same game always gets the same tip |
+| A game registers naming its key and a randomness tip | Refuses it (409) unless the tip is the tip of its own chain for that game: it could not roll for it |
+| It stamps a step that asks for randomness | Appends its roll at once: its next chain value, with the same stamp. The roll charges no one, and no flag falls while a roll is pending |
+| It starts with a roll pending | Answers the roll it owed when it stopped, stamped where the clock stopped |
+| A seat asked for a roll onchain, in forced play | Rolls once the channel is back in play and the archive holds that state. The `start` still follows the start grace |
+
+Each chain comes from the secret and the game's ids (chain, channel and game
+id), so the keeper stores nothing and rebuilds the same chain after a restart.
+A chain has a value for every roll the game's `maxSteps(config)` allows.
+
+The keeper posts no roll onchain. During forced play it returns the game to
+offchain play with `resume_by_referee` and rolls there. The channel's `roll`
+takes the value from anyone who knows it, and anyone can end a game void once
+its roll has waited 3 days (see
+[The channel and disputes](/concepts/channel#a-roll-that-waits-for-the-referee)).
+
 ## Watcher
 
 Every `poll_seconds`, the watcher first registers the timed games that joined
@@ -150,7 +178,7 @@ anchored game:
 | `DISPUTE`, a timed game it referees, candidate unfinished | Sends `acknowledge` at once, unless the channel holds it already |
 | `DISPUTE`, other games | Answers once, `answer_margin_seconds` before the deadline, with what outranks the candidate, extending it when its history holds it (`disputeAnswer`). Again only against a newer candidate someone else submits |
 | `DISPUTE`, window passed | `resolve`, with the game's `afterSettle` calls when it settles the game |
-| `FORCED`, a timed game it referees | `resume_by_referee`, once, when the archive holds the anchor and the forced-play window is open |
+| `FORCED`, a timed game it referees | `resume_by_referee`, once, when the archive holds the anchor and the forced-play window is open. While a roll waits for the referee, that window is the 3-day pause |
 | `FORCED`, other games | Waits: forced moves and timeouts need a player's wallet |
 | `SETTLED`, `CANCELLED` | Closes the game |
 
@@ -197,7 +225,7 @@ Start from [`keeper/config.example.json`](https://github.com/broody/referee/blob
   "rpc_url": "http://127.0.0.1:9545/rpc/v0_10",
   "poll_seconds": 15,
   "settle": true,
-  "referee": { "private_key_env": "KEEPER_REFEREE_KEY" },
+  "referee": { "private_key_env": "KEEPER_REFEREE_KEY", "rng_secret_env": "KEEPER_RNG_SECRET" },
   "account": { "address": "0x…", "private_key_env": "KEEPER_PRIVATE_KEY", "max_fee_fri": "50000000000000000000" },
   "games": [
     {
@@ -239,7 +267,10 @@ Start from [`keeper/config.example.json`](https://github.com/broody/referee/blob
   resumes where it stopped.
 - `account` is optional. Without it the keeper only watches. Keys come from
   environment variables, never from the file.
-- `referee` is optional. Without it the keeper referees nothing.
+- `referee` is optional. Without it the keeper referees nothing. Its
+  `rng_secret_env` names the environment variable that holds the referee's
+  randomness secret, a felt. Without it the keeper gives no randomness, and
+  refuses the games that would need it.
 - `settle: false` stops the keeper from submitting finished games itself.
 - The old names `max_games` and `max_history_steps` still work.
 
@@ -255,16 +286,20 @@ that settles a game. See [Hooks](/reference/keeper-api#hooks).
 ### Start it
 
 ```bash
-KEEPER_PRIVATE_KEY=0x… KEEPER_REFEREE_KEY=0x… node keeper/server.mjs keeper/config.local.json
+KEEPER_PRIVATE_KEY=0x… KEEPER_REFEREE_KEY=0x… KEEPER_RNG_SECRET=0x… node keeper/server.mjs keeper/config.local.json
 ```
 
 On start it checks that the RPC node is on `chain_id`. It then loads its store
-and, as a referee, resumes each timed game's clock at its last stamp.
+and, as a referee, resumes each timed game's clock at its last stamp and
+answers any roll it owed.
 
 :::
 
 :::warning
-Use separate keys for the keeper's account and its referee. Fund the account
+Use separate keys for the keeper's account and its referee, and a randomness
+secret that is neither. Whoever holds the secret can compute the referee's
+value for every roll ahead of time, so keep it private. Keep it unchanged
+while games that use it are open: their chains come from it. Fund the account
 for the transactions it sends, and cap them with `max_fee_fri`.
 :::
 
@@ -273,8 +308,9 @@ for the transactions it sends, and cap them with `max_fee_fri`.
 - **Logs.** One JSON line per HTTP request; an event stream logs its line when
   it closes, with `stream: true`. One line per archive event, as `event`:
   `registered`, `reanchored`, `switched`, `equivocation`, `flagged`,
-  `started`, `restarted`, `forced`, `resumed`, `unrefereed` and `evicted`
-  (`reason`: `finished` or `idle`). One line per chain action, as `action`:
+  `started`, `restarted`, `rolled`, `forced`, `resumed`, `unrefereed` and
+  `evicted` (`reason`: `finished` or `idle`). A roll the referee could not
+  give logs `roll` with `outcome: failed`. One line per chain action, as `action`:
   `settle`, `answer`, `acknowledge`, `resume`, `resolve`, `close` and
   `register`, with `outcome` (`sent`, `failed`, `skipped` without an account,
   or `joined`) and `tx`.
@@ -288,7 +324,8 @@ for the transactions it sends, and cap them with `max_fee_fri`.
 - **RPC.** Each round costs one `get_channel` call per open anchored game.
   With `world` set, it also scans the world's events from where it stopped,
   and reads the terms of each game that joined. Admitting an unanchored game
-  costs one signature check per seat, a call to its account contract. Use a node you control for
+  costs one signature check per seat, a call to its account contract. A tip
+  for an anchored game costs one `get_channel` call. Use a node you control for
   many games.
 - **Ports.** The default port, 3200, is also the prover gateway's default worker
   base port. Change one if both run on one host.
@@ -300,12 +337,14 @@ for the transactions it sends, and cap them with `max_fee_fri`.
   terms reads against a fake RPC provider. They cover unanchored games
   filling a wallet's cap, registration from events, answering a dispute once,
   the fallback when an acknowledgement doesn't land, starts after a join and
-  after forced play, chained segments, and no flag after a step the cap
-  refused.
+  after forced play, chained segments, no flag after a step the cap
+  refused, and the referee's tips and rolls.
 - `node keeper/bench.mjs [STEPS]`: the latency a referee adds, from the SDK
   work per step to a step's trip through a refereeing keeper to the other
   seat's stream, with the memory and the file store.
 - `keeper/katana.sh`: starts Katana, deploys the counter world and runs real
   transactions. The keeper answers a stale dispute and resolves it into forced
-  play, settles a finished game, and referees a timed game through a flag to
-  `SETTLED`. It needs Katana 1.7.1 and Sozo 1.8.0, and takes about a minute.
+  play, settles a finished game, referees a timed game through a flag to
+  `SETTLED`, and gives another its randomness: the join carries its signed
+  tip, it rolls for a gamble, and the channel replays the roll. It needs
+  Katana 1.7.1 and Sozo 1.8.0, and takes a minute or two.

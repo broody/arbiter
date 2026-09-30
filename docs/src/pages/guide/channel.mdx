@@ -70,7 +70,10 @@ pub trait ICounterChannel<T> {
         ref self: T, target: u8, invited: ContractAddress, session_key: felt252, rng_tip: felt252,
         prover: ContractAddress, response_seconds: u32, clock: Option<TimeControl>,
     ) -> felt252;
-    fn join(ref self: T, game_id: felt252, session_key: felt252, rng_tip: felt252);
+    fn join(
+        ref self: T, game_id: felt252, session_key: felt252, rng_tip: felt252, referee_tip: felt252,
+        referee_signature: Signature,
+    );
     fn cancel(ref self: T, game_id: felt252);
     fn accept_verified(
         ref self: T, game_id: felt252, epoch: u32, start_hash: felt252, end: Envelope<Counter>,
@@ -86,6 +89,8 @@ pub trait ICounterChannel<T> {
     fn force(
         ref self: T, game_id: felt252, epoch: u32, start: Envelope<Counter>, steps: Span<Move<Action>>,
     );
+    fn roll(ref self: T, game_id: felt252, epoch: u32, start: Envelope<Counter>, value: felt252);
+    fn void(ref self: T, game_id: felt252, epoch: u32, acks: Span<Signature>);
     fn resume(ref self: T, game_id: felt252, epoch: u32, acks: Span<Signature>);
     fn resume_by_referee(ref self: T, game_id: felt252, epoch: u32, signature: Signature);
     fn claim_timeout(ref self: T, game_id: felt252, epoch: u32);
@@ -103,9 +108,14 @@ pub mod channel {
 
     #[abi(embed_v0)]
     impl CounterChannelImpl of super::ICounterChannel<ContractState> {
-        fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip: felt252) {
+        fn join(
+            ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip: felt252,
+            referee_tip: felt252, referee_signature: Signature,
+        ) {
             let mut world = self.world_default();
-            binding::join::<CounterRules>(ref world, game_id, session_key, rng_tip);
+            binding::join::<
+                CounterRules,
+            >(ref world, game_id, session_key, rng_tip, referee_tip, referee_signature);
         }
 
         fn submit_history(
@@ -133,25 +143,27 @@ pub mod channel {
 }
 ```
 
-A game whose `Witness` isn't `()` adds a `witness` argument to `submit_history`
-and `force`, right after `start`, and passes it through.
+A game whose `Witness` isn't `()` adds a `witness` argument to `submit_history`,
+`force` and `roll`, right after `start`, and passes it through.
 
 ## The entrypoints
 
 | Entrypoint | Caller | What it does |
 | --- | --- | --- |
-| `create` | Seat 0's wallet | Opens a game (`WAITING`) with the config, an optional invited wallet (zero for an open game), seat 0's session key and chain tip, the prover adapter, the response window and an optional `TimeControl`. Returns the game id |
-| `join` | Seat 1's wallet (the invited one, if any) | Takes seat 1 with its session key and chain tip. Fixes the terms and context, and commits the opening state as the anchor (`ACTIVE`) |
+| `create` | Seat 0's wallet | Opens a game (`WAITING`) with the config, an optional invited wallet (zero for an open game), seat 0's session key and chain tip, the prover adapter, the response window and an optional `TimeControl`. A non-zero `rng_tip` in the time control asks for the referee's randomness. Returns the game id |
+| `join` | Seat 1's wallet (the invited one, if any) | Takes seat 1 with its session key and chain tip, and with the referee's signed tip when the creator asked for its randomness (zeros otherwise). Fixes the terms and context, and commits the opening state as the anchor (`ACTIVE`) |
 | `cancel` | Seat 0's wallet | Cancels a game nobody joined |
 | `submit_history` | Anyone | Replays a batch of signed steps from the anchor, or from the dispute candidate to extend it. With every seat's checkpoint approval (`acks`) it commits. Without, it becomes the dispute candidate |
 | `accept_verified` | The game's prover adapter only | The proved equivalent of `submit_history`. The adapter's `settle` calls it |
 | `open_dispute` | A seat's wallet | Challenges the other seat to respond within the window (`DISPUTE`) |
 | `acknowledge` | Anyone, with the referee's signature | Timed games: the referee shows it is live during this dispute, so `resolve` returns an unfinished game to `ACTIVE` |
 | `resolve` | Anyone | After the window, commits the best candidate: `SETTLED` if the game finished, `ACTIVE` if a timed game's referee acknowledged the dispute, `FORCED` otherwise |
-| `force` | The due seat's wallet | During forced play, applies that seat's own steps onchain. The wallet call authenticates them, so they carry no signatures |
+| `force` | The due seat's wallet | During forced play, applies that seat's own steps onchain. The wallet call authenticates them, so they carry no signatures. If they end on a request for the referee's randomness, forced play pauses for up to 3 days |
+| `roll` | Anyone, with the referee's next hash-chain value | During that pause, posts the referee's value for the roll the anchor waits for. The chain the referee committed vouches for it, so it takes no signature. The next seat gets a fresh window |
+| `void` | Anyone: with every seat's void approval, or once the pause has run out | Ends a game whose roll waits for a referee that is down, with no result (`REASON_VOID`) |
 | `resume` | Anyone, with every seat's reopen approval | Returns from forced play to offchain play |
 | `resume_by_referee` | Anyone, with the referee's signature | Timed games: the same, on the referee's signature alone |
-| `claim_timeout` | The waiting seat's wallet | Wins once the due seat misses its forced-play window (`REASON_ABANDON`) |
+| `claim_timeout` | The waiting seat's wallet | Wins once the due seat misses its forced-play window (`REASON_ABANDON`). Refused while the referee owes a roll (`'Waiting for the referee'`) |
 | `resign` | A seat's wallet | Concedes, in any live status |
 | `allow_prover` | A namespace owner | Allowlists or revokes a proof adapter class |
 | `terms`, `snapshot`, `get_channel` | Anyone (views) | Read the game: its terms; what the adapter proves from (terms, epoch, and the hash and block of the anchor and of the candidate); the whole channel, as a `ChannelGame` |
@@ -174,6 +186,20 @@ epoch increments whenever the anchor changes, so a stale submission fails with
 
 `join` checks that the joining wallet isn't seat 0, that it was invited if
 anyone was, and that its session key and tip differ from seat 0's.
+
+`join` also settles where the game's randomness comes from:
+
+- If the creator asked for the referee's randomness (a non-zero
+  `clock.rng_tip`), `referee_tip` must be non-zero (`'Referee tip needed'`)
+  and `referee_signature` must be the referee's signature over
+  `tip_hash(chain_id, channel, game_id, referee_tip)`
+  (`'Invalid session signature'`). The tip then replaces the creator's marker
+  in the terms. A tip a seat made up would let that seat know every roll, so
+  only the referee's signed one is taken.
+- Otherwise `referee_tip` must be zero (`'Seats reveal in this game'`), and
+  the signature is ignored: pass zeros.
+
+See [Add a clock](/guide/clocks#take-randomness-from-the-referee).
 
 ## Deploy
 
@@ -210,7 +236,7 @@ Every entrypoint that changes a game emits `ChannelUpdated`, keyed by
 
 | Field | Meaning |
 | --- | --- |
-| `kind` | `CREATED` 0, `JOINED` 1, `CANCELLED` 2, `DISPUTED` 3, `RECEIVED` 4, `RESOLVED` 5, `FORCED` 6, `RESUMED` 7 (either resume), `TIMED_OUT` 8, `RESIGNED` 9, `ACKNOWLEDGED` 10 |
+| `kind` | `CREATED` 0, `JOINED` 1, `CANCELLED` 2, `DISPUTED` 3, `RECEIVED` 4, `RESOLVED` 5, `FORCED` 6, `RESUMED` 7 (either resume), `TIMED_OUT` 8, `RESIGNED` 9, `ACKNOWLEDGED` 10, `ROLLED` 11, `VOIDED` 12 |
 | `epoch`, `status`, `deadline` | The channel after the update |
 | `seq`, `state_hash` | The candidate during a dispute, otherwise the anchor |
 | `winner`, `reason` | The result once settled, otherwise that state's outcome |
@@ -220,3 +246,9 @@ terms with `decodeTerms` over the `terms` view (see
 [@referee/sdk/proving](/reference/proving)). Rewards read
 `referee_dojo::channel::result(world, game_id)`, which is `Some(outcome)` once
 the game is `SETTLED`.
+
+:::warning
+Check the outcome's `reason` before its `winner`. A void game settles with
+`reason` 131 (`REASON_VOID`) and `winner` 0. That is no result, not a draw:
+the game stopped while a roll waited for its referee. Don't pay it as a draw.
+:::

@@ -1,6 +1,6 @@
 # Keeper HTTP API
 
-The keeper ([`keeper/server.mjs`](https://github.com/broody/referee/blob/main/keeper/server.mjs)) archives each game's signed steps, forwards them between seats and, with a referee key, referees timed games. This page is the reference for its HTTP API and its config file, for anyone calling it without [`@referee/sdk/keeper`](/reference/keeper-client) or running one. For what the keeper does and how to deploy it, see [Keeper](/infra/keeper).
+The keeper ([`keeper/server.mjs`](https://github.com/broody/referee/blob/main/keeper/server.mjs)) archives each game's signed steps, forwards them between seats and, with a referee key, referees timed games. With a randomness secret too, it gives those games their randomness. This page is the reference for its HTTP API and its config file, for anyone calling it without [`@referee/sdk/keeper`](/reference/keeper-client) or running one. For what the keeper does and how to deploy it, see [Keeper](/infra/keeper).
 
 ```bash
 KEEPER_PRIVATE_KEY=0x... node keeper/server.mjs keeper/config.local.json
@@ -16,8 +16,9 @@ KEEPER_PRIVATE_KEY=0x... node keeper/server.mjs keeper/config.local.json
 | `GET` | `/games/:channel/:game/steps` | Step records from a seq, with an optional long poll. |
 | `GET` | `/games/:channel/:game/events` | A stream of step records, as server-sent events. |
 | `POST` | `/games/:channel/:game/steps` | Append signed steps. |
+| `POST` | `/games/:channel/:game/tip` | The referee's signed randomness tip for a game. |
 | `GET` | `/games/:channel/:game/evidence` | Equivocation evidence. |
-| `GET` | `/info` | Chain, games, referee key, limits and capacity. |
+| `GET` | `/info` | Chain, games, referee key, randomness, limits and capacity. |
 | `GET` | `/health` | Liveness. |
 
 `:channel` is the game system's address and `:game` the game id, each a felt in decimal or `0x` hex. A value that does not parse answers 400 `Invalid game id`.
@@ -45,8 +46,8 @@ The keeper answers with the step records of `Session` ([`@referee/sdk`](/referen
 | `seq`, `transcript` | The position the step was signed at. |
 | `message` | The step's action hash. |
 | `step` | The move, as the SDK encodes it (`{ kind, ... }`). |
-| `signature` | `{ r, s }`. Zero for the referee's `flag` and `start`. |
-| `seat` | The step's actor: a seat, or `254` (`REFEREE`) for a `flag` or `start`. |
+| `signature` | `{ r, s }`. Zero for the referee's `flag`, `start` and roll. |
+| `seat` | The step's actor: a seat, or `254` (`REFEREE`) for a `flag`, a `start` or a roll (the referee's `reveal`). |
 | `stamp`, `attestation` | Timed games only: the referee's time for the step and its signature of the state the step reached. |
 
 Clients send the part that travels: `{ step, signature }`, plus `stamp` and `attestation` for a step that is already stamped (`signedStep` in the SDK).
@@ -66,11 +67,11 @@ An error answer has this shape; `data` is present only when the error carries so
 
 | Status | When |
 | --- | --- |
-| `400` | Invalid JSON; an invalid game id; a bad `from` or `wait`; a malformed body; a record that fails `Session.import`; a rejected step. |
+| `400` | Invalid JSON; an invalid game id; a bad `from` or `wait`; a malformed body; a record that fails `Session.import`; a rejected step; an invalid `config` for a tip. |
 | `403` | An unanchored game without a valid wallet signature from each seat. |
-| `404` | An unknown path (`Not found`); an unknown game (`Unknown game`); a channel the config does not list. |
+| `404` | An unknown path (`Not found`); an unknown game (`Unknown game`); a channel the config does not list; a tip from a keeper that gives no randomness, or for a game its channel does not hold. |
 | `405` | A method other than `GET` or `POST` on `/games` or `…/steps` (`Method not allowed`). |
-| `409` | Terms that differ from the channel onchain or from the archived game; a game that can run longer than the keeper keeps; a closed game; a session that neither overlaps the archive nor starts at the channel's anchor; steps that start outside the archive; a step that conflicts with the archived one; a step during forced play. |
+| `409` | Terms that differ from the channel onchain or from the archived game; a randomness tip that is not this referee's; a game that can run longer than the keeper keeps; a closed game; a session that neither overlaps the archive nor starts at the channel's anchor; steps that start outside the archive; a step that conflicts with the archived one; a step during forced play; a tip for a game that did not ask this referee for randomness. |
 | `413` | A body over `max_body_bytes`; a registered transcript over the entry's `max_steps` steps. |
 | `429` | The client's rate limit (`Too many requests; retry later`); a wallet at `max_open_per_player` unanchored games. |
 | `503` | The keeper holds `max_open_games` open games, or only reserved slots are left (`The keeper is full`); `max_waiters` clients are waiting (`Too many waiting clients; retry later`). |
@@ -101,7 +102,7 @@ A new game takes an open slot. At most `max_open_games` games are open at once, 
 
 Archive a session, or merge it into the archived copy. Clients call it once, after joining.
 
-The body is `{ record, authorizations? }`. `record` is `session.export()`: `{ version: 4, terms, start, witness, steps }`, with the start envelope, its witness and the signed steps. `authorizations` is for an unanchored game: each seat's wallet signature over `termsTypedData(game, terms)` ([`@referee/sdk`](/reference/sdk)), in seat order. The keeper checks the body in this order:
+The body is `{ record, authorizations? }`. `record` is `session.export()`: `{ version: 5, terms, start, witness, steps }`, with the start envelope, its witness and the signed steps. `authorizations` is for an unanchored game: each seat's wallet signature over `termsTypedData(game, terms)` ([`@referee/sdk`](/reference/sdk)), in seat order. The keeper checks the body in this order:
 
 | Status | Message | When |
 | --- | --- | --- |
@@ -134,6 +135,7 @@ A new game is admitted in this order:
 | `409` | `The terms differ from the channel onchain` | Anchored games, with an RPC node: the channel is not joined, or its context differs. The context binds every term. |
 | `403` | `An unanchored game needs each seat's wallet signature over its terms` | Unanchored games, with an RPC node: `authorizations` is not an array with one signature per player. |
 | `403` | `Seat N's wallet did not sign these terms` | Unanchored games, with an RPC node: the seat's account contract does not accept its signature (`isValidSignature` or `is_valid_signature`). |
+| `409` | `The game's randomness tip is not this referee's` | The terms name this keeper's referee key with a non-zero `clock.rng_tip`, and that tip is not the tip of the keeper's own chain for the game, or the keeper has no randomness secret. It could not roll for the game. |
 | `503` | `The keeper is full: its reserved capacity is for priority games` | Only reserved slots are left, and the entry's `admit` hook ranks the game 0 or less, or the entry has none. |
 
 The keeper keeps the `authorizations` with the game, and `GET /games/:channel/:game` returns them.
@@ -171,7 +173,7 @@ Long poll:
 
 1. If there are steps, or `wait` is 0, the keeper answers at once.
 2. Otherwise, if `max_waiters` clients are already waiting, it answers `503`.
-3. Otherwise it holds the request until the game's archive changes (steps appended, a branch switch, a registration or re-anchor, a referee `flag` or `start`), `wait` seconds pass, or the client disconnects. Then it answers the same query again.
+3. Otherwise it holds the request until the game's archive changes (steps appended, a branch switch, a registration or re-anchor, a referee `flag`, `start` or roll), `wait` seconds pass, or the client disconnects. Then it answers the same query again.
 
 The second answer can still be empty, for example after a timeout or after a branch switch that leaves the archive shorter than `from`. A client checks each record's `seq` and `transcript` against its own position before applying it; `KeeperClient.pull` throws `The keeper holds another branch at seq N` when they differ.
 
@@ -205,7 +207,7 @@ data: {"start":0,"seq":5,"transcript":{"$n":"7719…"},"steps":[{"seq":4,"transc
 : ping
 ```
 
-Events carry stamps and the referee's `flag` and `start` steps, and a seat's own steps come back too. A client checks each record's position against its own, as with `…/steps`: `KeeperClient.follow` skips steps it holds and throws `The keeper holds another branch at seq N` on another branch.
+Events carry stamps and the referee's `flag` and `start` steps and rolls, and a seat's own steps come back too. A client checks each record's position against its own, as with `…/steps`: `KeeperClient.follow` skips steps it holds and throws `The keeper holds another branch at seq N` on another branch.
 
 ## `POST /games/:channel/:game/steps`
 
@@ -259,7 +261,39 @@ A keeper with a referee key referees every timed game whose `clock.referee` is t
 - Once the transcript holds the entry's `max_steps` steps, the keeper stops refereeing the game: it stamps, starts and flags nothing more.
 - It never stamps a second step at one seq. A conflicting unstamped step cannot verify on another branch, so it gets `409`, and it is recorded as evidence when the same seat signed both.
 
+With a randomness secret, the keeper also rolls for the games whose `clock.rng_tip` is its own tip (see [`POST …/tip`](#post-gameschannelgametip)):
+
+- When it stamps a step that asks for randomness (a `playRandom`), it appends its roll at once: a `reveal` of its next hash-chain value, with the same stamp, seat `254` and a zero signature. The answer's `accepted` counts the seat's step, and its `seq` is past the roll.
+- While the roll is pending the keeper flags no one, and the roll charges no seat's clock.
+- After a restart it answers a roll it owed when it stopped.
+- A roll a seat asked for onchain, in forced play, is answered once the channel is back in play. The `start` still follows the start grace.
+
 A keeper that does not referee a timed game takes only stamped steps; an unstamped one is rejected with `Timed games need the referee's stamp on every step`.
+
+## `POST /games/:channel/:game/tip`
+
+The referee's randomness tip for a game: the tip of the keeper's hash chain for it, and the referee's signature over that tip. The last seat brings both to `join` when the creator asked for the referee's randomness (see [Add a clock](/guide/clocks#take-randomness-from-the-referee)). `KeeperClient.tip` calls it.
+
+The body is JSON: `{}` for an anchored game, whose config the keeper reads from its channel, or `{ config }` for a game no channel anchors.
+
+```json
+{ "rng_tip": { "$n": "1830…" }, "signature": { "r": { "$n": "2957…" }, "s": { "$n": "8841…" } } }
+```
+
+`signature` is the referee's over `tip_hash(chain_id, channel, game_id, rng_tip)` (`tipHash` in [`@referee/sdk`](/reference/sdk#hashing-and-signing)), for the keeper's configured chain. The same game always gets the same tip: the keeper derives each chain from its randomness secret and the game's ids, and stores nothing. The chain has a value for every roll the game's `maxSteps(config)` allows.
+
+The keeper checks the request in this order:
+
+| Status | Message | When |
+| --- | --- | --- |
+| `404` | `This keeper gives no randomness` | The config has no `referee`, or its `referee` has no `rng_secret_env`. |
+| `404` | `Channel 0x… is not kept here` | The config does not list the channel. |
+| `404` | `No such game onchain` | Anchored games, with an RPC node: the keeper cannot read the game from its channel. |
+| `409` | `The game did not ask this referee for randomness` | Anchored games, with an RPC node: the created game is untimed, names another referee, or has a zero `clock.rng_tip`. |
+| `400` | `Invalid config` | The codec's `maxSteps(config)` throws, or does not return a safe integer `>= 0`: for example when an unanchored game sends no `config`. |
+| `409` | `The game can run to N steps; this keeper keeps at most M per game on channel 0x…` | The codec's `maxSteps(config) + 1` exceeds the entry's `max_steps`. The keeper would not admit the game either. |
+
+The request counts against `rate_per_minute`, like every `POST`.
 
 ## `GET /games/:channel/:game/evidence`
 
@@ -273,6 +307,7 @@ Equivocation evidence, as `{ evidence }`, sorted by seq. Each entry is `{ seq, s
   "watching": true,
   "sending": true,
   "referee": "0x3a9…",
+  "randomness": true,
   "games": [{ "channel": "0x5b0e…", "tag": "COUNTER", "anchored": true, "prover": true }],
   "limits": {
     "max_open_games": 10000, "reserved_games": 1000, "max_open_per_player": 4, "max_steps": 4096,
@@ -288,6 +323,7 @@ Equivocation evidence, as `{ evidence }`, sorted by seq. Each entry is `{ seq, s
 | `watching` | Whether the watcher runs (an RPC node and `poll_seconds > 0`). |
 | `sending` | Whether the keeper can send transactions (an RPC node and an `account`). |
 | `referee` | The referee's public key in hex, or `null`. |
+| `randomness` | Whether the keeper gives randomness: it has a referee key and a randomness secret. |
 | `games` | One entry per configured channel: its address, the codec's `tag`, whether it is anchored, and whether a prover is configured. |
 | `limits` | The configured limits. `max_steps` is the top-level value; an entry can set its own. |
 | `capacity` | `open` games, `max_open_games`, `reserved_games`, `free` slots, and `free_unreserved`, the free slots a game without priority can use. |
@@ -309,7 +345,7 @@ Answers `200` with the body `ok`, not JSON.
   "rpc_url": "http://127.0.0.1:9545/rpc/v0_10",
   "poll_seconds": 15,
   "settle": true,
-  "referee": { "private_key_env": "KEEPER_REFEREE_KEY" },
+  "referee": { "private_key_env": "KEEPER_REFEREE_KEY", "rng_secret_env": "KEEPER_RNG_SECRET" },
   "account": {
     "address": "0x0000000000000000000000000000000000000000000000000000000000000000",
     "private_key_env": "KEEPER_PRIVATE_KEY",
@@ -381,7 +417,7 @@ Answers `200` with the body `ok`, not JSON.
 | `games` | required | One entry per game channel; at least one. |
 
 :::warning
-Without `rpc_url` the keeper archives terms it cannot check: against the channel for an anchored game, or against the wallets' signatures for an unanchored one. It also cannot re-anchor a disjoint session, and does not watch. That suits tests only.
+Without `rpc_url` the keeper archives terms it cannot check: against the channel for an anchored game, or against the wallets' signatures for an unanchored one. It also cannot re-anchor a disjoint session, signs a randomness tip without reading the game's channel, and does not watch. That suits tests only.
 :::
 
 ### referee
@@ -389,8 +425,11 @@ Without `rpc_url` the keeper archives terms it cannot check: against the channel
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `private_key_env` | `"KEEPER_REFEREE_KEY"` | Environment variable that holds the referee's private key. It must be set, or loading fails with `Set <name> to the referee's private key`. |
+| `rng_secret_env` | none | Environment variable that holds the referee's randomness secret, a felt. With it the keeper gives randomness to the timed games that ask. If the key names a variable that is not set, loading fails with `Set <name> to the referee's randomness secret`. |
 
 Without `referee`, the keeper referees nothing. Keep the referee key apart from the account key.
+
+Without `rng_secret_env`, the keeper gives no randomness: `POST …/tip` answers `404`, and a game that names its key with a randomness tip is refused at registration. The keeper derives every game's hash chain from the secret and the game's ids, so whoever holds the secret can compute the referee's value for every roll ahead of time. Keep it private, and keep it the same while games that use it are open.
 
 ### account
 

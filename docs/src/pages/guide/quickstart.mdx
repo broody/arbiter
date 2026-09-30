@@ -86,11 +86,11 @@ console.log('replay calldata:', alice.batch().steps.length, 'steps and', acks.le
 ```
 
 ```
-after the roll: total 9, seq 3
-seat 1 won after 7 steps
+after the roll: total 4, seq 3
+seat 1 won after 9 steps
 same state on both sides: true
 forged step: Invalid session signature
-replay calldata: 7 steps and 2 approvals
+replay calldata: 9 steps and 2 approvals
 ```
 
 The roll is the same on every run: both chains come from fixed seeds, and the
@@ -116,7 +116,7 @@ keeper/katana.sh
 
 This starts a Katana node, deploys the counter's Dojo world and runs
 [`keeper/katana.mjs`](https://github.com/broody/referee/blob/main/keeper/katana.mjs)
-with real transactions. It takes about a minute:
+with real transactions. It takes a minute or two:
 
 1. A **stale dispute.** Alice disputes after four signed steps, hoping the
    opening state stands. A keeper answers with the transcript, and after the
@@ -125,6 +125,9 @@ with real transactions. It takes about a minute:
    window and resolves it to `SETTLED`.
 3. A **timed game.** The keeper referees a game with a 2-second turn. Alice
    moves, Bob stalls, and the keeper flags Bob and settles the win on time.
+4. A **game that takes its randomness from the keeper.** Bob joins with the
+   keeper's signed tip. He gambles, the keeper rolls as it stamps the step,
+   and the channel replays the roll when the keeper settles the finished game.
 
 :::
 

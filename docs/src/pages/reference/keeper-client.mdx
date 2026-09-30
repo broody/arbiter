@@ -1,6 +1,6 @@
 # @referee/sdk/keeper
 
-A client for a referee [keeper](/infra/keeper)'s HTTP API: archive a session, send our steps, fetch the other seat's by long poll or follow them as a stream, restore a game on a new device, and, in a timed game, submit our steps for the keeper to stamp. Game clients use it as their transport.
+A client for a referee [keeper](/infra/keeper)'s HTTP API: archive a session, send our steps, fetch the other seat's by long poll or follow them as a stream, restore a game on a new device, and, in a timed game, submit our steps for the keeper to stamp and fetch the keeper's signed randomness tip. Game clients use it as their transport.
 
 ```js
 import { KeeperClient } from '@referee/sdk/keeper'
@@ -26,6 +26,7 @@ Requests and answers are JSON with `BigInt`s as `{ "$n": "<decimal>" }` (`string
 | Name | Signature | What it does |
 | --- | --- | --- |
 | `register` | `(session, { authorizations } = {})` | Archives `session` (`POST /games` with `session.export()`), or merges it into the keeper's copy. Returns the keeper's answer. An unanchored game needs `authorizations` the first time. See [register](#register). |
+| `tip` | `(ids, { config } = {})` | The keeper's randomness tip for a game (`POST …/tip`), as `{ rng_tip, signature }`: the tip of the referee's hash chain and the referee's signature over it. See [tip](#tip). |
 | `send` | `(session, from = session.start.seq)` | Sends `session`'s signed steps from seq `from` to its end (`POST …/steps`). `from` is raised to `session.start.seq` if it is lower. Returns the keeper's answer. |
 | `submit` | `(session, options = {})` | Timed games: sends our steps awaiting a stamp (`session.pending`) to the keeper that referees the game, then pulls them back stamped, with anything after them. See [submit](#submit). |
 | `steps` | `(ids, from, { wait = 0, signal } = {})` | The keeper's step records (as in `Session.steps`) from seq `from`, as `{ start, seq, transcript, steps }`. With `wait` (seconds), waits for at least one. Applies nothing. |
@@ -44,6 +45,35 @@ await keeper.register(session, { authorizations }) // an unanchored game, the fi
 ```
 
 A keeper entry with `anchored: false` keeps games that no channel holds (see [Keeper](/infra/keeper#unanchored-games)). Such a game is admitted only with each seat's wallet signature over `termsTypedData(game, terms)` from [`@referee/sdk`](/reference/sdk), in seat order, as `authorizations`. The keeper checks each against the seat's account contract and keeps them with the game. Without them it answers 403.
+
+### tip
+
+```js
+const { rng_tip, signature } = await keeper.tip({ channel: CHANNEL, game_id: gameId })
+```
+
+Asks a keeper that gives randomness for its tip for one game: `rng_tip`, the tip of the referee's hash chain for that game, and `signature`, the referee's signature over `tipHash(game, chain_id, channel, game_id, rng_tip)` from [`@referee/sdk`](/reference/sdk#hashing-and-signing). The same game always gets the same tip.
+
+- **An anchored game.** Call it once the game is created. The keeper reads the created game from the channel, and answers only if its `clock` names this keeper's referee key with a non-zero `rng_tip`. The last seat passes `rng_tip` and `signature` to `join`, which checks the signature. See [Add a clock](/guide/clocks#take-randomness-from-the-referee).
+- **A game no channel anchors.** Pass its `config`: `keeper.tip(ids, { config })`. The seats put `rng_tip` in the terms (`clock.rng_tip`), and each checks the signature before it signs them:
+
+```js
+import { tipHash, verify } from '@referee/sdk'
+
+const { rng_tip, signature } = await keeper.tip({ channel, game_id }, { config })
+const signed = verify(tipHash(counter, chain_id, channel, game_id, rng_tip), signature, refereeKey) // the referee's public key
+if (!signed) throw Error('This tip is not the referee\'s')
+```
+
+A tip a seat made up would let that seat know every roll, so never take one the referee did not sign.
+
+| Status | Message | When |
+| --- | --- | --- |
+| `404` | `This keeper gives no randomness` | The keeper has no referee key or no randomness secret. `GET /info` reports `randomness`. |
+| `404` | `No such game onchain` | An anchored game the keeper cannot read from its channel. |
+| `409` | `The game did not ask this referee for randomness` | An anchored game that is untimed, names another referee, or was created with a zero `rng_tip`. |
+| `400` | `Invalid config` | The codec's `maxSteps(config)` fails, for example when an unanchored game sends no `config`. |
+| `409` | `The game can run to ${n} steps; this keeper keeps at most ${m} per game on channel ${channel}` | The game can run longer than the keeper's `max_steps` for the channel. |
 
 ### pull
 
@@ -85,6 +115,8 @@ In a timed game, `store.move` signs a step without applying it: the step waits i
 
 Sending again is harmless: the keeper skips steps it already holds. After a restart, [`store.load`](/reference/store#methods) puts the pending steps back, and `submit` resends them.
 
+In a game that takes its randomness from the keeper, a `playRandom` comes back as two records: our stamped step, then the referee's roll, a `reveal` with seat `REFEREE` (254). No seat sends a `reveal` in such a game.
+
 `send` sends only steps the session has applied, so a timed game's unstamped steps go through `submit`.
 
 If the keeper refuses the steps, `submit` throws before pulling:
@@ -92,11 +124,11 @@ If the keeper refuses the steps, `submit` throws before pulling:
 | Status | Message | When |
 | --- | --- | --- |
 | `400` | `Step ${seq} rejected: Flag fell: the seat's time ran out first` | The seat's time ran out first. The keeper flags the seat. |
-| `409` | `Conflicts with the archived step at seq ${seq}` | Another step holds that seq: the referee's `flag` or `start`, or the other seat's resignation. |
+| `409` | `Conflicts with the archived step at seq ${seq}` | Another step holds that seq: the referee's `flag`, `start` or roll, or the other seat's resignation. |
 | `409` | `The game is in forced play onchain: steps wait until the channel resumes` | The keeper saw the channel in forced play. |
 | `400` | `Step ${seq} rejected: Transcripts are limited to ${n} steps` | The transcript is at the keeper's `max_steps` for the game. |
 
-After a conflict, a `pull` brings in the step that took the seq, which drops the pending chain. After the referee's `start`, the seat may sign its step again.
+After a conflict, a `pull` brings in the step that took the seq, which drops the pending chain. After the referee's `start` or roll, the seat may sign its step again.
 
 ## Errors
 
@@ -146,10 +178,12 @@ while (!session.env.outcome.finished) {
     await store.move(session, await chooseStep(session), privateKey) // signed, not applied: in session.pending
     await keeper.submit(session, { store }) // stamped by the keeper, then pulled back
   } else {
-    await keeper.pull(session, { wait: 30, store }) // also brings the referee's flag or start
+    await keeper.pull(session, { wait: 30, store }) // also brings the referee's flag, start or roll
   }
 }
 ```
+
+While the referee owes a roll, `session.due()` is `REFEREE` (254), so neither seat signs: the loop above pulls until the roll arrives.
 
 Instead of polling, a client can keep one stream open. It gets the other seat's steps, the referee's steps and our own stamped steps as the keeper archives them:
 

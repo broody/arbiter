@@ -68,8 +68,15 @@ await wallet.execute(contractCall(CHANNEL, 'create', [
 ]))
 
 // seat 1
-await wallet.execute(contractCall(CHANNEL, 'join', [gameId, publicKey(privateKey), tip]))
+await wallet.execute(contractCall(CHANNEL, 'join', [
+  gameId, publicKey(privateKey), tip,
+  0, 0, 0,             // the referee's tip and its signature (r, s): zeros when the seats reveal
+]))
 ```
+
+A timed game that takes its randomness from its referee joins with the
+referee's signed tip instead of those zeros: see
+[Add a clock](/guide/clocks#take-randomness-from-the-referee).
 
 Once seat 1 has joined, read the terms back from the chain and open the session
 on them. Never build terms yourself: the context hash has to match the
@@ -122,7 +129,9 @@ The keeper is only a transport. Without one, send `record` (its `step` and
 
 ### Whose turn
 
-`session.due()` is the seat to act, including a seat that owes a reveal.
+`session.due()` is the seat to act, including a seat that owes a reveal. It is
+`REFEREE` (254) while the referee owes a roll, in a game that takes its
+randomness from the referee: neither seat acts then.
 `session.env.outcome.finished` ends the game. `session.env.game` is your game's
 state, for rendering.
 
@@ -151,6 +160,11 @@ Each value can be revealed once, walking back from the tip. Before a chain runs
 out, send `recommit(newTip)` on your turn with a fresh chain, and save its seed.
 A seat may recommit only after it has revealed from its current tip, once per
 reveal (`'Nothing revealed to recommit'`). See [Randomness](/concepts/randomness).
+
+In a timed game that takes its randomness from the referee, only the first
+half applies. You send `playRandom` with your next chain value, and the
+referee's roll comes back right after your stamped step. No seat sends a
+`reveal`: the pending request names the referee, not a seat.
 
 ### Resigning
 
@@ -197,6 +211,7 @@ You respond with:
 | `FORCED`, you're due | `force` your steps onchain from your wallet before the deadline |
 | `FORCED`, they're due and missed the deadline | `claim_timeout` from your wallet |
 | `FORCED`, both want to go back offchain | Both sign `session.reopenSignature(epoch, anchorHash, key)`, and anyone calls `resume` |
+| `FORCED`, the referee is due (`anchor.due` is 254) | Wait for the referee to take the game back (`resume_by_referee`) and roll offchain. Whoever holds the referee's value can post it instead (`roll`). To stop waiting, both sign a void approval and anyone calls `void`. After the deadline, 3 days, anyone calls `void` alone |
 
 ```js
 const channel = await getChannel(provider, counter, CHANNEL, gameId)
@@ -208,6 +223,27 @@ In a timed game, the referee keeps its games out of forced play while it is
 live: it acknowledges each dispute, so `resolve` returns an unfinished game to
 `ACTIVE`, and it returns a game from forced play on its own
 (`resume_by_referee`). See [Clocks and the referee](/concepts/clocks#disputes-and-forced-play).
+
+In a game that takes its randomness from the referee, an action that needs a
+roll, played onchain with `force`, pauses forced play: no seat is due, and
+nobody can be timed out. A void ends the pause with no result:
+
+```js
+import { ZERO_SIGNATURE, encodeSignatures, sign, voidHash } from '@referee/sdk'
+
+const channel = await getChannel(provider, counter, CHANNEL, gameId)
+// Each seat approves the void from the channel's anchor, at its current epoch.
+const approval = sign(voidHash(counter, session.context, channel.epoch, channel.anchor.hash), privateKey)
+// … collect both: acks = [seat0, seat1]. The game ends void at once.
+await wallet.execute(contractCall(CHANNEL, 'void', [gameId, channel.epoch, ...encodeSignatures(acks)]))
+
+// Without the other seat: once channel.deadline has passed, zero signatures do.
+await wallet.execute(contractCall(CHANNEL, 'void', [gameId, channel.epoch, ...encodeSignatures([ZERO_SIGNATURE, ZERO_SIGNATURE])]))
+```
+
+A void game settles with `reason` 131 (`REASON_VOID`). It has no winner, and
+it isn't a draw. See
+[The channel and disputes](/concepts/channel#a-roll-that-waits-for-the-referee).
 
 A client can't watch while it's closed. A keeper answers disputes and resolves
 them on its players' behalf. See [Keeper](/infra/keeper).

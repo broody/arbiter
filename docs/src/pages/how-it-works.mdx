@@ -38,7 +38,7 @@ flowchart LR
   that the adapter runs, and `settle` hands the proved result to the channel.
 - **The keeper** is optional infrastructure. It stores and forwards steps, and
   it can answer disputes and settle for players who are offline. It can also
-  keep time as the referee of timed games.
+  keep time as the referee of timed games, and give them their randomness.
 
 ## A game, start to finish
 
@@ -48,7 +48,7 @@ sequenceDiagram
   participant B as Bob
   participant C as Game system
   A->>C: create(config, invited, session key, rng tip, prover, window, clock?)
-  B->>C: join(game_id, session key, rng tip)
+  B->>C: join(game_id, session key, rng tip, referee tip?)
   Note over C: terms and context fixed,<br/>opening anchor committed (ACTIVE)
   loop offchain, no transactions
     A->>B: step signed over (context, seq, transcript, move)
@@ -126,8 +126,9 @@ stateDiagram-v2
     DISPUTE --> SETTLED: resolve after the window (finished)
     DISPUTE --> FORCED: resolve after the window (unfinished)
     FORCED --> FORCED: the due seat plays onchain (force)
+    FORCED --> FORCED: the referee's roll is posted (roll)
     FORCED --> ACTIVE: resume with all approvals, or the referee's
-    FORCED --> SETTLED: claim_timeout, or the game finishes
+    FORCED --> SETTLED: claim_timeout, void, or the game finishes
     ACTIVE --> SETTLED: resign
     DISPUTE --> SETTLED: resign
     FORCED --> SETTLED: resign
@@ -136,9 +137,10 @@ stateDiagram-v2
 | Situation | What happens |
 | --- | --- |
 | **Won't approve the result** | Submit the history without approvals. It becomes the *candidate* and opens a dispute. If nobody submits a higher-ranked history before the window closes, anyone calls `resolve` and the game settles. |
-| **Submits an old state** | During the window, the other player (or a keeper) submits the newer history. Candidates rank by `support_turn` (how many times the signer changed), then `seq`, so a player can't win by stopping before the opponent's last move. |
+| **Submits an old state** | During the window, the other player (or a keeper) submits the newer history. Candidates rank by `support_turn` (how many times the signing seat changed), then `seq`, so a player can't win by stopping before the opponent's last move. |
 | **Stalls** | In a timed game, the referee flags the staller once its time runs out. Otherwise, open a dispute. If the window passes with the game unfinished, `resolve` moves it to **forced play**: the due seat must move onchain within each window, or the other seat claims the game on timeout. A live referee keeps a timed game's disputes out of forced play. |
 | **Gives up** | Either player resigns at any time, with a signed `Resign` step or a wallet call. |
+| **The referee is down while a roll waits for it** | Only in a game that takes its randomness from its referee. Forced play pauses for up to 3 days, and nobody can be timed out meanwhile. Anyone can post the referee's value (`roll`). Otherwise the game ends **void**, with no result: at once if both players agree, or by anyone after the pause. |
 
 Details: [The channel and disputes](/concepts/channel).
 
@@ -171,7 +173,9 @@ The seat is never part of the step. The state says whose turn it is, so only
 
 - **Randomness.** When an action needs dice, the acting seat attaches its next
   hash-chain value and the other seat reveals theirs. The roll is a hash of
-  both, so neither can predict or bias it. See [Randomness](/concepts/randomness).
+  both, so neither can predict or bias it. A timed game can take its rolls from
+  its referee instead, so no seat has to be online to reveal. See
+  [Randomness](/concepts/randomness).
 - **Clocks.** A game can name a **referee** in its terms: a third key that
   stamps every step with the time, starts the clock and flags a seat whose time
   runs out. Players sign moves; the referee signs time. See

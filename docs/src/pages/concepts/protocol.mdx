@@ -15,11 +15,12 @@ and dispute works on envelopes:
 | --- | --- |
 | `seq` | Number of steps applied since the game opened |
 | `transcript` | Hash chain of every step's message (0 at the opening) |
-| `support_turn` | Number of times the signer changed. Ranks dispute candidates |
-| `last_seat` | The seat of the last step (`NO_SEAT` 255 at the opening) |
-| `pending` | A randomness request waiting for a reveal: `{ active, seat, seq, entropy }` |
+| `support_turn` | Number of times the signing seat changed. The referee's steps don't count. Ranks dispute candidates |
+| `last_seat` | The last seat that signed a step (`NO_SEAT` 255 at the opening) |
+| `pending` | A randomness request waiting for a reveal: `{ active, seat, seq, entropy }`. `seat` is a seat, or `REFEREE` when the referee must reveal |
 | `rng_heads` | Each seat's last revealed hash-chain value (its committed tip at first) |
 | `rng_fresh` | Per seat, whether its head is a tip it committed and hasn't revealed from yet. A seat may `Recommit` only once this is false |
+| `rng_referee` | The referee's last revealed hash-chain value (its committed tip at first), or zero when the seats reveal to each other. See [Randomness](/concepts/randomness#randomness-from-the-referee) |
 | `clock` | A timed game's clocks, `None` otherwise. See [Clocks and the referee](/concepts/clocks) |
 | `outcome` | `{ finished, winner, reason }` |
 | `game` | Your `GameRules::State` |
@@ -36,7 +37,7 @@ A step is a `Move<A>`, where `A` is your game's action:
 | --- | --- | --- |
 | `Play(A)` | Your action | The seat your `due` names |
 | `PlayRandom((A, entropy))` | An action whose `apply` requests randomness, and the actor's next hash-chain value | The seat your `due` names |
-| `Reveal(value)` | The requested seat's next hash-chain value | The seat named by the pending request |
+| `Reveal(value)` | The revealer's next hash-chain value | The seat named by the pending request, or the referee (`REFEREE`) in a game that takes its randomness from it |
 | `Recommit(tip)` | A new hash-chain tip | The seat your `due` names, once it has revealed from its current tip |
 | `Resign(seat)` | The resigning seat | That seat: either seat may resign at any time |
 | `Flag` | Nothing | The referee of a timed game (`REFEREE`, 254) |
@@ -47,10 +48,14 @@ The seat is implied by the state, so it's never carried or signed twice. Only
 nothing but `Reveal` is allowed (`'Reveal pending'`), and a `Reveal` with
 nothing pending fails (`'No reveal due'`).
 
-`Flag` and `Start` are the referee's steps. They carry no seat signature: a
-replay authenticates them only through the referee's attestation of a timed
-game (see [Clocks and the referee](/concepts/clocks)), so an untimed game
-rejects them (`'Untimed game'`), and `force` never takes them.
+`Flag` and `Start` are the referee's steps, and so is a **roll**: the
+referee's `Reveal`, in a game that takes its randomness from the referee. They
+carry no seat signature: a replay authenticates them only through the
+referee's attestation of a timed game (see
+[Clocks and the referee](/concepts/clocks)), so an untimed game rejects them
+(`'Untimed game'`), and `force` never takes them. A roll must also be the next
+value of the hash chain the referee committed. In forced play that chain alone
+authenticates it, so anyone may post it onchain (`roll`).
 
 ## Every game ends
 
@@ -113,11 +118,11 @@ The **terms** are everything both seats accepted by joining:
 | `chain_id`, `channel`, `game_id` | Which game, on which contract and chain |
 | `prover` | The proof adapter allowed to settle it |
 | `response_seconds` | The dispute and forced-play window |
-| `clock` | The time control, or `None` for an untimed game |
+| `clock` | The time control, or `None` for an untimed game: the referee's key, the time settings, and the referee's hash-chain tip when the game takes its randomness from it |
 | `players`, `keys`, `rng_tips` | Per seat: wallet, session public key, hash-chain tip |
 | `config` | Your game's `Config` |
 
-`PROTOCOL_VERSION` is 4, so signatures made under an older protocol never verify
+`PROTOCOL_VERSION` is 5, so signatures made under an older protocol never verify
 under this one. `RULES_VERSION` does the same for your rules.
 
 ## Domain tags
@@ -135,6 +140,8 @@ one purpose can never be reused for another:
 | `REFEREE_STAMP_V1` | A referee attestation: `(context, seq, transcript, clock)` |
 | `REFEREE_LIVE_V1` | The referee's acknowledgement of a dispute: `(context, epoch, deadline)` |
 | `REFEREE_RESUME_V1` | The referee's approval to resume offchain play from forced play: `(context, epoch, anchor hash)` |
+| `REFEREE_TIP_V1` | The referee's commitment of its hash-chain tip to one game: `(chain id, channel, game id, tip)` |
+| `REFEREE_VOID_V1` | A void approval, to end a game whose roll waits for a referee that is down: `(context, epoch, anchor hash)`, signed by every seat |
 | `REFEREE_RNG_V1` | One hash-chain link |
 | `REFEREE_SEED_V1` | The seed handed to `resolve` |
 | `REFEREE_PROVED_V1` | The transition a proof commits to |
@@ -156,8 +163,8 @@ pub struct Batch<A> {
 It carries **one signature per seat**: that seat's last signature in the batch,
 or a zero signature if the seat has no step in it. The replay applies every
 step, remembers each seat's last message, and verifies only those final
-signatures. The referee's `Flag` and `Start` steps count for no seat; the
-attestation covers them.
+signatures. The referee's steps (`Flag`, `Start`, a roll) count for no seat;
+the attestation covers them.
 
 That's sufficient because a seat's last signature covers the transcript, and
 through it every earlier step. The trade-off is that the chain never sees
@@ -170,22 +177,25 @@ The Cairo tests `tampered_earlier_step_breaks_final_signature`,
 `intermediate_signature_is_not_a_final_one` and
 `seat_without_steps_signs_nothing` pin this down.
 
-## Three ways to apply steps
+## Four ways to apply steps
 
 | Function | Authenticates | Used for |
 | --- | --- | --- |
 | `replay` | Each seat's final signature, and in a timed game the referee's final attestation | `submit_history`, the proof adapter |
 | `force` | Nothing: every step must belong to one given seat, which the caller authenticates. The referee's steps never do | Forced play, where the wallet call authenticates the due seat |
+| `roll` | One step, the referee's roll: its value must be the next one of the hash chain the referee committed | Forced play that waits for the referee's roll, where anyone may post the value |
 | `apply_steps` | Nothing | Clients and tests that already verified every signature |
 
-All three extend the transcript identically, so their results can be mixed
+All four extend the transcript identically, so their results can be mixed
 freely: a forced step onchain chains into the next offchain step.
 
 ## Signer changes rank candidates
 
-`support_turn` counts changes of signer. When the channel compares two
+`support_turn` counts changes of signing seat. When the channel compares two
 histories in a dispute, the one with more signer changes wins, then the one
 with more steps. Say Alice signs a move, Bob answers, and then Alice submits the
 state from before Bob's answer. Bob's history has one more signer change, so it
 beats hers. Consecutive steps by one seat never outrank a branch the other seat
-acknowledged. See [The channel and disputes](/concepts/channel).
+acknowledged. The referee's steps count for neither seat: a `Start` or a roll
+acknowledges nothing, so it never raises `support_turn`. See
+[The channel and disputes](/concepts/channel).

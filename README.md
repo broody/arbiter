@@ -27,7 +27,7 @@ stateDiagram-v2
     DISPUTE --> ACTIVE: window ends, unfinished, the referee acknowledged
     FORCED --> FORCED: due seat plays onchain
     FORCED --> ACTIVE: every seat approves resuming, or the referee
-    FORCED --> SETTLED: game finished, or claim_timeout
+    FORCED --> SETTLED: game finished, claim_timeout, or void
     ACTIVE --> SETTLED: resign
 ```
 
@@ -69,6 +69,9 @@ Neither player can predict the roll, and neither can bias it, because both
 chains were committed at join. Refusing to reveal only stalls the game, and a
 stall ends in a forced reveal or a timeout loss.
 
+A timed game can take its rolls from its referee instead (below), so nobody
+waits for the opponent to come online and reveal.
+
 **Clocks (optional).** Two players can't prove time to each other, so a timed
 game names a **referee** in its terms, a third key that witnesses time:
 - The referee stamps every step with its own clock and signs the resulting
@@ -82,6 +85,17 @@ game names a **referee** in its terms, a third key that witnesses time:
 - The referee can't forge moves or results. It can only skew time, so an
   honest player's worst case is losing on time. If it disappears, the game
   falls back to the untimed dispute path.
+- A game can also take its **randomness from the referee**. The referee
+  commits a hash chain of its own, signed for that one game, and reveals its
+  next value as it stamps a step that asks for a roll. The roll is a hash of
+  that value and the acting player's, so it resolves at once.
+  - The referee can't bias a roll, and can't know one before the step
+    arrives. It could leak its next value to the acting player, so players
+    trust it not to.
+  - If the referee is down, such a game pauses: nobody can be timed out
+    while a roll waits for it. Anyone can post the referee's value onchain,
+    and after 3 days, or when both players agree, the game ends void, with no
+    result.
 
 A [keeper](keeper/README.md) can act as the referee: it already relays every
 step.
@@ -124,9 +138,9 @@ With Dojo, the game's onchain contract is one line per entrypoint. See
 [`dojo/examples/counter`](dojo/examples/counter/src/lib.cairo):
 
 ```cairo
-fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip: felt252) {
+fn open_dispute(ref self: ContractState, game_id: felt252, epoch: u32) {
     let mut world = self.world_default();
-    binding::join::<CounterRules>(ref world, game_id, session_key, rng_tip);
+    binding::open_dispute(ref world, game_id, epoch);
 }
 ```
 
@@ -135,7 +149,7 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 | Package | Path | What it does |
 |---|---|---|
 | `referee` | `core/` | The protocol and the channel's dispute logic as pure functions: step hashing and signatures, transcript replay, forced steps, hash-chain randomness, referee clocks, checkpoint approvals. No Dojo. Builds on Cairo 2.13 and 2.18 |
-| `referee_dojo` | `dojo/referee_dojo/` | Dojo models (`ChannelTerms`, `ChannelState`, `ProverAllowed`), the `ChannelUpdated` event, and one helper per entrypoint (create, join, submit, dispute, acknowledge, resolve, force, resume, timeout, resign, prover allowlist) |
+| `referee_dojo` | `dojo/referee_dojo/` | Dojo models (`ChannelTerms`, `ChannelState`, `ProverAllowed`), the `ChannelUpdated` event, and one helper per entrypoint (create, join, submit, dispute, acknowledge, resolve, force, roll, void, resume, timeout, resign, prover allowlist) |
 | `referee_adapter` | `adapter/referee_adapter/` | Proof adapter logic: the virtual replay that gets proved (`__execute__`) and `settle`, which checks the proof facts and relays the result. Cairo 2.18. A game's adapter contract is about 40 lines |
 | `referee_testing` | `testing/` | Test-only Cairo signer, so tests can sign messages that bind deployed addresses |
 | `@referee/sdk` | `sdk/` | JS copy of the protocol: hashing, signing, replay, a `Session` per client, a `Referee` for timed games, channel calldata codecs and proof payloads. Fixtures keep it byte-identical to the Cairo. `@referee/sdk/proving` requests a native proof of a session and builds the `settle` call. `@referee/sdk/store` persists sessions (IndexedDB or files) and refuses to sign a step that would equivocate. `@referee/sdk/keeper` talks to a keeper. Install from git: `npm install github:broody/referee#<rev>` |
@@ -144,10 +158,10 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 
 | | |
 |---|---|
-| Built and tested | Protocol core, referee clocks, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS hashing and replay, counter example (pure, as a Dojo world, and with an adapter) |
+| Built and tested | Protocol core, referee clocks, randomness from the referee, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS hashing and replay, counter example (pure, as a Dojo world, and with an adapter) |
 | Proven on Sepolia | Surround (Go) settles full games with one native SNIP-36 proof through `referee_adapter`; see [Surround's results](https://github.com/broody/surround/blob/main/offchain/RESULTS.md) |
 | Self-hosted proving | [`prover/`](prover/README.md): StarkWare's transaction prover built from source (PROOF1) behind a gateway that proves only allowlisted referee adapters. Settled a Surround game on Sepolia; its proofs are byte-identical to the hosted prover's |
-| Keeper | [`keeper/`](keeper/README.md): archives and forwards each game's verified steps, records equivocation, answers disputes, resolves and settles, and referees timed games. Tested end to end on a local Katana |
+| Keeper | [`keeper/`](keeper/README.md): archives and forwards each game's verified steps, records equivocation, answers disputes, resolves and settles, referees timed games and gives them their randomness. Tested end to end on a local Katana |
 | Not yet | PROOF2 large-path proving (network support expected ~2026-10-10), more than 2 seats |
 
 See [DESIGN.md](DESIGN.md) for the protocol details, the proving strategy and

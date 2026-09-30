@@ -13,6 +13,11 @@ players must trust to be fair and online. See
 [Clocks and the referee](/concepts/clocks) for how charging, stamps and flags
 work.
 
+A timed game can also take its randomness from the referee, so that no seat
+has to be online to reveal. That is a second opt-in, and a second thing to
+trust the referee with: see
+[Take randomness from the referee](#take-randomness-from-the-referee).
+
 ## Choose a time control
 
 A game's `TimeControl` is part of its terms:
@@ -21,6 +26,7 @@ A game's `TimeControl` is part of its terms:
 | --- | --- |
 | `referee` | The referee's **public** key. It signs stamps, starts and flags |
 | `settings` | The settings of the game's time rules |
+| `rng_tip` | Zero (or left out in JS) when the seats reveal randomness to each other, the default. Non-zero to take the game's randomness from the referee: see [Take randomness from the referee](#take-randomness-from-the-referee) |
 
 Most games use the standard time rules (`StandardTime` in Cairo,
 `standardTime` in the SDK, the default for a codec without `time`). Their
@@ -35,7 +41,8 @@ settings, in milliseconds:
 
 A turn is a run of steps while your game's `due` seat stays the same. A pending
 reveal is timed on its own, as a turn of one step for the revealer, so
-withholding a reveal burns the revealing seat's clock.
+withholding a reveal burns the revealing seat's clock. A roll the referee owes
+is charged to nobody.
 
 | Style | `turn_ms` | `bank_ms` | `increment_ms` | `byoyomi` |
 | --- | ---: | ---: | ---: | --- |
@@ -66,12 +73,12 @@ The referee is usually a [keeper](/infra/keeper) started with a referee key:
 
 ```json
 {
-  "referee": { "private_key_env": "KEEPER_REFEREE_KEY" }
+  "referee": { "private_key_env": "KEEPER_REFEREE_KEY", "rng_secret_env": "KEEPER_RNG_SECRET" }
 }
 ```
 
 ```bash
-KEEPER_PRIVATE_KEY=0x… KEEPER_REFEREE_KEY=0x… node keeper/server.mjs keeper/config.local.json
+KEEPER_PRIVATE_KEY=0x… KEEPER_REFEREE_KEY=0x… KEEPER_RNG_SECRET=0x… node keeper/server.mjs keeper/config.local.json
 ```
 
 The keeper referees every timed game whose terms name its referee key. It
@@ -81,6 +88,10 @@ one seq. `GET /info` shows its referee public key. With the game's Dojo
 `world` and `namespace` in its config, it also finds new timed games that name
 its key from the channel's `JOINED` events, so they get a referee even if no
 seat registers them.
+
+`rng_secret_env` is optional. With a randomness secret the keeper also gives
+randomness to the games that ask for it, and `GET /info` shows
+`randomness: true`.
 
 :::warning
 Use a referee key that is different from the keeper's account key, and from
@@ -106,6 +117,10 @@ await wallet.execute(contractCall(CHANNEL, 'create', [
 Joining a timed game accepts its referee. The time control is bound into the
 context, like every other term.
 
+This `clock` has no `rng_tip`, so the seats reveal randomness to each other.
+`join` then takes zeros for the referee's tip and its signature (see
+[Build the client](/guide/client#2-open-the-game-onchain)).
+
 ## Play a timed game
 
 In a timed game a step counts only once the referee has stamped it, so a seat
@@ -122,8 +137,8 @@ Stamps stay out of the transcript, so within your turn you can sign the next
 step before the last one comes back: each `store.move` signs from
 `session.tip`, the state after your pending steps.
 
-The other seat's steps, and the referee's `start` and `flag`, arrive through
-`pull` (or `follow`) as usual. Every stamped record carries its `stamp`
+The other seat's steps, and the referee's `start`, `flag` and rolls, arrive
+through `pull` (or `follow`) as usual. Every stamped record carries its `stamp`
 (referee time, in milliseconds) and the referee's `attestation`.
 `Session.receive` verifies both, and refuses an unstamped step in a timed game.
 
@@ -168,6 +183,79 @@ Once the due seat has used more than its time rules allow, the referee can
 A flagged game is a finished game like any other. Anyone can settle it, and a
 keeper does so on its own.
 
+## Take randomness from the referee
+
+By default the seats reveal randomness to each other, so every roll waits for
+the other seat. A timed game can take its rolls from its referee instead: the
+referee reveals as it stamps, and no seat has to be online to reveal.
+
+The referee can't bias a roll, but it knows its own next value ahead of time,
+so players trust it not to leak that value (see
+[Randomness](/concepts/randomness#what-the-referee-can-and-cant-do)). The
+referee must give randomness: a keeper does when it has a randomness secret.
+
+:::steps
+
+### Ask at create
+
+Pass a non-zero `rng_tip` in the time control. Any non-zero value asks. The
+game id doesn't exist yet, so the referee's real tip comes at join.
+
+```js
+const clock = {
+  referee: REFEREE_PUBLIC_KEY,
+  settings: { turn_ms: 60000, bank_ms: 0, increment_ms: 0, byoyomi: null },
+  rng_tip: 1n,   // ask for the referee's randomness
+}
+await wallet.execute(contractCall(CHANNEL, 'create', [
+  20, opponentAddress, publicKey(privateKey), tip, ADAPTER_ADDRESS, 3600,
+  0, ...encodeTimeControl(counter, clock),
+]))
+```
+
+### Fetch the referee's signed tip
+
+The joining seat asks the keeper for its tip for this game:
+
+```js
+const { rng_tip, signature } = await keeper.tip({ channel: CHANNEL, game_id: gameId })
+```
+
+The keeper reads the created game from the channel. It answers only if the
+game names the keeper's referee key with a non-zero `rng_tip`. The same game
+always gets the same tip.
+
+### Join with it
+
+```js
+await wallet.execute(contractCall(CHANNEL, 'join', [
+  gameId, publicKey(privateKey), tip,
+  rng_tip, signature.r, signature.s,   // the referee's tip and its signature
+]))
+```
+
+`join` checks the signature against the referee's key and puts the tip in the
+terms. It refuses a game that asked without a tip (`'Referee tip needed'`), and
+a tip the referee didn't sign for this game (`'Invalid session signature'`).
+Read the terms back as usual: `terms.clock.rng_tip` is now the referee's tip.
+
+### Play
+
+Send an action that needs a roll as `playRandom` with your next chain value,
+as in any game (`nextValue` is from
+[Build the client](/guide/client#randomness)). The keeper stamps it and rolls
+at once, so two records come back: your stamped step, then the referee's roll.
+
+```js
+await store.move(session, playRandom({ kind: GAMBLE, amount: 0 }, nextValue(session, mine.seat, mine)), mine.privateKey)
+const records = await keeper.submit(session, { store })   // your stamped step, then the roll
+```
+
+No seat sends a `reveal` in such a game. While the referee owes a roll,
+`session.due()` is `REFEREE` (254) and neither seat can be flagged.
+
+:::
+
 ## Disputes in a timed game
 
 While the referee is live, a dispute doesn't stop the clock. A keeper that
@@ -192,6 +280,24 @@ the start grace.
 
 A restarted keeper resumes each clock where its last stamp left it, so seats
 aren't charged for the referee's own downtime.
+
+### A roll that waits for the referee
+
+In a game that takes its randomness from the referee, no seat can give a roll.
+If a seat plays an action that needs one onchain, in forced play, forced play
+**pauses**: no seat is due, nobody can be timed out, and the deadline is set 3
+days ahead. During the pause:
+
+- anyone who holds the referee's next value posts it with `roll`, and forced
+  play goes on with a fresh window for the next seat;
+- the referee, once it is back, returns the game with `resume_by_referee` and
+  rolls offchain. A keeper does this, and also answers a roll it owed when it
+  stopped;
+- both seats can sign a void approval, and anyone then calls `void`.
+
+Once the 3 days have passed, anyone may call `void` without approvals. A void
+game settles with `REASON_VOID` (131): it has no winner, and it isn't a draw.
+[Build the client](/guide/client#5-watch-for-disputes) shows the calls.
 
 ## Referee without a keeper
 
@@ -224,6 +330,26 @@ const resume = referee.resumeSignature(channel.epoch, channel.anchor.hash)
 
 Anyone may send `acknowledge(game_id, epoch, signature)` and
 `resume_by_referee(game_id, epoch, signature)` to the game's system.
+
+To give a game its randomness too, keep a hash chain for it, sign its tip for
+the joining seat, and pass the chain as `rng`:
+
+```js
+import { Referee, RngChain, Session, sign, tipHash } from '@referee/sdk'
+
+const chain = new RngChain(CHAIN_SEED, 256)   // long enough for every roll of the game
+// The joining seat brings chain.tip and this signature to `join`.
+const tipSignature = sign(tipHash(counter, chainId, CHANNEL, gameId, chain.tip), REFEREE_PRIVATE_KEY)
+
+const referee = new Referee(new Session(counter, terms), REFEREE_PRIVATE_KEY, { rng: chain })
+const held = referee.session.steps.length
+referee.stamp(signedStepFromASeat)                 // rolls at once after a step that asks for randomness
+const records = referee.session.steps.slice(held)  // the stamped step, then the roll
+// … send the records to both seats, in order
+```
+
+`referee.roll()` answers a roll that is already pending, for example after a
+restart. See [`Referee`](/reference/sdk#rolls).
 
 Persist `referee.session` as the games go. A `Referee` built from a stored
 session resumes its clock at the last stamp.

@@ -37,7 +37,7 @@ What a game implements ([`rules.cairo`](https://github.com/broody/referee/blob/m
 
 | Constant | Type | Contract |
 | --- | --- | --- |
-| `TAG` | `felt252` | Domain tag, e.g. `'SURROUND'`. It leads the context, state, action, checkpoint, reopen, live, referee resume, stamp and seed hashes, which keeps hashes of different games apart. |
+| `TAG` | `felt252` | Domain tag, e.g. `'SURROUND'`. It leads the context, state, action, checkpoint, reopen, live, referee resume, tip, void, stamp and seed hashes, which keeps hashes of different games apart. |
 | `RULES_VERSION` | `u32` | Bound into the context hash. |
 | `SEATS` | `u8` | Number of seats. The protocol supports 2: `open` panics with `'Only 2 seats supported'` otherwise. |
 
@@ -53,7 +53,7 @@ What a game implements ([`rules.cairo`](https://github.com/broody/referee/blob/m
 | --- | --- |
 | `init(config: @Config) -> State` | The opening state. `open` calls it, and `referee_dojo`'s `create` calls it to reject an invalid config up front. |
 | `load(config: @Config, state: @State, witness: Witness) -> Scratch` | Check `witness` against `config` and `state`, and build scratch memory. Replay calls it once, with the start state. |
-| `apply(config: @Config, ref scratch: Scratch, state: State, seat: u8, action: Action) -> (State, Option<u8>)` | Apply `seat`'s action. Returns the new state and, if the action needs shared randomness, the seat that must reveal before play continues. |
+| `apply(config: @Config, ref scratch: Scratch, state: State, seat: u8, action: Action) -> (State, Option<u8>)` | Apply `seat`'s action. Returns the new state and, if the action needs shared randomness, the seat that must reveal before play continues. In a game that takes its randomness from the referee, the referee reveals instead, whichever seat is named. |
 | `resolve(config: @Config, ref scratch: Scratch, state: State, seed: felt252) -> State` | Complete the pending randomness request with the agreed seed. Games that never request randomness can panic here. |
 | `due(state: @State) -> u8` | The seat due to act. The protocol overrides it while a reveal is pending. In a timed game a turn ends when this value changes. |
 | `outcome(state: @State) -> Option<(u8, u8)>` | `Some((winner, reason))` once the game is over. `winner` is seat + 1 or `DRAW`; `reason` is in `1..=127`. A game bounds its own length here (a move or round limit), so it always ends. |
@@ -71,12 +71,13 @@ Defined in [`types.cairo`](https://github.com/broody/referee/blob/main/core/src/
 | Constant | Type | Value | Meaning |
 | --- | --- | --- | --- |
 | `NO_SEAT` | `u8` | `255` | `Envelope.last_seat` before any step has been applied. |
-| `REFEREE` | `u8` | `254` | The actor of a `Flag` or a `Start`. The referee is not a seat. |
+| `REFEREE` | `u8` | `254` | The actor of a `Flag`, a `Start` and a roll. The referee is not a seat. |
 | `DRAW` | `u8` | `0` | `Outcome.winner` for a drawn game. Otherwise `winner` is the winning seat + 1. |
 | `REASON_RESIGN` | `u8` | `128` | Finish reason of a resignation. |
 | `REASON_TIMEOUT` | `u8` | `129` | Finish reason of the referee's `Flag`. |
 | `REASON_ABANDON` | `u8` | `130` | Finish reason of `channel::claim_timeout`: the chain judged that the due seat missed its forced-play window, without any referee. |
-| `PROTOCOL_VERSION` | `felt252` | `4` | Bound into the context hash. Version 4 added `Move::Start`, recommits only after a reveal, the transcript cap (`max_steps`) and disputes a live referee returns to offchain play. Version 3 added optional referee clocks; version 2 made steps seat-implicit `Move`s with one final signature per seat. |
+| `REASON_VOID` | `u8` | `131` | Finish reason of `channel::void`: a roll waited too long for a referee that was down, or every seat agreed to stop waiting. No result: not a draw, whatever `winner` says. |
+| `PROTOCOL_VERSION` | `felt252` | `5` | Bound into the context hash. Version 5 added randomness from the referee (`TimeControl.rng_tip`), and referee steps no longer count as signer changes. Version 4 added `Move::Start`, recommits only after a reveal, the transcript cap (`max_steps`) and disputes a live referee returns to offchain play. Version 3 added optional referee clocks; version 2 made steps seat-implicit `Move`s with one final signature per seat. |
 
 Finish reasons `1..=127` are game-defined; the protocol reserves the rest. `PROTOCOL_VERSION` lives in `protocol`.
 
@@ -99,12 +100,13 @@ Finish reasons `1..=127` are game-defined; the protocol reserves the rest. `PROT
 
 ### TimeControl
 
-A timed game's time control, bound into its terms. The referee stamps every step with its own clock, in milliseconds. A turn is a run of steps while the game's `due` seat stays the same; the time it uses adds up in `Clock.used`, and the game's `ClockRules` settle it when the turn ends. A pending reveal is timed on its own, as a one-step turn for the revealer. See [Clocks and the referee](/concepts/clocks).
+A timed game's time control, bound into its terms. The referee stamps every step with its own clock, in milliseconds. A turn is a run of steps while the game's `due` seat stays the same; the time it uses adds up in `Clock.used`, and the game's `ClockRules` settle it when the turn ends. A pending reveal is timed on its own, as a one-step turn for the revealer. While the referee owes a roll, nobody is charged. See [Clocks and the referee](/concepts/clocks).
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `referee` | `felt252` | The referee's public key. It signs the attestation (`stamp_hash`), which also authenticates its `Flag` and `Start` steps, and `live_hash` and `referee_resume_hash`. |
+| `referee` | `felt252` | The referee's public key. It signs the attestation (`stamp_hash`), which also authenticates its `Flag` and `Start` steps and its rolls, and `live_hash`, `referee_resume_hash` and `tip_hash`. |
 | `settings` | `Span<felt252>` | The settings of the game's `ClockRules`, serialized (for `StandardTime`, a serialized [`Standard`](#standardtime)). |
+| `rng_tip` | `felt252` | The tip of the referee's own hash chain when the game takes its randomness from the referee. Zero when the seats reveal to each other. See [Randomness](/concepts/randomness#randomness-from-the-referee). |
 
 ### Clock
 
@@ -124,23 +126,24 @@ A timed game's clock, kept in `Envelope.clock`.
 | --- | --- | --- |
 | `seq` | `u32` | Number of steps applied since the opening state. |
 | `transcript` | `felt252` | Hash chain of step messages: `poseidon(transcript, action_hash)` per step, starting at `0`. |
-| `support_turn` | `u32` | Number of signer changes: it grows by one on each step whose actor differs from `last_seat` (the referee counts as an actor). Ranks dispute candidates, so consecutive steps by one seat never outrank a branch the other seat acknowledged. |
-| `last_seat` | `u8` | Actor of the last step, `NO_SEAT` before any. |
+| `support_turn` | `u32` | Number of changes of signing seat: it grows by one on each seat's step whose seat differs from `last_seat`. The referee's steps count for neither seat. Ranks dispute candidates, so consecutive steps by one seat never outrank a branch the other seat acknowledged. |
+| `last_seat` | `u8` | The last seat that signed a step, `NO_SEAT` before any. The referee's steps leave it as it is. |
 | `pending` | `Pending` | The open randomness request, if any. |
 | `rng_heads` | `Span<felt252>` | Last revealed hash-chain value per seat (the committed tip initially). |
 | `rng_fresh` | `Span<bool>` | Per seat: whether its head is a tip it committed and has not revealed from yet. A seat may `Recommit` only when this is `false`. |
+| `rng_referee` | `felt252` | The referee's last revealed hash-chain value (its committed tip, `TimeControl.rng_tip`, initially), or zero when the seats reveal to each other. |
 | `clock` | `Option<Clock>` | `None` for an untimed game. |
 | `outcome` | `Outcome` | The result once finished. |
 | `game` | `S` | The game's state. |
 
 ### Pending
 
-A randomness request waiting for `seat` to reveal.
+A randomness request waiting for `seat` to reveal: a seat, or `REFEREE`.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `active` | `bool` | Whether a reveal is due. |
-| `seat` | `u8` | The seat that must reveal. |
+| `seat` | `u8` | The seat that must reveal, or `REFEREE` when the game takes its randomness from the referee. |
 | `seq` | `u32` | Sequence number of the step that made the request. |
 | `entropy` | `felt252` | The requesting seat's revealed value. |
 
@@ -149,8 +152,8 @@ A randomness request waiting for `seat` to reveal.
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `finished` | `bool` | Whether the game is over. |
-| `winner` | `u8` | Winning seat + 1, or `DRAW`. |
-| `reason` | `u8` | Game-defined (`1..=127`), `REASON_RESIGN`, `REASON_TIMEOUT` or `REASON_ABANDON`. |
+| `winner` | `u8` | Winning seat + 1, or `DRAW`. It is also 0 when `reason` is `REASON_VOID`, which is no result and not a draw. |
+| `reason` | `u8` | Game-defined (`1..=127`), `REASON_RESIGN`, `REASON_TIMEOUT`, `REASON_ABANDON` or `REASON_VOID`. |
 
 ### Move
 
@@ -160,7 +163,7 @@ A randomness request waiting for `seat` to reveal.
 | --- | --- | --- | --- |
 | `Play` | `A` | The due seat | A game action. |
 | `PlayRandom` | `(A, felt252)` | The due seat | A game action that requests randomness, with the actor's next hash-chain value. |
-| `Reveal` | `felt252` | The pending seat | The pending seat's next hash-chain value. |
+| `Reveal` | `felt252` | The pending seat, or `REFEREE` | The pending seat's next hash-chain value, or the referee's (a roll) when the game takes its randomness from the referee. |
 | `Recommit` | `felt252` | The due seat | Replaces the seat's hash-chain head with a new tip, before the chain runs out. Only after the seat revealed from its current tip (`rng_fresh`). |
 | `Resign` | `u8` | The named seat | That seat concedes, at any time. |
 | `Flag` | none | `REFEREE` | The due seat's time ran out. Timed games only. |
@@ -196,6 +199,8 @@ fn checkpoint_hash<impl R: GameRules>(context: felt252, epoch: u32, state: felt2
 fn reopen_hash<impl R: GameRules>(context: felt252, epoch: u32, state: felt252) -> felt252;
 fn live_hash<impl R: GameRules>(context: felt252, epoch: u32, deadline: u64) -> felt252;
 fn referee_resume_hash<impl R: GameRules>(context: felt252, epoch: u32, state: felt252) -> felt252;
+fn tip_hash<impl R: GameRules>(chain_id: felt252, channel: felt252, game_id: felt252, tip: felt252) -> felt252;
+fn void_hash<impl R: GameRules>(context: felt252, epoch: u32, state: felt252) -> felt252;
 fn stamp_hash<impl R: GameRules>(context: felt252, seq: u32, transcript: felt252, clock: @Clock) -> felt252;
 ```
 
@@ -209,6 +214,8 @@ fn stamp_hash<impl R: GameRules>(context: felt252, seq: u32, transcript: felt252
 | `reopen_hash` | `signing_hash` of `TAG, 'REFEREE_REOPEN_V1', context, epoch, state`. | Every seat's approval to leave forced play from the anchor `state`. |
 | `live_hash` | `signing_hash` of `TAG, 'REFEREE_LIVE_V1', context, epoch, deadline`. | A timed game's referee shows it is live during the dispute with this `epoch` and `deadline` (`channel::acknowledge`). |
 | `referee_resume_hash` | `signing_hash` of `TAG, 'REFEREE_RESUME_V1', context, epoch, state`. | A timed game's referee returns it from forced play to offchain play on its own, from the anchor `state` (`channel::resume`). |
+| `tip_hash` | `signing_hash` of `TAG, 'REFEREE_TIP_V1', chain_id, channel, game_id, tip`. | The referee commits its hash-chain tip to one game. It names the game by its ids, since the game's context does not exist yet: the binding checks the signature when the last seat joins. A tip a seat made up would let that seat know every roll. |
+| `void_hash` | `signing_hash` of `TAG, 'REFEREE_VOID_V1', context, epoch, state`. | Every seat's approval to void a game whose roll waits for a referee that is down, from the anchor `state` (`channel::void`). |
 | `stamp_hash` | `signing_hash` of `TAG, 'REFEREE_STAMP_V1', context, seq, transcript` and the serialized clock. | The referee's attestation after each step. The last one covers every earlier stamp, since the clocks depend on all of them. |
 
 ### Checks and signatures
@@ -236,8 +243,8 @@ fn seed<impl R: GameRules>(context: felt252, seq: u32, requester: felt252, revea
 
 | Function | Behavior |
 | --- | --- |
-| `rng_next` | One hash-chain link: Poseidon of `'REFEREE_RNG_V1', value`. A reveal `v` is valid when `rng_next(v)` equals the seat's current head. |
-| `seed` | Poseidon of `TAG, 'REFEREE_SEED_V1', context, seq, requester, revealer`: the seed handed to `GameRules::resolve`. Replay passes the request's `Pending.seq`, the requester's revealed value and the revealer's value. |
+| `rng_next` | One hash-chain link: Poseidon of `'REFEREE_RNG_V1', value`. A reveal `v` is valid when `rng_next(v)` equals the revealer's current head: a seat's (`rng_heads`), or the referee's (`rng_referee`). |
+| `seed` | Poseidon of `TAG, 'REFEREE_SEED_V1', context, seq, requester, revealer`: the seed handed to `GameRules::resolve`. Replay passes the request's `Pending.seq`, the requester's revealed value and the revealer's value. The revealer is a seat, or the referee when the game takes its randomness from it. |
 
 ### Envelope and seats
 
@@ -249,9 +256,9 @@ fn actor<impl R: GameRules>(env: @Envelope<R::State>, step: @Move<R::Action>) ->
 
 | Function | Behavior | Panics |
 | --- | --- | --- |
-| `open` | The opening envelope: `seq` 0, `transcript` 0, `support_turn` 0, `last_seat` `NO_SEAT`, no pending request, `rng_heads` set to the tips, every `rng_fresh` `true`, an unfinished outcome and `R::init(config)`. A timed game starts with `Clock { seats: R::Time::open(settings, SEATS), used: 0, stamp: 0 }`. | `'Only 2 seats supported'`; `'Wrong tip count'` unless one tip per seat; `'Invalid tip'` for a zero tip; any `check_clock` panic. |
-| `due` | The pending seat while a reveal is pending, otherwise `R::due`. | |
-| `actor` | The seat a step belongs to: `Resign` names it, `Flag` and `Start` belong to `REFEREE`, `Reveal` to the pending seat, every other move to `R::due`. | `'No reveal due'` for a `Reveal` with nothing pending; `'Reveal pending'` for any other seat move while a reveal is pending. |
+| `open` | The opening envelope: `seq` 0, `transcript` 0, `support_turn` 0, `last_seat` `NO_SEAT`, no pending request, `rng_heads` set to the tips, every `rng_fresh` `true`, an unfinished outcome and `R::init(config)`. A timed game starts with `Clock { seats: R::Time::open(settings, SEATS), used: 0, stamp: 0 }` and `rng_referee` set to its time control's `rng_tip`. An untimed game has no clock and `rng_referee` 0. | `'Only 2 seats supported'`; `'Wrong tip count'` unless one tip per seat; `'Invalid tip'` for a zero tip; any `check_clock` panic. |
+| `due` | The pending seat while a reveal is pending, which is `REFEREE` while the referee owes a roll. Otherwise `R::due`. | |
+| `actor` | The seat a step belongs to: `Resign` names it, `Flag` and `Start` belong to `REFEREE`, `Reveal` to the pending seat (`REFEREE` when the referee owes a roll), every other move to `R::due`. | `'No reveal due'` for a `Reveal` with nothing pending; `'Reveal pending'` for any other seat move while a reveal is pending. |
 
 ### Replay
 
@@ -270,44 +277,53 @@ fn force<impl R: GameRules>(
     context: felt252, terms: @Terms<R::Config>, start: Envelope<R::State>,
     witness: R::Witness, seat: u8, steps: Span<Move<R::Action>>,
 ) -> Envelope<R::State>;
+
+fn roll<impl R: GameRules>(
+    context: felt252, terms: @Terms<R::Config>, start: Envelope<R::State>,
+    witness: R::Witness, value: felt252,
+) -> Envelope<R::State>;
 ```
 
-All three call `R::load` once with the start state and apply the steps in order, as described in [Each step](#each-step). They use `context` as given; they do not recompute it from `terms`.
+All four call `R::load` once with the start state and apply their steps in order, as described in [Each step](#each-step). `roll` applies one step, `Move::Reveal(value)`. They use `context` as given; they do not recompute it from `terms`.
 
 | Function | Authentication | Panics before or after the steps |
 | --- | --- | --- |
-| `replay` | For each seat with a step in the batch, verifies its final signature against `terms.keys` over the message of its last step: that message commits through the transcript to every earlier step. In a timed game with at least one step, verifies `attestation` by `clock.referee` over the end state's `stamp_hash`, which covers every stamp. Referee steps (`Flag`, `Start`) need no seat signature; the attestation is what authenticates them. | `'Wrong key count'` or `'Wrong signature count'` unless one per seat; `'Wrong stamp count'` unless a timed batch has one stamp per step; `'Unexpected stamps'` for stamps in an untimed game; `'Unexpected signature'` for a non-zero signature from a seat with no step; `'Unexpected attestation'` for a non-zero attestation when none is checked; any `verify` panic. |
+| `replay` | For each seat with a step in the batch, verifies its final signature against `terms.keys` over the message of its last step: that message commits through the transcript to every earlier step. In a timed game with at least one step, verifies `attestation` by `clock.referee` over the end state's `stamp_hash`, which covers every stamp. Referee steps (`Flag`, `Start`, a roll) need no seat signature; the attestation is what authenticates them, and a roll must also follow the referee's hash chain. | `'Wrong key count'` or `'Wrong signature count'` unless one per seat; `'Wrong stamp count'` unless a timed batch has one stamp per step; `'Unexpected stamps'` for stamps in an untimed game; `'Unexpected signature'` for a non-zero signature from a seat with no step; `'Unexpected attestation'` for a non-zero attestation when none is checked; any `verify` panic. |
 | `apply_steps` | None. Steps from any seat, stamped when `stamps` has one per step, all unstamped when it is empty. For clients and tools that already verified every signature, and for tests. | `'Wrong stamp count'` unless `stamps` is empty or matches `steps`. |
-| `force` | None: every step's actor must be `seat`, which the caller authenticates (a wallet call). Steps are unstamped, so a timed game's clock pauses. | `'Not your step'` for a step whose actor is not `seat`. A referee step fails before that check, with `'Referee step needs a stamp'` in a timed game and `'Untimed game'` otherwise. |
+| `force` | None: every step's actor must be `seat`, which the caller authenticates (a wallet call). Steps are unstamped, so a timed game's clock pauses. | `'Not your step'` for a step whose actor is not `seat`, the referee's roll included. A `Flag` or a `Start` fails before that check, with `'Referee step needs a stamp'` in a timed game and `'Untimed game'` otherwise. |
+| `roll` | No signature: `value` must be the referee's next hash-chain value, so the chain the referee committed authenticates it. The step is unstamped, so a timed game's clock pauses, as in `force`. For forced play, where anyone may post the value onchain. | `'No roll due'` unless `start` has a pending request whose seat is `REFEREE`; `'Invalid reveal'` for a value that is not the referee's next. |
 
 ### Each step
 
-Every step, in all three functions:
+Every step, in all four functions:
 
 1. Panics with `'Game already finished'` if the outcome is finished.
 2. Finds the actor with `actor` and panics with `'Invalid seat'` unless it is below `SEATS` or `REFEREE`.
 3. Computes the step's message, `action_hash(context, seq, transcript, step)`.
-4. Charges the clock in a timed game (see below). In an untimed game it panics with `'Timed state'` if the envelope has a clock and `'Untimed game'` for a stamp or a referee step (`Flag`, `Start`). A timed game whose envelope has no clock panics with `'Untimed state'`.
-5. Applies the move:
+4. Panics with `'Roll pending'` for a `Flag` while the referee owes a roll (`due` is `REFEREE`): nobody's time is running.
+5. Charges the clock in a timed game (see below). In an untimed game it panics with `'Timed state'` if the envelope has a clock and `'Untimed game'` for a stamp or a referee step (`Flag`, `Start`, a roll). A timed game whose envelope has no clock panics with `'Untimed state'`.
+6. Applies the move:
    - `Play`: `R::apply`.
-   - `PlayRandom(action, entropy)`: `R::apply`, which must name another seat to reveal (`'Unexpected entropy'`, `'Invalid reveal seat'`). Then checks `entropy` against the actor's hash-chain head, advances it, clears the actor's `rng_fresh`, and opens a request for that seat with `Pending.seq` set to this step's `seq`.
-   - `Reveal(value)`: checks `value` against the pending seat's head, advances it, clears its `rng_fresh`, clears the request and calls `R::resolve` with `seed(context, pending.seq, pending.entropy, value)`.
+   - `PlayRandom(action, entropy)`: `R::apply`, which must name another seat to reveal (`'Unexpected entropy'`, `'Invalid reveal seat'`). Then checks `entropy` against the actor's hash-chain head, advances it, clears the actor's `rng_fresh`, and opens a request with `Pending.seq` set to this step's `seq`. The request waits for the seat `R::apply` named. When `rng_referee` is non-zero it waits for `REFEREE` instead, whichever seat the rules name.
+   - `Reveal(value)`: a seat's reveal checks `value` against the pending seat's head, advances it and clears its `rng_fresh`. The referee's (a roll) checks `value` against `rng_referee` and advances that. Either clears the request and calls `R::resolve` with `seed(context, pending.seq, pending.entropy, value)`.
    - `Recommit(tip)`: `'Invalid tip'` if `tip` is zero; `'Nothing revealed to recommit'` if the actor's `rng_fresh` is set. Replaces the actor's head with `tip` and sets its `rng_fresh`.
    - `Resign(seat)`: clears any request; the outcome becomes `forfeit(seat, REASON_RESIGN)`.
    - `Flag`: clears any request; the outcome becomes `forfeit(payer, REASON_TIMEOUT)`, where the payer is the seat on the clock (`due`).
    - `Start`: changes nothing beyond the clock.
 
-   A hash-chain value must be non-zero with `rng_next(value)` equal to the seat's head, or the step panics with `'Invalid reveal'`.
-6. If the outcome is still unfinished, records `R::outcome` when it returns `Some` (`'Invalid winner'`, `'Invalid finish reason'`).
-7. If the outcome is still unfinished, no reveal is pending and `seq + 1 >= R::max_steps(config)`, the transcript is at its cap: the outcome becomes `R::adjudicate(config, state)`, with the same checks.
-8. In a timed game, if `R::due` (which ignores pending reveals) changed, the turn is over: `R::Time::settle` settles the previous turn seat's `used` (with `reveal` false), and `used` resets to 0.
-9. Increments `support_turn` if the actor differs from `last_seat`, sets `last_seat`, increments `seq` and extends `transcript` with the message.
+   A hash-chain value must be non-zero with `rng_next(value)` equal to the revealer's head, or the step panics with `'Invalid reveal'`.
+7. If the outcome is still unfinished, records `R::outcome` when it returns `Some` (`'Invalid winner'`, `'Invalid finish reason'`).
+8. If the outcome is still unfinished, no reveal is pending and `seq + 1 >= R::max_steps(config)`, the transcript is at its cap: the outcome becomes `R::adjudicate(config, state)`, with the same checks.
+9. In a timed game, if `R::due` (which ignores pending reveals) changed, the turn is over: `R::Time::settle` settles the previous turn seat's `used` (with `reveal` false), and `used` resets to 0.
+10. If the actor is a seat, increments `support_turn` when it differs from `last_seat`, and sets `last_seat` to it. A referee step changes neither: it acknowledges nothing.
+11. Increments `seq` and extends `transcript` with the message.
 
 The clock charge goes to the seat on the clock (the payer, `due` before the step), whichever seat acts:
 
-- An unstamped step pauses the clock (`stamp` becomes 0) and charges no one. A referee step needs a stamp: `'Referee step needs a stamp'`.
+- An unstamped step pauses the clock (`stamp` becomes 0) and charges no one. A `Flag` or a `Start` needs a stamp: `'Referee step needs a stamp'`. Only a roll may go unstamped among referee steps, which is how `roll` applies it.
 - A stamp of 0 panics with `'Invalid stamp'`.
 - A `Start` sets `stamp` to its stamp, paused or not, and charges no one; `used` stays as it is. Its stamp must not be earlier than the last one (`'Stamp out of order'`).
+- While the referee owes a roll (the payer is `REFEREE`), any stamped step does the same: it sets `stamp`, charges no one and must not be earlier than the last stamp. That covers the roll itself and a seat's `Resign`. The wait is nobody's time.
 - While the clock is paused, the first stamp starts it without charging anyone. A `Flag` there panics with `'Clock not running'`.
 - Otherwise the stamp must not be earlier than the last one (`'Stamp out of order'`). The elapsed time adds to the turn's `used`. While a reveal is pending, the reveal is timed on its own: its `used` is the elapsed time alone, and the turn's `used` is left untouched.
 - The payer has flagged once that `used` exceeds `R::Time::limit(settings, seats, payer, state)`. A step other than a `Flag` then panics with `'Flag fell'`.
@@ -382,6 +398,7 @@ use referee::clocks::{Standard, encode};
 let clock = TimeControl {
     referee: referee_key,
     settings: encode(@Standard { turn_ms: 0, bank_ms: 180000, increment_ms: 2000, byoyomi: Option::None }),
+    rng_tip: 0, // the seats reveal to each other
 };
 ```
 
@@ -401,6 +418,9 @@ let clock = TimeControl {
 | `CANCELLED` | `u8` | `5` |
 | `MIN_RESPONSE_SECONDS` | `u32` | `300` |
 | `MAX_RESPONSE_SECONDS` | `u32` | `604800` (7 days) |
+| `PAUSE_SECONDS` | `u64` | `259200` (3 days) |
+
+`PAUSE_SECONDS` is how long forced play waits for a referee that owes a roll. After that anyone may end the game void.
 
 ### StateRef and Channel
 
@@ -411,7 +431,7 @@ let clock = TimeControl {
 | `hash` | `felt252` | `state_hash` of the envelope. |
 | `seq` | `u32` | The envelope's `seq`. |
 | `support_turn` | `u32` | The envelope's `support_turn`. |
-| `due` | `u8` | `due` of the envelope, including a pending reveal. |
+| `due` | `u8` | `due` of the envelope, including a pending reveal: `REFEREE` while the referee owes a roll. |
 | `outcome` | `Outcome` | The envelope's outcome. |
 
 `state_ref<impl R: GameRules>(env: @Envelope<R::State>) -> StateRef` builds one.
@@ -419,14 +439,14 @@ let clock = TimeControl {
 | `Channel` field | Type | Meaning |
 | --- | --- | --- |
 | `status` | `u8` | One of the status constants. |
-| `epoch` | `u32` | Grows by one on every commit (approved `receive`, `resolve`, `forced`) and on `resume`, `claim_timeout` and `resign`. Transitions that take an `epoch` panic with `'Stale channel epoch'` unless it matches. |
+| `epoch` | `u32` | Grows by one on every commit (approved `receive`, `resolve`, `forced`, `rolled`) and on `resume`, `void`, `claim_timeout` and `resign`. Transitions that take an `epoch` panic with `'Stale channel epoch'` unless it matches. |
 | `context` | `felt252` | `context_hash` of the terms, set at `join`. |
 | `response_seconds` | `u32` | Window length. |
 | `anchor` | `StateRef` | The committed state. |
 | `candidate` | `StateRef` | The best dispute candidate; equal to `anchor` outside disputes. |
 | `anchor_block` | `u64` | Block of the last anchor change or `resume`. A proof that starts from the anchor must be based at or after it. |
 | `candidate_block` | `u64` | Block the candidate was set in: by the last commit, `join` or `resume`, or by an unapproved `receive`. A proof that extends the candidate must be based at or after it. |
-| `deadline` | `u64` | End of the current dispute or forced-play window, or 0. |
+| `deadline` | `u64` | End of the current dispute or forced-play window, or of the pause while the referee owes a roll in forced play. Otherwise 0. |
 | `acked_epoch` | `u32` | Epoch of the dispute the referee of a timed game acknowledged (`acknowledge`); 0 until one is. |
 | `acked_deadline` | `u64` | Deadline of that dispute; 0 until one is. |
 | `result` | `Outcome` | The final result once `SETTLED`. |
@@ -443,10 +463,12 @@ Each function takes the channel by value and returns the updated channel. "Commi
 | `receive(channel, epoch: u32, end: StateRef, approved: bool, now: u64, block: u64)` | `ACTIVE` or `DISPUTE` (`'Channel not offchain'`); matching epoch (`'Stale channel epoch'`); in a dispute, `now < deadline` (`'Dispute window closed'`); `end.seq > anchor.seq` (`'No channel progress'`). | `end` was proved or replayed from the anchor or from the candidate; the binding checks which. **Approved:** `end.support_turn >= candidate.support_turn` (`'Older than candidate'`). Commits `end` and clears the deadline; status `SETTLED` with `end`'s outcome if finished, otherwise `ACTIVE` (this ends a dispute). **Not approved:** `end` must outrank the candidate, by a higher `support_turn` or an equal one and a higher `seq` (`'Not a newer candidate'`). It becomes the candidate and `candidate_block` becomes `block`. From `ACTIVE` it opens a dispute with `deadline = now + response_seconds`; during a dispute the deadline does not move. Starting from the candidate lets a long transcript arrive in segments within one window. |
 | `open_dispute(channel, epoch: u32, now: u64)` | `ACTIVE` (`'Not active'`); matching epoch. | Status `DISPUTE`, `deadline = now + response_seconds`, candidate reset to the anchor. |
 | `acknowledge(channel, epoch: u32, now: u64)` | `DISPUTE` (`'No dispute'`); matching epoch; `now < deadline` (`'Dispute window closed'`). | Sets `acked_epoch = epoch` and `acked_deadline = deadline`. Status, epoch and deadline are unchanged. The binding checks that the game is timed and verifies the referee's signature over `live_hash`. |
-| `resolve(channel, epoch: u32, now: u64, block: u64, timed: bool)` | `DISPUTE` (`'No dispute'`); matching epoch; `now >= deadline` (`'Dispute window open'`). | Commits the candidate. Finished: `SETTLED` with its outcome, deadline 0. Unfinished, with `timed` true and this dispute acknowledged (`acked_epoch == epoch` and `acked_deadline == deadline`): `ACTIVE`, deadline 0, so a dispute never pauses a live referee's clock. Otherwise: `FORCED` with a fresh `deadline = now + response_seconds`. |
-| `forced(channel, epoch: u32, seat: u8, end: StateRef, now: u64, block: u64)` | `FORCED` (`'Not in forced play'`); matching epoch; `now < deadline` (`'Turn deadline passed'`); `seat == anchor.due` (`'Not your turn'`); `end.seq > anchor.seq` (`'No channel progress'`). | Commits `end`. Finished: `SETTLED`, deadline 0. Otherwise stays `FORCED` with `deadline = now + response_seconds`. |
-| `resume(channel, epoch: u32, approved: bool, now: u64, block: u64)` | `FORCED` (`'Not in forced play'`); matching epoch; `now < deadline` (`'Turn deadline passed'`); `approved` (`'Need every approval'`). | Status `ACTIVE`, deadline 0, epoch + 1, `anchor_block` and `candidate_block` become `block`. The anchor is unchanged. `approved` means every seat's reopen approval or, in a timed game, the referee's signature; the binding checks either. |
-| `claim_timeout(channel, epoch: u32, seat: u8, now: u64)` | `FORCED` (`'Not in forced play'`); matching epoch; `now >= deadline` (`'Turn window open'`); `seat != anchor.due` (`'Only waiting seat'`). | Epoch + 1, deadline 0, `SETTLED` with `forfeit(anchor.due, REASON_ABANDON)`. |
+| `resolve(channel, epoch: u32, now: u64, block: u64, timed: bool)` | `DISPUTE` (`'No dispute'`); matching epoch; `now >= deadline` (`'Dispute window open'`). | Commits the candidate. Finished: `SETTLED` with its outcome, deadline 0. Unfinished, with `timed` true and this dispute acknowledged (`acked_epoch == epoch` and `acked_deadline == deadline`): `ACTIVE`, deadline 0, so a dispute never pauses a live referee's clock. Otherwise: `FORCED` with a fresh `deadline = now + response_seconds`, or `now + PAUSE_SECONDS` when the candidate waits for the referee's roll (its `due` is `REFEREE`). |
+| `forced(channel, epoch: u32, seat: u8, end: StateRef, now: u64, block: u64)` | `FORCED` (`'Not in forced play'`); matching epoch; `now < deadline` (`'Turn deadline passed'`); `seat == anchor.due` (`'Not your turn'`); `end.seq > anchor.seq` (`'No channel progress'`). | Commits `end`. Finished: `SETTLED`, deadline 0. Otherwise stays `FORCED` with `deadline = now + response_seconds`. If `end` waits for the referee's roll, forced play pauses instead: `deadline = now + PAUSE_SECONDS`, and no seat is due until `rolled`, `resume` or `void`. |
+| `rolled(channel, epoch: u32, end: StateRef, now: u64, block: u64)` | `FORCED` (`'Not in forced play'`); matching epoch; `now < deadline` (`'Turn deadline passed'`); `anchor.due == REFEREE` (`'No roll due'`); `end.seq > anchor.seq` (`'No channel progress'`). | `end` is the anchor with the referee's value applied (`protocol::roll`; the binding runs it). Commits `end`. Finished: `SETTLED`, deadline 0. Otherwise stays `FORCED` with a fresh deadline, set as `forced` sets it: the next seat's response window. It takes no seat: anyone may post the roll. |
+| `void(channel, epoch: u32, approved: bool, now: u64)` | `FORCED` (`'Not in forced play'`); matching epoch; `anchor.due == REFEREE` (`'No roll due'`); `approved`, or `now >= deadline` (`'Pause still open'`). | Epoch + 1, deadline 0, `SETTLED` with `Outcome { finished: true, winner: DRAW, reason: REASON_VOID }`: no result. `approved` means every seat signed `void_hash`; the binding checks. Without it, the pause must have lasted `PAUSE_SECONDS`. |
+| `resume(channel, epoch: u32, approved: bool, now: u64, block: u64)` | `FORCED` (`'Not in forced play'`); matching epoch; `now < deadline` (`'Turn deadline passed'`); `approved` (`'Need every approval'`). | Status `ACTIVE`, deadline 0, epoch + 1, `anchor_block` and `candidate_block` become `block`. The anchor is unchanged: after a pause it still waits for the roll, which the referee gives offchain. `approved` means every seat's reopen approval or, in a timed game, the referee's signature; the binding checks either. |
+| `claim_timeout(channel, epoch: u32, seat: u8, now: u64)` | `FORCED` (`'Not in forced play'`); matching epoch; `anchor.due != REFEREE` (`'Waiting for the referee'`); `now >= deadline` (`'Turn window open'`); `seat != anchor.due` (`'Only waiting seat'`). | Epoch + 1, deadline 0, `SETTLED` with `forfeit(anchor.due, REASON_ABANDON)`. While the referee owes a roll no seat is due, and nobody wins this way. |
 | `resign(channel, seat: u8)` | `is_live` (`'Channel not live'`). | Epoch + 1, deadline 0, `SETTLED` with `forfeit(seat, REASON_RESIGN)`. No proof needed. |
 | `is_live(channel: @Channel) -> bool` | | `true` in `ACTIVE`, `DISPUTE` or `FORCED`. |
 
@@ -459,15 +481,15 @@ stateDiagram-v2
   DISPUTE --> DISPUTE: acknowledge, unapproved receive
   DISPUTE --> ACTIVE: approved receive, acknowledged resolve
   DISPUTE --> FORCED: resolve, unfinished
-  FORCED --> FORCED: forced, unfinished
+  FORCED --> FORCED: forced or rolled, unfinished
   FORCED --> ACTIVE: resume
   ACTIVE --> SETTLED: approved receive, finished
   DISPUTE --> SETTLED: resolve or receive, finished
-  FORCED --> SETTLED: forced finished, claim_timeout
+  FORCED --> SETTLED: forced or rolled finished, claim_timeout, void
   SETTLED --> [*]
 ```
 
-`resign` settles from any live status.
+`resign` settles from any live status. `FORCED` covers the pause: while the anchor's `due` is `REFEREE`, only `rolled`, `resume`, `void` and `resign` apply.
 
 ## referee_testing
 

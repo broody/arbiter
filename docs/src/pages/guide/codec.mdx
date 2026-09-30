@@ -92,7 +92,7 @@ Cairo's `Serde` layout:
 | Function | Mirrors | Returns |
 | --- | --- | --- |
 | `init(config)` | `init` | The opening state |
-| `apply(config, state, seat, action, scratch)` | `apply` | `[state, request]`, where `request` is `null` or the seat that must reveal randomness |
+| `apply(config, state, seat, action, scratch)` | `apply` | `[state, request]`, where `request` is `null` or the seat that must reveal randomness. In a game that takes its randomness from the referee, the referee reveals in that seat's place |
 | `resolve(config, state, seed, scratch)` | `resolve` | The state once the requested randomness arrives. `seed` is a BigInt |
 | `due(state)` | `due` | The seat whose turn it is |
 | `outcome(state)` | `outcome` | `null`, or `[winner, reason]` with `winner` the seat plus 1, or 0 for a draw |
@@ -178,11 +178,12 @@ Unit tests on each side aren't enough. You want the Cairo to replay what the JS
 signed. The counter does this with a fixture generator:
 
 1. [`sdk/scripts/gen-counter-fixtures.mjs`](https://github.com/broody/referee/blob/main/sdk/scripts/gen-counter-fixtures.mjs)
-   plays scripted games through the JS SDK (one untimed, and three timed games
-   a referee stamps: on the standard time rules, with byo-yomi, and on the
-   hourglass rules, whose clock the referee starts with a `start`), signs every
-   step, and writes the terms, steps, signatures, context hash and expected
-   final state as Cairo constants in `examples/counter/src/fixtures.cairo`.
+   plays scripted games through the JS SDK (one untimed, and four timed games
+   a referee stamps: on the standard time rules, with byo-yomi, on the
+   hourglass rules, whose clock the referee starts with a `start`, and one
+   that takes its randomness from the referee), signs every step, and writes
+   the terms, steps, signatures, context hash and expected final state as
+   Cairo constants in `examples/counter/src/fixtures.cairo`.
 2. The Cairo tests replay those steps with `replay` and compare the context,
    the state hash and the final envelope to what the JS computed.
 3. `scripts/check.sh` regenerates the fixtures and fails if they changed, so

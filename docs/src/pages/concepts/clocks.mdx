@@ -4,11 +4,15 @@ A timed game names a **referee** in its terms: a third key that witnesses time.
 Players sign moves; the referee signs time. This page explains exactly how the
 clocks run. For setting one up, see [Add a clock](/guide/clocks).
 
+A timed game can also take its randomness from its referee. This page covers
+what that does to the clocks. The rolls themselves are in
+[Randomness](/concepts/randomness#randomness-from-the-referee).
+
 ## The pieces
 
 | | Where | What |
 | --- | --- | --- |
-| `TimeControl { referee, settings }` | `Terms.clock` (`Option`) | The referee's public key and the settings of the game's time rules, serialized. Fixed at creation and bound into the context |
+| `TimeControl { referee, settings, rng_tip }` | `Terms.clock` (`Option`) | The referee's public key and the settings of the game's time rules, serialized, both fixed at creation. `rng_tip` is the tip of the referee's hash chain when the game takes its randomness from the referee, fixed at join, and zero otherwise. All three are bound into the context |
 | `Clock { seats, used, stamp }` | `Envelope.clock` (`Option`) | Each seat's clocks as the time rules keep them (serialized), the time the current turn has used, and the referee time of the last stamp |
 | time rules | `GameRules::Time`, a `ClockRules` | What a seat has, and what a finished turn costs |
 | stamp | Beside each step, as `u64` milliseconds | The referee's time when the step arrived |
@@ -91,33 +95,40 @@ about 40 lines.
 
 Each stamped step charges the time since the last stamp to the seat **on the
 clock**. That's the due seat, or the revealing seat while a reveal is pending.
+While the referee owes a roll, no seat is on the clock.
 The protocol's `charge` does this, identically in Cairo and JS:
 
 1. **Unstamped step** (a forced move onchain): the clock **pauses**. Its stamp
-   becomes 0 and nobody is charged. The referee's steps can't be unstamped
-   (`'Referee step needs a stamp'`).
+   becomes 0 and nobody is charged. A `Flag` or a `Start` can't be unstamped
+   (`'Referee step needs a stamp'`). A roll can: anyone posts it onchain in
+   forced play.
 2. **`Start`**, the referee's step: the clock runs from its stamp, paused or
    not, and nobody is charged. The stamp may not go backwards
    (`'Stamp out of order'`).
-3. **The clock isn't running** (stamp is 0: before the first stamp, or after a
+3. **The referee owes a roll**: the step sets the clock's stamp, as a `Start`
+   does, and nobody is charged. That's the roll itself, or a seat's
+   resignation. The wait for a roll is nobody's time.
+4. **The clock isn't running** (stamp is 0: before the first stamp, or after a
    pause): the step starts it at its stamp, and nobody is charged.
-4. **Otherwise**, `elapsed = stamp - last stamp` (stamps may not go backwards):
+5. **Otherwise**, `elapsed = stamp - last stamp` (stamps may not go backwards):
    - the turn's `used` grows by `elapsed`. A pending reveal is a turn of one
      step for the revealer: `elapsed` alone, settled at once with the time
      rules' `settle`, and the turn's `used` is left alone;
    - if that exceeds the rules' `limit` for the seat on the clock, the step
      fails with **`'Flag fell'`**.
-5. **When the turn ends**, meaning your game's `due` seat changed, the time
+6. **When the turn ends**, meaning your game's `due` seat changed, the time
    rules' `settle` turns the finished turn's `used` into the clocks the next
    turn starts with, and `used` starts again from 0.
 
-Withholding a reveal burns the revealer's clock.
+Withholding a reveal burns the revealer's clock. A roll the referee owes burns
+nobody's: the next seat's time runs from the roll's stamp.
 
 ## A flag
 
 The referee's `Flag` step is valid only once the seat on the clock has used
-more than its `limit`. Before that it fails with `'Clock not expired'`, and on
-a paused clock with `'Clock not running'`. A flag ends the game: the seat on
+more than its `limit`. Before that it fails with `'Clock not expired'`, on
+a paused clock with `'Clock not running'`, and while the referee owes a roll
+with `'Roll pending'`. A flag ends the game: the seat on
 the clock forfeits with `REASON_TIMEOUT` (129). A flag carries no seat
 signature (its signature is zero). Its validity is the clock arithmetic above,
 and the referee's attestation of the resulting state covers its stamp like any
@@ -131,7 +142,8 @@ flagAt = last stamp + limit of the seat on the clock - used + 1
 
 where `used` counts as 0 while a reveal is pending. `session.flagAt()` computes
 it. `Referee.deadline()` gives the same time in wall-clock milliseconds, for a
-timer.
+timer. Both are `null` while the clock is paused, while the referee owes a
+roll, and once the game is over.
 
 ## Starting the clock
 
@@ -176,11 +188,12 @@ Batch { steps, stamps, signatures, attestation }
 
 The replay re-runs the charging with the given stamps, then verifies the one
 attestation over the resulting clocks. A tampered stamp changes the clocks,
-which breaks the attestation. The referee's `Flag` and `Start` steps need no
-seat signature: the attestation covers them. An untimed batch has no stamps
-and a zero attestation. The Cairo tests `timed_replay_matches_sdk`,
-`intermediate_attestation_is_not_a_final_one` and
-`tampered_stamp_breaks_the_attestation` cover this.
+which breaks the attestation. The referee's `Flag` and `Start` steps and its
+rolls need no seat signature: the attestation covers them. An untimed batch
+has no stamps and a zero attestation. The Cairo tests
+`timed_replay_matches_sdk`, `intermediate_attestation_is_not_a_final_one`,
+`tampered_stamp_breaks_the_attestation` and `rolled_replay_matches_sdk` cover
+this.
 
 A flagged game is a finished history like any other, and the flagged seat
 can't outrank it without the referee attesting a competing branch.
@@ -205,10 +218,17 @@ stop a live referee's clock, so the referee has two calls of its own (see
 
 Anyone may send either signature. A keeper that referees the game sends both.
 
+In a game that takes its randomness from the referee, a seat may play a
+`PlayRandom` onchain during forced play. No seat is due after it, so forced
+play **pauses** for up to 3 days: nobody can be timed out while the roll waits
+for the referee. The referee's `resume_by_referee` ends the pause too, and it
+then rolls offchain. See
+[The channel and disputes](/concepts/channel#a-roll-that-waits-for-the-referee).
+
 ## Trust
 
-The referee is the one party of a timed game that players trust, and only with
-time:
+The referee is the one party of a timed game that players trust: with time,
+and with randomness in a game that takes its randomness from it.
 
 - **It can't** forge, reorder or edit moves: seats sign them. It can't settle
   anything the rules wouldn't produce either.
@@ -221,8 +241,14 @@ time:
 - **It can't equivocate unnoticed.** Two attestations at one seq with different
   transcripts are evidence. The keeper never stamps a second step at a seq it
   has already stamped.
-- **Players opt in** per game: the referee's key is in the terms, and joining
-  accepts it.
+- **It can't bias a roll, but it could leak one.** Its roll values are fixed
+  by the hash chain it committed, and the seed also mixes in the requester's
+  value. But it knows its own next value ahead of time, and players trust it
+  not to tell a seat. A referee that withholds a roll can only stall the game,
+  which at worst ends void. See
+  [Randomness](/concepts/randomness#what-the-referee-can-and-cant-do).
+- **Players opt in** per game: the referee's key is in the terms, with its
+  hash-chain tip when it gives the randomness, and joining accepts both.
 
 ## Cost
 
@@ -234,6 +260,10 @@ time:
 These gas figures are for the counter game in `cairo-test`. Offchain, a stamp
 costs the referee about 2.3 ms, and applying a stamped step costs a client
 about 2.4 ms, mostly two signature checks.
+
+Randomness from the referee adds one felt to every envelope (`rng_referee`) and
+one to a timed game's terms (`rng_tip`). A roll is one more step, with its
+stamp.
 
 ## The keeper as referee
 
@@ -251,6 +281,9 @@ whose terms name that key:
   forced play, it stamps nothing and flags no one.
 - **Resumes** each clock at its last stamp after a restart, so seats aren't
   charged for its downtime.
+- **Rolls**, when it also has a randomness secret, for the games that take
+  their randomness from it: it signs each game's tip, and reveals its next
+  chain value as soon as it stamps a step that asks for randomness.
 - **Registers** the timed games that join onchain naming its key, when its
   config names the game's Dojo `world` and `namespace`, so such a game gets a
   referee even if neither seat registers it.

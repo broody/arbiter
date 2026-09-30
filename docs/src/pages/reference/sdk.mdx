@@ -27,7 +27,7 @@ A game codec is a plain object that mirrors the game's `GameRules` in JS. The SD
 | `encodeAction` | `(action)` | Cairo Serde of `Action`. Part of every step message and of replay calldata. |
 | `encodeState` | `(state)` | Cairo Serde of `State`. Part of the state hash and of envelope calldata. |
 | `init` | `(config)` | The opening state. |
-| `apply` | `(config, state, seat, action, scratch)` | Applies `seat`'s action. Returns `[state, request]`: the new state, and `null` or the seat that must reveal randomness. |
+| `apply` | `(config, state, seat, action, scratch)` | Applies `seat`'s action. Returns `[state, request]`: the new state, and `null` or the seat that must reveal randomness. In a game that takes its randomness from the referee, the referee reveals instead, whichever seat is named. |
 | `resolve` | `(config, state, seed, scratch)` | Completes the pending randomness request with `seed`. Returns the new state. |
 | `due` | `(state)` | The seat due to act. The protocol overrides it while a reveal is pending. |
 | `outcome` | `(state)` | `null` while the game runs, then `[winner, reason]`: `winner` is the winning seat + 1, or 0 for a draw, and `reason` is 1 to 127. |
@@ -99,27 +99,28 @@ export const counter = {
 
 | Name | Value | What it is |
 | --- | --- | --- |
-| `PROTOCOL_VERSION` | `4n` | Bound into the context hash, so signatures from other versions never verify. |
+| `PROTOCOL_VERSION` | `5n` | Bound into the context hash, so signatures from other versions never verify. |
 | `NO_SEAT` | `255` | `last_seat` before any step. |
-| `REFEREE` | `254` | The actor of a `flag` or `start` step: the referee of a timed game, not a seat. |
+| `REFEREE` | `254` | The actor of a `flag`, a `start` and a roll: the referee of a timed game, not a seat. |
 | `REASON_RESIGN` | `128` | Outcome reason after `resign`. |
 | `REASON_TIMEOUT` | `129` | Outcome reason after `flag`: the referee flagged the due seat of a timed game. |
 | `REASON_ABANDON` | `130` | Outcome reason when the chain judges that the due seat missed its forced-play window (`claim_timeout`). No step produces it. |
+| `REASON_VOID` | `131` | Outcome reason when a roll waited too long for a referee that was down, or every seat agreed to stop waiting (the channel's `void`). No result: not a draw, though `winner` is 0. No step produces it. |
 | `MAX_CLOCK_MS` | `2592000000` | Upper bound on each time-control setting: 30 days. |
 | `MAX_PERIODS` | `255` | Upper bound on byo-yomi periods. |
 | `MOVE_PLAY`, `MOVE_PLAY_RANDOM`, `MOVE_REVEAL`, `MOVE_RECOMMIT`, `MOVE_RESIGN`, `MOVE_FLAG`, `MOVE_START` | `0` to `6` | Move kinds, equal to the Cairo `Move` variant index. |
-| `ZERO_SIGNATURE` | `{ r: 0n, s: 0n }`, frozen | The final signature of a seat with no step in a batch, an untimed batch's attestation, "no approval", and the signature on the referee's `flag` and `start` records. |
+| `ZERO_SIGNATURE` | `{ r: 0n, s: 0n }`, frozen | The final signature of a seat with no step in a batch, an untimed batch's attestation, "no approval", and the signature on the referee's `flag`, `start` and roll records. |
 | `POSEIDON_BACKEND` | `'wasm'` or `'js'` | Which Poseidon implementation `poseidon` runs: WebAssembly, or starknet.js's JavaScript where WebAssembly cannot run (e.g. a page whose Content-Security-Policy forbids it). |
 
 ## Moves
 
-A step is a move object. Only `resign` names its seat. Every other move belongs to the seat the state says is due (`actorOf`), and `flag` and `start` belong to the referee. See [Steps and transcripts](/concepts/protocol).
+A step is a move object. Only `resign` names its seat. Every other move belongs to the seat the state says is due (`actorOf`), and `flag` and `start` belong to the referee. So does a `reveal` when the game takes its randomness from the referee (`terms.clock.rng_tip`): a roll. See [Steps and transcripts](/concepts/protocol).
 
 | Name | Signature | What it does |
 | --- | --- | --- |
 | `play` | `(action)` | `{ kind: MOVE_PLAY, action }`: the due seat's game action. |
 | `playRandom` | `(action, entropy)` | `{ kind: MOVE_PLAY_RANDOM, action, entropy }`: the due seat's action whose `apply` requests randomness, with the seat's next hash-chain value. |
-| `reveal` | `(value)` | `{ kind: MOVE_REVEAL, value }`: the next hash-chain value of the seat the pending request names. |
+| `reveal` | `(value)` | `{ kind: MOVE_REVEAL, value }`: the next hash-chain value of the seat the pending request names, or the referee's when it owes the roll. |
 | `recommit` | `(tip)` | `{ kind: MOVE_RECOMMIT, tip }`: the due seat replaces its chain tip. Allowed once per reveal: only after the seat revealed a value from its current chain (`rng_fresh`). Not allowed while a reveal is pending. |
 | `resign` | `(seat)` | `{ kind: MOVE_RESIGN, seat }`: `seat` concedes, at any time. The other seat wins with `REASON_RESIGN`. |
 | `flag` | `()` | `{ kind: MOVE_FLAG }`: the referee's step once the due seat's time has run out. That seat loses with `REASON_TIMEOUT`. |
@@ -142,14 +143,41 @@ A step is a move object. Only `resign` names its seat. Every other move belongs 
 | `reopenHash` | `(game, context, epoch, stateHash)` | The reopen approval message, under `'REFEREE_REOPEN_V1'`. |
 | `liveHash` | `(game, context, epoch, deadline)` | What the referee of a timed game signs to show it is live during a dispute (`live_hash`), under `'REFEREE_LIVE_V1'`. See [`Referee.acknowledgement`](#referee). |
 | `refereeResumeHash` | `(game, context, epoch, stateHash)` | What the referee of a timed game signs to return it from forced play on its own (`referee_resume_hash`), under `'REFEREE_RESUME_V1'`. See [`Referee.resumeSignature`](#referee). |
+| `tipHash` | `(game, chainId, channel, gameId, tip)` | What the referee signs to commit its hash-chain tip to one game (`tip_hash`), under `'REFEREE_TIP_V1'`. The channel checks the signature when the last seat joins. A seat checks it too before it signs the terms of a game no channel anchors: a tip another seat made up would let that seat know every roll. |
+| `voidHash` | `(game, context, epoch, stateHash)` | What every seat signs to void a game whose roll waits for a referee that is down (`void_hash`), under `'REFEREE_VOID_V1'`. `stateHash` is the channel's anchor hash. |
 | `stateHash` | `(game, env)` | Poseidon of the game tag, `'REFEREE_STATE_V1'` and `encodeEnvelope(game, env)`. The channel stores its anchor as this hash. |
 | `termsTypedData` | `(game, terms)` | The SNIP-12 typed data each seat's wallet signs to play a game that no channel anchors onchain: domain `{ name: 'referee', version: '1', chainId, revision: '1' }`, with `terms.chain_id` as a short string, and a `Game` message `{ game, game_id, context }`, where `context` is `contextHash(game, terms)`. The context binds every term, so the signature binds the wallet (`terms.players[seat]`) to its session key (`terms.keys[seat]`). Sign it with the wallet (`account.signMessage`); a keeper checks it against the account contract. |
 | `rngNext` | `(value)` | The next hash-chain value: `poseidon([tag('REFEREE_RNG_V1'), value])`. |
 | `rngChain` | `(seed, len)` | `len + 1` values from `seed`, each `rngNext` of the one before. `chain[len]` is the tip to commit. Reveal `chain[len - 1]`, then `chain[len - 2]`, and so on. |
-| `seed` | `(game, context, seq, requester, revealer)` | The seed `resolve` receives: Poseidon of the game tag, `'REFEREE_SEED_V1'`, the context, the request's `seq`, and the chain values the requesting and the revealing seat revealed for it. |
+| `RngChain` | class | A long hash chain kept as checkpoints, for a referee that holds one per game. See [RngChain](#rngchain). |
+| `seed` | `(game, context, seq, requester, revealer)` | The seed `resolve` receives: Poseidon of the game tag, `'REFEREE_SEED_V1'`, the context, the request's `seq`, and the chain values the requester and the revealer revealed for it. The revealer is a seat, or the referee. |
 | `publicKey` | `(privateKey)` | The Stark public key (x coordinate) as a `BigInt`. |
 | `sign` | `(message, privateKey)` | An ECDSA signature `{ r, s }` over `message`. |
 | `verify` | `(message, signature, key)` | Whether `signature` is valid for `message` under public key `key`. Accepts either y parity, as the Cairo verifier does. Returns `false` instead of throwing. |
+
+### RngChain
+
+```js
+new RngChain(seed, length, every = 64)
+```
+
+The hash chain `rngChain(seed, length)`, kept as checkpoints instead of every value. A referee that gives games their randomness holds one chain per game, long enough for every roll, and passes it to [`Referee`](#referee) as `rng`. Building it costs `length` hashes. It keeps one value in every `every`, and the stretch between two checkpoints it last read. Reveals walk the chain back one value at a time, so they cost about two hashes each; a `head` outside that stretch costs at most about `2 × every`. Throws `Invalid chain` unless `length` and `every` are positive safe integers.
+
+| Name | Signature | What it does |
+| --- | --- | --- |
+| `length`, `every` | | As constructed. |
+| `tip` | | The value to commit: `rngChain(seed, length)[length]`. |
+| `before` | `(head)` | The value that hashes to `head`, or `null` if `head` is not on the chain or is its first value. |
+
+```js
+import { RngChain, sign, tipHash } from '@referee/sdk'
+
+const chain = new RngChain(chainSeed, 256)
+// The referee commits the tip to one game by signing it.
+const signature = sign(tipHash(counter, chainId, channel, gameId, chain.tip), refereeKey)
+// The game's terms then carry the tip as clock.rng_tip.
+chain.before(chain.tip) // the value of the referee's first roll
+```
 
 ## Terms, envelopes and steps
 
@@ -159,7 +187,7 @@ Terms are everything bound into the context hash:
 {
   chain_id, channel, game_id, prover, // felts
   response_seconds,                   // number
-  clock,     // { referee, settings }, or null or absent when untimed
+  clock,     // { referee, settings, rng_tip }, or null or absent when untimed
   players,   // wallet addresses, by seat
   keys,      // session public keys, by seat
   rng_tips,  // committed hash-chain tips, by seat
@@ -167,30 +195,31 @@ Terms are everything bound into the context hash:
 }
 ```
 
-`clock.referee` is the referee's public key and `clock.settings` the settings of the game's [time rules](#time-rules), e.g. `{ turn_ms, bank_ms, increment_ms, byoyomi }` for `standardTime`.
+`clock.referee` is the referee's public key and `clock.settings` the settings of the game's [time rules](#time-rules), e.g. `{ turn_ms, bank_ms, increment_ms, byoyomi }` for `standardTime`. `clock.rng_tip` is the tip of the referee's hash chain when the game takes its randomness from the referee. It is 0 or absent when the seats reveal to each other.
 
 An envelope wraps the game's state:
 
 ```js
 {
   seq, transcript, support_turn, last_seat,
-  pending: { active, seat, seq, entropy }, // a randomness request waiting for `seat` to reveal
+  pending: { active, seat, seq, entropy }, // a randomness request waiting for `seat` to reveal: a seat, or REFEREE
   rng_heads,                               // each seat's current chain head
   rng_fresh,                               // by seat: true until the seat reveals from its current chain
+  rng_referee,                             // the referee's current chain head, or 0n when the seats reveal
   clock,                                   // { seats, used, stamp }, or null when untimed
   outcome: { finished, winner, reason },
   game,                                    // the game's state
 }
 ```
 
-`clock.seats` is each seat's clocks as the game's time rules keep them, `clock.used` the time used in the current turn, and `clock.stamp` the last stamp, or 0 while the clock is paused.
+`support_turn` counts changes of signing seat and `last_seat` is the last seat that signed: the referee's steps change neither. `clock.seats` is each seat's clocks as the game's time rules keep them, `clock.used` the time used in the current turn, and `clock.stamp` the last stamp, or 0 while the clock is paused.
 
 | Name | Signature | What it does |
 | --- | --- | --- |
 | `encodeTerms` | `(game, t)` | Cairo Serde of `Terms<Config>`. |
-| `open` | `(game, terms)` | The opening envelope (`open` in protocol.cairo): seq 0, transcript 0, `last_seat` `NO_SEAT`, chain heads at the tips, every `rng_fresh` `true`, `game.init(terms.config)` and, in a timed game, the clock `{ seats: time.open(settings, 2), used: 0, stamp: 0 }`, paused. Throws `Only 2 seats supported` unless there are 2 `rng_tips`, `Invalid tip` for a zero tip, and `checkTimeControl`'s errors. |
-| `due` | `(game, env)` | The seat due to act: the pending reveal's seat, otherwise `game.due(env.game)`. |
-| `actorOf` | `(game, env, step)` | The seat a step belongs to (`actor` in protocol.cairo): `step.seat` for `resign`, `REFEREE` for `flag` and `start`, the pending seat for `reveal`, otherwise `game.due`. Throws `No reveal due` for a `reveal` with nothing pending, and `Reveal pending` for any other move while a reveal is pending. |
+| `open` | `(game, terms)` | The opening envelope (`open` in protocol.cairo): seq 0, transcript 0, `last_seat` `NO_SEAT`, chain heads at the tips, every `rng_fresh` `true`, `game.init(terms.config)` and, in a timed game, the clock `{ seats: time.open(settings, 2), used: 0, stamp: 0 }`, paused. `rng_referee` is `terms.clock.rng_tip`, or `0n` without one or in an untimed game. Throws `Only 2 seats supported` unless there are 2 `rng_tips`, `Invalid tip` for a zero tip, and `checkTimeControl`'s errors. |
+| `due` | `(game, env)` | The seat due to act: the pending reveal's seat, which is `REFEREE` while the referee owes a roll, otherwise `game.due(env.game)`. |
+| `actorOf` | `(game, env, step)` | The seat a step belongs to (`actor` in protocol.cairo): `step.seat` for `resign`, `REFEREE` for `flag` and `start`, the pending seat for `reveal` (`REFEREE` for the referee's roll), otherwise `game.due`. Throws `No reveal due` for a `reveal` with nothing pending, and `Reveal pending` for any other move while a reveal is pending. |
 | `forfeit` | `(seat, reason)` | The outcome when `seat` resigns or runs out of time: `{ finished: true, winner: 2 - seat, reason }`, a win for the other seat. |
 | `encodeStep` | `(game, step)` | Cairo `Move<A>` Serde: the variant index, then the payload. Throws `Unknown move`. |
 | `encodeEnvelope` | `(game, env)` | Cairo `Envelope<State>` Serde. |
@@ -202,9 +231,9 @@ For timed games. See [Clocks and the referee](/concepts/clocks) and [Add a clock
 | Name | Signature | What it does |
 | --- | --- | --- |
 | `checkTimeControl` | `(game, c)` | Rejects a time control a game could not be played under (`check_clock`). Accepts `null`. Throws `Invalid referee` for a zero referee key, then runs the time rules' `check(c.settings)`. |
-| `flagAt` | `(game, terms, env)` | The earliest referee time at which the due seat can be flagged: the last stamp, plus the time rules' `limit` for that seat, less the time it has used this turn (0 while a reveal is pending), plus 1. `null` while the clock is paused, once the game is over, and for an untimed game. |
+| `flagAt` | `(game, terms, env)` | The earliest referee time at which the due seat can be flagged: the last stamp, plus the time rules' `limit` for that seat, less the time it has used this turn (0 while a reveal is pending), plus 1. `null` while the clock is paused, while the referee owes a roll, once the game is over, and for an untimed game. |
 | `timeLeft` | `(game, terms, env, at)` | Each seat's clock at referee time `at`, for display, by seat: the time rules' `view`. The due seat's counts the time it has used since its turn began, including the time since the last stamp unless the clock is paused. The other seats show what they start their next turn with, and so do all seats once the game is over. `null` for an untimed game, or time rules without `view`. |
-| `encodeTimeControl` | `(game, c)` | Cairo Serde of `TimeControl`: `referee`, then `encodeSettings(c.settings)` as a span. |
+| `encodeTimeControl` | `(game, c)` | Cairo Serde of `TimeControl`: `referee`, then `encodeSettings(c.settings)` as a span, then `rng_tip` (0 when absent). |
 | `encodeClock` | `(game, c)` | Cairo Serde of `Clock`: `encodeClock(c.seats)` of the time rules as a span, then `used` and `stamp`. |
 | `stampHash` | `(game, context, env)` | What the referee signs after each step (`stamp_hash`): a signing hash under `'REFEREE_STAMP_V1'` of `env.seq`, `env.transcript` and `encodeClock(game, env.clock)`. The last attestation covers every earlier stamp, since the clocks depend on all of them. |
 | `standardTime` | object | The standard time rules. See [standardTime](#standardtime). |
@@ -215,8 +244,10 @@ How `applyStep` charges a stamped step, mirroring `charge` in protocol.cairo. `l
 - A pending reveal is a one-step turn for the revealer: it is charged only its own time, settled at once with `settle(…, reveal = true)`, and leaves the turn's `used` alone.
 - When `game.due` changes, the turn ends: `settle(…, reveal = false)` settles the `used` of the seat whose turn it was, and the next turn starts from 0.
 - An unstamped step pauses the clock (`stamp` becomes 0). The first stamp after a pause starts it again without charging anyone.
-- A `flag` is valid only once the due seat's time has run out, and never while the clock is paused.
+- A `flag` is valid only once the due seat's time has run out, and never while the clock is paused or the referee owes a roll.
 - A `start` restarts the clock at its stamp and charges no one, whether or not the clock is paused. Its stamp must not be earlier than the last one.
+- While the referee owes a roll (`due` is `REFEREE`), a stamped step charges no one and sets the clock's stamp: the roll itself, or a seat's `resign`. That wait is nobody's time. Its stamp must not be earlier than the last one.
+- Among the referee's steps only a roll may go unstamped, as the channel applies it in forced play.
 
 ### Time rules
 
@@ -313,8 +344,8 @@ Each entry of `session.steps`:
   transcript,   // the transcript at that position
   message,      // actionHash(game, context, seq, transcript, step)
   step,         // the move
-  signature,    // { r, s }; ZERO_SIGNATURE on the referee's flag and start
-  seat,         // 0 or 1, or REFEREE for a flag or start
+  signature,    // { r, s }; ZERO_SIGNATURE on the referee's flag, start and roll
+  seat,         // 0 or 1, or REFEREE for a flag, a start or a roll
   stamp,        // timed games: the referee's time for the step
   attestation,  // timed games: the referee's signature over stampHash of the state reached
 }
@@ -330,14 +361,14 @@ session.receive(signed)
 
 Verifies and applies a signed step: the other seat's, one this client signed with `sign`, or, in a timed game, a stamped record from the referee. `signed` is `{ step, signature }`, plus `stamp` and `attestation` in a timed game; a full step record works too.
 
-1. Checks the actor's signature against `terms.keys[seat]`. The referee's `flag` and `start` carry no seat signature.
+1. Checks the actor's signature against `terms.keys[seat]`. The referee's `flag`, `start` and roll carry no seat signature.
 2. Requires a stamp in a timed game, and rejects a stamp or attestation in an untimed one.
-3. Applies the step to copies of the state (`applyStep`).
+3. Applies the step to copies of the state (`applyStep`). A roll must be the referee's next hash-chain value.
 4. In a timed game, checks the referee's attestation of the state reached.
 
 Returns the new step record, which is appended to `steps`. A rejected step changes nothing. `receive` does not change `lastSigned`.
 
-In a timed game, when the stamped record of our oldest pending step arrives, that step leaves `pending`. Any other step at that position, such as a `flag`, a `start` or the other seat's `resign`, drops every pending step.
+In a timed game, when the stamped record of our oldest pending step arrives, that step leaves `pending`. Any other step at that position, such as a `flag`, a `start`, a roll or the other seat's `resign`, drops every pending step.
 
 Throws `Invalid session signature`, `Timed games need the referee's stamp on every step`, `Stamp in an untimed game`, `Invalid referee attestation`, and the [step errors](#step-errors).
 
@@ -353,12 +384,12 @@ Checks our own step against the rules on copies of the state and signs it at the
 
 - A mark before `start` is superseded by the anchor, and is not checked.
 - At the mark's seq, only the identical step is signed. It re-signs to the same signature.
-- Past the mark, the history (`steps`, then `pending`) must contain the marked step. The one exception is a referee step (a `start`) that took the mark's position from the same transcript: our step was never stamped, so no timed replay can use it, and signing on is no equivocation.
+- Past the mark, the history (`steps`, then `pending`) must contain the marked step. The one exception is a referee step (a `start` or a roll) that took the mark's position from the same transcript: our step was never stamped, so no timed replay can use it, and signing on is no equivocation.
 - Behind the mark, nothing is signed until the missing steps arrive.
 
 | Message | When |
 | --- | --- |
-| `Invalid seat` | The step belongs to no seat: a `flag`, a `start`, or `resign` of a seat other than 0 or 1. |
+| `Invalid seat` | The step belongs to no seat: a `flag`, a `start`, a `reveal` while the referee owes the roll, or `resign` of a seat other than 0 or 1. |
 | `Wrong signing key` | `privateKey` is not the actor's session key in `terms.keys`. |
 | `Session is behind seq ${mark.seq}, which this key signed` | The mark is ahead of the `tip`. |
 | `Would equivocate: this key signed a different step at seq ${mark.seq}` | The mark is a different step at that seq. |
@@ -379,7 +410,7 @@ session.move(step, privateKey)
 session.stamp(signed, stamp, privateKey)
 ```
 
-As the referee of a timed game: verifies a seat's signed step, or a `flag` or `start` step, applies it at referee time `stamp`, signs `stampHash` of the state it reaches with `privateKey`, and returns the record, with `stamp` and `attestation`, to send to the seats. `signed.signature` defaults to `ZERO_SIGNATURE`. [`Referee`](#referee) chooses the stamps. Throws `Untimed game`, `Wrong referee key`, `Invalid session signature`, `Timed games need the referee's stamp on every step` for a `null` stamp, and the [step errors](#step-errors).
+As the referee of a timed game: verifies a seat's signed step, or a `flag`, a `start` or a roll (a `reveal` of the referee's next hash-chain value), applies it at referee time `stamp`, signs `stampHash` of the state it reaches with `privateKey`, and returns the record, with `stamp` and `attestation`, to send to the seats. `signed.signature` defaults to `ZERO_SIGNATURE`. [`Referee`](#referee) chooses the stamps. Throws `Untimed game`, `Wrong referee key`, `Invalid session signature`, `Timed games need the referee's stamp on every step` for a `null` stamp, and the [step errors](#step-errors).
 
 ### Other methods
 
@@ -392,7 +423,7 @@ As the referee of a timed game: verifies a seat's signed step, or a `flag` or `s
 | `batch` | `()` | `batchOf(this.steps)`: steps, stamps, final signatures and attestation, as replay calldata takes them. |
 | `witness` | `()` | The witness for the current state, e.g. when it becomes the next anchor. `null` for a codec without `witness`. |
 | `stateHash` | `()` | `stateHash(game, env)`. |
-| `due` | `()` | The seat due to act. |
+| `due` | `()` | The seat due to act, or `REFEREE` while the referee owes a roll. |
 | `checkpointSignature` | `(epoch, privateKey)` | This seat's approval of the current state at `epoch`: a signature over `checkpointHash`. These are the `acks` of `submit_history` and `settle`. |
 | `reopenSignature` | `(epoch, anchorHash, privateKey)` | This seat's approval to reopen from `anchorHash` at `epoch`: a signature over `reopenHash`. |
 | `flagAt` | `()` | `flagAt(game, terms, env)`: the referee time at which the due seat can be flagged, or `null`. |
@@ -408,7 +439,7 @@ Session.import(game, record, { lastSigned } = {})
 
 ```js
 {
-  version: 4,
+  version: 5,
   terms,
   start,    // the start envelope
   witness,  // session.startWitness
@@ -418,7 +449,7 @@ Session.import(game, record, { lastSigned } = {})
 
 The record shares objects with the session; `structuredClone` it before changing it. Signing marks and pending steps are not part of it. To store it as text, use `stringify` from [`@referee/sdk/store`](/reference/store#stringify-and-parse), which keeps `BigInt`s.
 
-`Session.import` rebuilds a session from such a record, verifying every step with `receive`. `lastSigned` is as for the constructor. Throws `Unsupported transcript version` unless `version` is 4, and any error of `receive`.
+`Session.import` rebuilds a session from such a record, verifying every step with `receive`. `lastSigned` is as for the constructor. Throws `Unsupported transcript version` unless `version` is 5, and any error of `receive`.
 
 ### Example
 
@@ -442,25 +473,29 @@ bob.stateHash() === alice.stateHash() // true
 ## Referee
 
 ```js
-new Referee(session, privateKey, { now = Date.now() } = {})
+new Referee(session, privateKey, { now = Date.now(), rng = null } = {})
 ```
 
 The referee of a timed game: it stamps each seat's step as it arrives and flags the due seat once that seat's time has run out. `session` is the referee's verified copy of the game, which keeps every stamped step. Throws `Untimed game` and `Wrong referee key`.
 
 Referee time is wall-clock milliseconds less an `offset` fixed at construction: `now` less the session's last stamp, or 0 before the first stamp. The clock resumes where the last stamp left it, so a referee restarted from a stored session never charges a seat for its own downtime. Keep one `Referee` per game for as long as the game runs.
 
+In a game that takes its randomness from the referee (`terms.clock.rng_tip`), `rng` is the referee's hash chain for it: anything with `before(head)`, such as an [`RngChain`](#rngchain), whose tip is that `rng_tip`. The referee then reveals its next value as soon as it stamps a step that asks for randomness.
+
 | Name | Signature | What it does |
 | --- | --- | --- |
 | `session` | | The referee's session. |
 | `privateKey` | | The referee's private key. |
+| `rng` | | The referee's hash chain for the game, or `null`. |
 | `offset` | | Wall-clock time less referee time, in milliseconds. |
 | `time` | `(now = Date.now())` | Referee time at wall-clock `now`: never before the last stamp, never 0. |
-| `stamp` | `(signed, now = Date.now())` | Stamps and applies a seat's signed step (`{ step, signature }`) arriving at `now`, and returns the attested record to send to the seats. Throws `Flag fell` once the due seat's time has run out: call `flag` then. |
+| `stamp` | `(signed, now = Date.now())` | Stamps and applies a seat's signed step (`{ step, signature }`) arriving at `now`, and returns the attested record to send to the seats. Throws `Flag fell` once the due seat's time has run out: call `flag` then. If the step asks the referee for randomness, the roll follows it at once, as the session's next step, with the same stamp. See [Rolls](#rolls). |
+| `roll` | `(now = Date.now())` | The attested record of the roll the referee owes, its next hash-chain value, or `null` when it owes none. `stamp` rolls by itself. Call `roll` for a session that starts with a roll pending, such as one back from forced play. Throws `No hash-chain value for this roll` when `rng` has no value for it. |
 | `flag` | `(now = Date.now())` | The attested `flag` record once the due seat's time has run out at `now`, otherwise `null`. |
 | `start` | `(now = Date.now())` | The attested `start` record at `now`: the clock runs from here, and the time since the last stamp is charged to no one. For a clock that is still paused before the first move, and after play resumes from forced play. |
 | `acknowledgement` | `(epoch, deadline)` | The referee's `acknowledge` signature for the dispute at `epoch` ending at `deadline`: a signature over `liveHash`. |
 | `resumeSignature` | `(epoch, anchorHash)` | The referee's signature returning the game from forced play at `epoch`, from the anchor `anchorHash`: a signature over `refereeResumeHash`. |
-| `deadline` | `()` | Wall-clock time from which the due seat can be flagged, or `null` while the clock is paused or the game is over. |
+| `deadline` | `()` | Wall-clock time from which the due seat can be flagged, or `null` while the clock is paused, the referee owes a roll or the game is over. |
 
 ```js
 import { Referee } from '@referee/sdk'
@@ -477,7 +512,29 @@ if (at !== null) setTimeout(() => {
 }, at - Date.now())
 ```
 
-A keeper started with a referee key does this for the timed games that name its key. See [Keeper](/infra/keeper).
+### Rolls
+
+With `rng`, `stamp` answers a request for randomness in the same call:
+
+```js
+import { Referee, RngChain, Session } from '@referee/sdk'
+
+const chain = new RngChain(chainSeed, 256) // its tip is terms.clock.rng_tip
+const referee = new Referee(new Session(counter, terms), refereeKey, { rng: chain })
+
+const held = referee.session.steps.length
+referee.stamp(signed)                             // a seat's playRandom
+const records = referee.session.steps.slice(held) // the stamped step, then the roll
+// Send the records to both seats, in order.
+```
+
+- `stamp` returns the seat's step record. The roll is the session's next record: a `reveal` with seat `REFEREE`, a zero signature, the same stamp and its own attestation.
+- Before it stamps a `playRandom` in such a game, `stamp` checks that `rng` has the next value, and throws `No hash-chain value for this roll` otherwise. It never stamps a request it could not answer.
+- `roll` answers a roll that is already pending: after a restart between a stamp and its roll, or once a game is back from forced play, where a seat asked for a roll onchain.
+- The roll charges no one. The next seat's time runs from the roll's stamp.
+- When the terms carry no `rng_tip`, the seats reveal to each other and `rng` is not used.
+
+A keeper started with a referee key does this for the timed games that name its key, and with a randomness secret it rolls for them too. See [Keeper](/infra/keeper).
 
 ## rebase
 
@@ -516,15 +573,16 @@ A submission without every seat's approval becomes the channel's dispute candida
 | --- | --- |
 | `Game already finished` | Any step after the outcome is final. |
 | `No reveal due` | A `reveal` with no request pending. |
-| `Reveal pending` | A move other than `reveal`, `resign`, `flag` or `start` while a reveal is pending. |
+| `Reveal pending` | A move other than `reveal`, `resign`, `flag` or `start` while a reveal is pending: a seat's, or the referee's roll. |
 | `Invalid seat` | The actor is neither seat 0, seat 1 nor the referee. |
+| `Roll pending` | A `flag` while the referee owes a roll: nobody's time is running. |
 | `Untimed state` | Timed terms, and an envelope without a clock. |
 | `Timed state` | Untimed terms, and an envelope with a clock. |
-| `Untimed game` | A stamp, a `flag` or a `start` in an untimed game. |
+| `Untimed game` | A stamp, a `flag`, a `start` or a roll in an untimed game. |
 | `Randomness requested` | `play` of an action whose `apply` requests randomness. |
 | `Unexpected entropy` | `playRandom` of an action whose `apply` does not. |
 | `Invalid reveal seat` | `apply` asked the actor itself, or a seat above 1, to reveal. |
-| `Invalid reveal` | A revealed value, or `playRandom` entropy, that is 0 or whose `rngNext` is not the seat's chain head. |
+| `Invalid reveal` | A revealed value, or `playRandom` entropy, that is 0 or whose `rngNext` is not the revealer's chain head: the seat's in `rng_heads`, or the referee's `rng_referee` for a roll. |
 | `Invalid tip` | `recommit` of a zero tip. |
 | `Nothing revealed to recommit` | `recommit` by a seat that has not revealed from its current chain since it committed it. |
 | `Invalid winner` | `outcome` or `adjudicate` reported a winner that is not an integer from 0 to 2. |
@@ -532,7 +590,7 @@ A submission without every seat's approval becomes the channel's dispute candida
 | `Flag fell` | A step stamped after the due seat used more time than its time rules allow. |
 | `Clock not expired` | A `flag` stamped before that. |
 | `Clock not running` | A `flag` while the clock is paused. |
-| `Referee step needs a stamp` | An unstamped `flag` or `start` in a timed game. |
+| `Referee step needs a stamp` | An unstamped `flag` or `start` in a timed game. A roll may go unstamped. |
 | `Invalid stamp` | A stamp that is not a positive safe integer. |
 | `Stamp out of order` | A stamp earlier than the last one. |
 | `Unknown move` | A `kind` other than 0 to 6. |
@@ -546,7 +604,7 @@ Cairo Serde encoders and decoders for channel calldata. Decoders return felts as
 | `encodeSignature` | `(sig)` | `[r, s]`. |
 | `encodeSignatures` | `(sigs)` | `Span<Signature>`: the length, then each `r` and `s`. |
 | `encodeSteps` | `(game, list)` | `Span<Move<A>>`. |
-| `finalSignatures` | `(records, seats = 2)` | Each seat's last signature among step records (`{ seat, signature }`), or `ZERO_SIGNATURE` for a seat with no step: what replay verifies. Skips the referee's `flag` and `start` records. Throws `Step records need their seat; use session.steps` for a record without a valid `seat`, such as `signedStep` output. |
+| `finalSignatures` | `(records, seats = 2)` | Each seat's last signature among step records (`{ seat, signature }`), or `ZERO_SIGNATURE` for a seat with no step: what replay verifies. Skips the referee's records: a `flag`, a `start` or a roll. Throws `Step records need their seat; use session.steps` for a record without a valid `seat`, such as `signedStep` output. |
 | `batchOf` | `(records, seats = 2)` | A batch `{ steps, stamps, signatures, attestation }` from step records (`session.steps`): in a timed game every step's stamp and the last record's attestation, otherwise no stamps and `ZERO_SIGNATURE`. Throws `Mixed stamped and unstamped steps`. |
 | `encodeBatch` | `(game, { steps, stamps = [], signatures, attestation = ZERO_SIGNATURE })` | Cairo `Batch` Serde, the replay calldata: the steps, their stamps, one final signature per seat and the referee's attestation. |
 | `encodeWitness` | `(game, witness)` | `game.encodeWitness(witness)`. A game without `load` has the unit witness `()`, which encodes to nothing. Throws `Game codec needs encodeWitness` for a codec with `load` and no `encodeWitness`. |
@@ -563,13 +621,15 @@ Cairo Serde encoders and decoders for channel calldata. Decoders return felts as
   config,             // decoded with game.decodeConfig
   status,             // WAITING 0, ACTIVE 1, DISPUTE 2, FORCED 3, SETTLED 4, CANCELLED 5
   epoch, context, response_seconds,
-  clock,              // { referee, settings }, or null when untimed
+  clock,              // { referee, settings, rng_tip }, or null when untimed
   anchor, candidate,  // { hash, seq, support_turn, due, outcome }
   anchor_block, candidate_block, deadline,
   acked_epoch, acked_deadline, // the dispute the referee acknowledged
   result,             // { finished, winner, reason }
 }
 ```
+
+Before the join, `clock.rng_tip` is only non-zero when the creator asked for the referee's randomness. The referee's tip replaces it at `join`. A `result` whose `reason` is `REASON_VOID` is no result, not a draw.
 
 ### Reader
 

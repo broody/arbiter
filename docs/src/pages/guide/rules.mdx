@@ -168,6 +168,10 @@ It returns the new state and, optionally, a request for randomness:
   action. The step must be sent as `PlayRandom`, not `Play` (see
   [Randomness](/concepts/randomness)).
 
+A timed game can take its randomness from its referee instead. The game's
+terms decide that, not your rules: `apply` still names another seat, and the
+protocol has the referee reveal in its place.
+
 ### `resolve`: finish a random action
 
 ```cairo
@@ -179,8 +183,9 @@ It returns the new state and, optionally, a request for randomness:
     }
 ```
 
-`seed` is a hash of both seats' revealed values. Neither seat could predict it
-or bias it. A game that never requests randomness can panic here.
+`seed` is a hash of two revealed values: the acting seat's, and the other
+seat's or the referee's. Neither seat could predict it or bias it. A game that
+never requests randomness can panic here.
 
 ### `due` and `outcome`
 
@@ -200,13 +205,14 @@ or bias it. A game that never requests randomness can panic here.
 
 - `due` names the seat whose turn it is. It decides who may sign the next
   `Play`, and in a timed game whose clock runs. While a reveal is pending, the
-  protocol overrides it with the revealing seat.
+  protocol overrides it with the revealer: the revealing seat, or the referee.
 - `outcome` returns `(winner, reason)` once the game is over. `winner` is the
   seat plus 1, or `DRAW` (0). `reason` is yours to define, from 1 to 127. The
   protocol reserves 128 and up: 128 (`REASON_RESIGN`), 129 (`REASON_TIMEOUT`,
-  the referee's flag) and 130 (`REASON_ABANDON`, a missed forced-play
-  window). A winner above `SEATS` panics with `'Invalid winner'`, and a reason
-  outside 1 to 127 with `'Invalid finish reason'`.
+  the referee's flag), 130 (`REASON_ABANDON`, a missed forced-play window) and
+  131 (`REASON_VOID`, a game stopped with no result while a roll waited for
+  its referee). A winner above `SEATS` panics with `'Invalid winner'`, and a
+  reason outside 1 to 127 with `'Invalid finish reason'`.
 - `outcome` is also where your game bounds its own length, with a move or
   round limit, so that every game ends.
 
@@ -282,7 +288,7 @@ of its own around your `Action`:
 | --- | --- |
 | `Play(action)` | Your action, from the due seat |
 | `PlayRandom((action, entropy))` | An action whose `apply` requests randomness, with the actor's next hash-chain value |
-| `Reveal(value)` | The requested seat's next hash-chain value. The protocol then calls `resolve` |
+| `Reveal(value)` | The revealer's next hash-chain value: the requested seat's, or the referee's in a game that takes its randomness from it. The protocol then calls `resolve` |
 | `Recommit(tip)` | The due seat replaces its chain tip before the chain runs out, once per reveal |
 | `Resign(seat)` | A seat concedes, at any time |
 | `Flag` | The referee of a timed game ends it when the due seat's time runs out |

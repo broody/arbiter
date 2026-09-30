@@ -116,7 +116,11 @@ settle a state reached from anything but the anchor or the candidate.
 
 Anyone. `submit_history` and `resolve` are open to all callers, and so are a
 timed game's `acknowledge` and `resume_by_referee`, which carry the referee's
-signature. The adapter's
+signature. So are `roll` and `void`, for forced play that waits for the
+referee's roll: `roll` posts the referee's value, and `void` ends the game
+with no result (see
+[The channel and disputes](/concepts/channel#a-roll-that-waits-for-the-referee)).
+The adapter's
 `settle` checks the proof, not the caller, and the channel accepts
 `accept_verified` only from the game's own adapter. Players settle their own
 games. A [keeper](/infra/keeper) settles finished games that nobody submitted,

@@ -1,8 +1,9 @@
 # Referee design
 
 Status: **draft, 2026-09-30**. Built and tested: the core crate (protocol,
-optional referee clocks and channel state machine), the Dojo binding, the JS
-SDK mirror, and the counter example as both a pure game and a Dojo world.
+optional referee clocks, randomness from the referee and channel state
+machine), the Dojo binding, the JS SDK mirror, and the counter example as both
+a pure game and a Dojo world.
 Everything marked *planned* is not.
 
 Referee lets two players play a turn-based game offchain with signed moves and
@@ -18,12 +19,12 @@ Hashfront (`~/development/hashfront`, a tactics game with combat randomness).
 | Layer | Status | Depends on | Purpose |
 |---|---|---|---|
 | `core` (Cairo) | built | nothing | `GameRules`, protocol envelope, hashing, signatures, replay, forced steps, randomness, referee clocks |
-| channel state machine (`referee::channel`) | built | `core` | Pure functions: create, join, receive a candidate, dispute, acknowledge, resolve, forced play, timeout, resume, resign |
-| `referee_dojo` (Cairo) | built | `core`, Dojo | `ChannelTerms`/`ChannelState`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint, including `acknowledge` and `resume_by_referee`. Games list the models in `build-external-contracts` |
+| channel state machine (`referee::channel`) | built | `core` | Pure functions: create, join, receive a candidate, dispute, acknowledge, resolve, forced play, a posted roll, void, timeout, resume, resign |
+| `referee_dojo` (Cairo) | built | `core`, Dojo | `ChannelTerms`/`ChannelState`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint, including `acknowledge`, `resume_by_referee`, `roll` and `void`. Games list the models in `build-external-contracts` |
 | `referee_testing` (Cairo) | built | `core` | Test-only STARK-curve signer and hash-chain helper |
 | `referee_adapter` (Cairo 2.18) | built, tested with mocked proof facts | `core` | Generic logic for a SNIP-36 account contract that proves a replay in the virtual OS and relays it to the channel |
 | `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, clocks and `Referee`, fixtures, Poseidon in WebAssembly; native proving client (`@referee/sdk/proving`); session store and signing guard (`@referee/sdk/store`) |
-| keeper (`keeper/`) | built, tested on Katana | `sdk` | Archives and forwards verified steps, records equivocation, answers disputes, resolves and settles |
+| keeper (`keeper/`) | built, tested on Katana | `sdk` | Archives and forwards verified steps, records equivocation, answers disputes, resolves and settles, referees timed games and gives them their randomness |
 
 `core` has no Dojo or storage dependency and builds on both Cairo 2.13 (Dojo)
 and 2.18 (the adapter). `scripts/check.sh` tests both.
@@ -73,7 +74,7 @@ protocol steps per game action).
 ## Protocol
 
 **Envelope.** The library wraps the game state:
-`Envelope { seq, transcript, support_turn, last_seat, pending, rng_heads, rng_fresh, clock, outcome, game }`.
+`Envelope { seq, transcript, support_turn, last_seat, pending, rng_heads, rng_fresh, rng_referee, clock, outcome, game }`.
 
 **Moves.** A step is a `Move<A>`:
 
@@ -81,7 +82,7 @@ protocol steps per game action).
 | --- | --- | --- |
 | `Play(A)` | the game action | the due seat |
 | `PlayRandom((A, entropy))` | an action whose `apply` requests randomness, and the actor's next chain value | the due seat |
-| `Reveal(value)` | the named seat's next chain value | the seat the pending request names |
+| `Reveal(value)` | the named seat's next chain value, or the referee's | the seat the pending request names, or the referee in a game that takes its randomness from it |
 | `Recommit(tip)` | a new chain tip | the due seat, once per reveal |
 | `Resign(seat)` | the resigning seat | named, since either seat may resign at any time |
 | `Flag` | nothing | the referee of a timed game (`REFEREE`), once the due seat's time ran out |
@@ -96,7 +97,7 @@ entropy }` with a fixed-width action, plus a signature per step).
 
 **Messages.** A step's message is
 `signing_hash(TAG, 'REFEREE_ACTION_V1', context, seq, transcript, move)`.
-`PROTOCOL_VERSION` 4 is in the context hash, so older signatures never
+`PROTOCOL_VERSION` 5 is in the context hash, so older signatures never
 verify under it.
 - It binds the transcript, not the full state. State is determined by the
   anchor plus the transcript, and hashing a large state on every step is costly
@@ -105,7 +106,10 @@ verify under it.
 - Checkpoint and reopen approvals sign the state hash with an epoch. The
   referee of a timed game signs `live_hash(context, epoch, deadline)` to show
   it is live during a dispute, and `referee_resume_hash(context, epoch, state)`
-  to return a game from forced play on its own.
+  to return a game from forced play on its own. For a game that takes its
+  randomness from it, the referee signs `tip_hash(chain_id, channel, game_id,
+  tip)`, and the seats sign `void_hash(context, epoch, state)` to void one
+  whose roll waits (see Referee randomness).
 - All digests are domain-separated by the game's `TAG` and a
   `REFEREE_*_V1` tag, and masked to 250 bits for STARK-curve ECDSA.
 
@@ -123,9 +127,9 @@ unverified state. The tests `tampered_earlier_step_breaks_final_signature`,
 `intermediate_signature_is_not_a_final_one` and
 `seat_without_steps_signs_nothing` cover this.
 
-**Signer changes.** `support_turn` counts changes of signer. It ranks dispute
-candidates, so consecutive self-signed steps never outrank a branch the opponent
-acknowledged.
+**Signer changes.** `support_turn` counts changes of signing seat. It ranks
+dispute candidates, so consecutive self-signed steps never outrank a branch the
+opponent acknowledged. The referee's steps count for neither seat.
 
 **Randomness.**
 - Each seat commits the tip of a hash chain (`rng_next(v) = poseidon('REFEREE_RNG_V1', v)`).
@@ -137,6 +141,8 @@ acknowledged.
   check each revealed value against its seat's chain and recompute each seed.
 - Neither seat can predict the seed before the second reveal, and neither can
   bias it.
+- A timed game can take its randomness from its referee instead, so no seat
+  has to be online to reveal (see Referee randomness).
 - Withholding a reveal only stalls, and a stall ends in a forced reveal or a
   timeout.
 - `Recommit` replaces the due seat's tip before its chain runs out. It is
@@ -145,9 +151,10 @@ acknowledged.
   will. A game that never reveals, like Go, can't recommit at all.
 
 **Clocks** (optional, per game). `Terms.clock` is an
-`Option<TimeControl { referee, settings }>`: the referee's public key and the
-settings of the game's time rules, serialized. Players sign moves; the referee
-signs time.
+`Option<TimeControl { referee, settings, rng_tip }>`: the referee's public key,
+the settings of the game's time rules, serialized, and the tip of the
+referee's hash chain if the game takes its randomness from it. Players sign
+moves; the referee signs time.
 - **Stamps.** The referee stamps every offchain step with its own clock, in
   milliseconds, and after each step signs
   `signing_hash(TAG, 'REFEREE_STAMP_V1', context, seq, transcript, clock)`.
@@ -225,7 +232,8 @@ signs time.
   time or censor, so an honest seat's worst case is losing on time. Two
   attestations at one seq with different transcripts are evidence of
   equivocation. Each game opts in: the referee's key is in the terms, which
-  both seats accept by joining.
+  both seats accept by joining. A game that also takes its randomness from the
+  referee trusts it not to leak rolls (see Referee randomness).
 - **Cost onchain and in proofs** (counter game, cairo-test gas):
   - untimed games pay about 12k gas per step for carrying the optional clock,
     about 120 Cairo steps, or 2% of a Surround move;
@@ -280,10 +288,12 @@ This is Surround's state machine, generalized, as pure functions in
     then the game returns to ACTIVE.
 - **Forced play:** the due seat submits its steps up to the next change of due
   seat in one transaction (`force`). Surround allows one step per transaction.
+  A step that asks the referee for a roll pauses forced play for up to 3 days:
+  no seat is due until the roll is posted (`rolled`).
 - **Endings:** `claim_timeout` after a missed window (`REASON_ABANDON`: the
   chain judged it, not a referee), `resume` with every seat's reopen approval
-  or, in a timed game, the referee's alone (`resume_by_referee`), and `resign`
-  at any time.
+  or, in a timed game, the referee's alone (`resume_by_referee`), `void` for a
+  roll that waited too long (`REASON_VOID`), and `resign` at any time.
 - **Storage:** anchors and candidates are stored as hashes, with preimages in calldata.
 - **Settlement:** writes the winner, the reason and the game's outputs, and
   emits an event for rewards.
@@ -297,9 +307,9 @@ A game's whole channel system is one line per entrypoint
 (`dojo/examples/counter/src/lib.cairo`):
 
 ```cairo
-fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip: felt252) {
+fn open_dispute(ref self: ContractState, game_id: felt252, epoch: u32) {
     let mut world = self.world_default();
-    binding::join::<CounterRules>(ref world, game_id, session_key, rng_tip);
+    binding::open_dispute(ref world, game_id, epoch);
 }
 ```
 
@@ -324,11 +334,15 @@ fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip
 - `create` takes an `Option<TimeControl>`, checked by the game's time rules. A
   referee key must be a curve point and neither seat's session key.
   `ChannelTerms` keeps the referee key and the serialized settings, whatever
-  the rules.
+  the rules. A nonzero `clock.rng_tip` asks for the referee's randomness, and
+  `join` then takes the referee's tip and its signature over it, which it
+  checks (see Referee randomness).
 - Callers are authenticated by wallet for create, join, cancel, dispute, forced
-  play, timeout and resign. `submit_history`, `resolve`, `acknowledge` and
-  `resume_by_referee` are open to anyone, for example a keeper; the last two
-  carry the referee's signature. `accept_verified` accepts only the game's
+  play, timeout and resign. `submit_history`, `resolve`, `acknowledge`,
+  `resume_by_referee`, `roll` and `void` are open to anyone, for example a
+  keeper. `acknowledge` and `resume_by_referee` carry the referee's signature,
+  `roll` the referee's next chain value, and `void` every seat's approval
+  unless the pause has run out. `accept_verified` accepts only the game's
   prover.
 - `allow_prover` lets namespace owners allowlist adapter classes.
 - Rewards read `binding::result(world, game_id)` once a game is SETTLED.
@@ -489,12 +503,18 @@ latest verified transcript.
     nothing and flags no one until it restarts the clock, once per epoch, so
     the forced period is charged to no one.
   - A keeper that is not the game's referee accepts only stamped steps.
+  - With a randomness secret, it gives the games that ask their randomness:
+    it signs each one's tip (`POST …/tip`), rolls as soon as it stamps a
+    `PlayRandom`, and refuses a game whose tip is not its own (see Referee
+    randomness).
   - This role is trusted, unlike the rest of the keeper: a delay costs the
     delayed seat clock time, and seats cannot route around it.
 - **Tests.** `keeper/katana.sh` runs the keeper on a local Katana with the
   counter world. It answers a stale dispute and resolves it into forced play,
-  settles a finished game through the dispute window to SETTLED, and referees
-  a timed game, flagging the stalling seat and settling the flag.
+  settles a finished game through the dispute window to SETTLED, referees a
+  timed game, flagging the stalling seat and settling the flag, and gives
+  another its randomness: the join carries its signed tip, and the channel
+  replays its roll.
 
 ## Proving strategy
 
@@ -515,39 +535,45 @@ latest verified transcript.
 - **Aggregation across games** is the recursion that pays: many settled games
   per proof to spread the fixed charge. It is a later optimization.
 
-## Referee randomness (planned)
+## Referee randomness
 
-*Planned, not built; it would be protocol version 5.* With player
-commit-reveal, the revealer must be online for every roll: in Hashfront, every
-attack waits for the defender. A timed game already has its referee on every
-step, so the referee can supply the randomness instead. This helps 2-seat
-games, so it comes before more than 2 seats (next section).
+Built in protocol version 5. With player commit-reveal, the revealer must be
+online for every roll: in Hashfront, every attack waits for the defender. A
+timed game already has its referee on every step, so the referee can supply the
+randomness instead. It helps 2-seat games, so it came before more than 2 seats
+(next section).
 - **Commitment.** The referee commits its own hash chain in the terms, like a
   seat: `TimeControl.rng_tip`, zero when the seats reveal.
 - **The tip is the referee's.** A seat that made the tip up would know every
-  roll, so the referee signs it for the one game
-  (`'REFEREE_TIP_V1'`, chain id, channel, game id, tip) and the channel checks
+  roll, so the referee signs it for the one game (`tip_hash`:
+  `'REFEREE_TIP_V1'`, chain id, channel, game id, tip) and the channel checks
   that signature. The game id exists only after `create`, so the creator asks
-  for referee randomness there and `join` brings the signed tip.
-- **One secret.** The referee derives each game's chain from one randomness
-  secret and the game's ids, long enough for the game's `max_steps`, so it
-  never recommits. A backup needs that secret, not the signing key.
+  for referee randomness there, with a nonzero `clock.rng_tip`, and `join`
+  brings the signed tip. A game no channel anchors has the tip in the terms
+  its wallets sign, and each seat checks the signature first.
+- **One secret.** The keeper derives each game's chain from one randomness
+  secret and the game's ids, so it stores nothing and a backup needs that
+  secret, not the signing key. The chain has a value for every roll the game's
+  `max_steps` allow (a roll takes two steps), so the referee never recommits.
+  Building it costs one hash per value. The keeper keeps one value in 64
+  (`RngChain`).
 - **Rolls.** While the referee owes a roll, `pending.seat` is `REFEREE`, and
-  its value is an ordinary `Reveal`: checked against its chain, mixed with the
-  requester's value into the seed, and charged to nobody's clock. The referee
-  stamps a `PlayRandom` and reveals in one go, so a roll resolves as soon as it
-  is stamped. No seat reveals.
+  its value is an ordinary `Reveal`: checked against its chain
+  (`Envelope.rng_referee`), mixed with the requester's value into the seed, and
+  charged to nobody's clock. No flag falls meanwhile, and a seat may still
+  resign. The referee stamps a `PlayRandom` and reveals in one go, so a roll
+  resolves as soon as it is stamped. No seat reveals.
 - **Per game.** The terms opt in, not the rules: a game's `apply` still names
   a seat to reveal, and the protocol has the referee reveal instead. Player
   commit-reveal stays the default: it needs no trusted party, and games
   without a referee rely on it.
 - **Ranking.** Referee steps no longer count as signer changes
-  (`support_turn`): a roll would otherwise add two.
+  (`support_turn`): a roll would otherwise add two, and a `Start` between one
+  seat's steps used to raise it.
 - **Trust.** The referee can't bias a roll, since its values are fixed in
   advance, and it can't know a roll before the requester's step arrives. But
   a referee colluding with the requester could leak the roll before the action
-  is signed. Randomness joins time and order in what the referee is trusted
-  with.
+  is signed. Randomness joins time in what the referee is trusted with.
 - **More than 2 seats.** No coalition of players can predict a roll, and the
   revealer sets and the eliminated revealer's veto (next section) never arise.
 - **A VRF** would need no chain for the referee to keep, but each roll would
@@ -555,30 +581,39 @@ games, so it comes before more than 2 seats (next section).
   Cartridge's VRF resolves inside one transaction, so it doesn't fit offchain
   play.
 
-**When the referee is down, the game pauses** (decided 2026-09-30).
+**When the referee is down, the game pauses.**
 - Offchain, it already does. Every step of a timed game needs the referee's
   stamp, and a restarted referee resumes from its last stamp, so it charges
-  nobody for its downtime. A roll resolves when the referee stamps it.
+  nobody for its downtime. A restarted keeper answers a roll it owed at once.
 - In forced play, a roll played onchain waits for the referee's value.
   (Forced play happens when a seat opens a dispute while the referee is
-  down.) While the roll waits, the forced-play deadline stops, so nobody can
-  claim a timeout.
-- Anyone can post the referee's next value onchain. The chain checks it
-  against the referee's committed chain, so it needs no signature. A backup
-  keeper that holds the referee's chain secret can unfreeze the game, which
-  keeps real outages short.
+  down.) No seat is due, so `claim_timeout` refuses, and the forced-play
+  deadline becomes a 3-day pause (`PAUSE_SECONDS`).
+- Anyone can post the referee's next value onchain (`roll`). The chain checks
+  it against the referee's committed chain, so it needs no signature. A backup
+  keeper that holds the randomness secret can unfreeze the game, which keeps
+  real outages short. The next seat then gets a fresh window.
+- The referee can also take the game back (`resume_by_referee`) and roll
+  offchain, which is what the keeper does.
 - A pause has an end. The seats can all agree to void the game (they sign
-  `'REFEREE_VOID_V1'`), and after 3 days anyone can end it void. Falling back
-  to a seat's reveal instead would let a colluding referee re-roll by going
-  quiet. Void only lets it cancel a game, and only by stalling visibly for 3
-  days.
+  `void_hash`, `'REFEREE_VOID_V1'`), and after 3 days anyone can end it void.
+  Falling back to a seat's reveal instead would let a colluding referee
+  re-roll by going quiet. Void only lets it cancel a game, and only by
+  stalling visibly for 3 days.
 - Void is not a draw. It settles with `REASON_VOID = 131` and no winner, and
   reward code must check the reason.
 
+**Tests.** The fixture game `rolled` replays in Cairo against the SDK
+(`rolled_replay_matches_sdk`, `rolled_replay_splits_at_a_pending_roll`). The
+clock, channel and Dojo suites pin the rest, for example
+`a_roll_charges_nobody`, `nobody_times_out_while_the_referee_owes_a_roll`,
+`a_tip_the_referee_did_not_sign_is_refused` and
+`anyone_posts_the_referees_roll`. `keeper/katana.sh` plays such a game on a
+local Katana.
+
 ## More than 2 seats (planned)
 
-*Planned, not built; it would be protocol version 6, after referee
-randomness.* Referee plays exactly 2 seats: `open` asserts `SEATS == 2` in
+*Planned, not built; it would be protocol version 6.* Referee plays exactly 2 seats: `open` asserts `SEATS == 2` in
 Cairo and the SDK. This section records what more seats need, found by a spike
 that ran a 3-seat game through v4 on 2026-09-30, and proposes how to build it.
 Hashfront launches with 2 seats, and is the first game planned for more. It
@@ -670,8 +705,8 @@ decides between branches.
   steps, so the honest seat may never see the second signature. That is left
   for later.
 
-Separately, referee steps should stop counting as signer changes, for 2 seats
-too. Today a `Start` between one seat's steps raises `support_turn`, which a
+Referee steps already stopped counting as signer changes in v5, for 2 seats
+too: a `Start` between one seat's steps used to raise `support_turn`, which a
 referee colluding with that seat could use.
 
 **Eliminations.** One seat leaving must not end the game. Proposal:
@@ -806,10 +841,11 @@ spike's collusion scenarios become tests that the new rules must reject.
    charged to the seat that has it, which is noise against clocks of seconds;
    `turn_ms` can serve as a grace if tighter clocks ever need one. Still to
    do: a referee bond that equivocation evidence can slash.
-10. More than 2 seats: designed, not built, and after item 11. See
+10. More than 2 seats: designed, not built. See
     [More than 2 seats](#more-than-2-seats-planned).
-11. Referee randomness: designed, not built, and first, since 2-seat
-    Hashfront can use it. See [Referee randomness](#referee-randomness-planned).
+11. ~~Referee randomness.~~ Done, in protocol v5: a timed game can take its
+    randomness from its referee, so no seat has to be online to reveal. See
+    [Referee randomness](#referee-randomness).
 
 ## Development
 

@@ -39,7 +39,7 @@ arrives as calldata and is checked against the hash.
 | `WAITING` 0 | Created, waiting for seat 1 |
 | `ACTIVE` 1 | Played offchain. The anchor is the last committed state |
 | `DISPUTE` 2 | A response window is open. The best candidate commits when it closes |
-| `FORCED` 3 | Played onchain: the due seat must move within each window |
+| `FORCED` 3 | Played onchain: the due seat must move within each window. It pauses while the referee owes a roll: no seat is due then |
 | `SETTLED` 4 | Finished, with `result` recorded |
 | `CANCELLED` 5 | Cancelled before anyone joined |
 
@@ -53,22 +53,26 @@ arrives as calldata and is checked against the hash.
 | `receive(epoch, end, approved)` | `ACTIVE`, or `DISPUTE` before its deadline. `epoch` is current, `end` was replayed or proved from the anchor or the candidate, and `end.seq` is past the anchor | **Approved:** `end` must not rank below the candidate on `support_turn`. It commits as the anchor: `SETTLED` if finished, `ACTIVE` otherwise. **Unapproved:** `end` must outrank the candidate. It becomes the candidate, and an `ACTIVE` channel moves to `DISPUTE` with `deadline = now + window` |
 | `open_dispute(epoch)` | `ACTIVE`, current epoch | `DISPUTE`: the candidate resets to the anchor, and `deadline = now + window` |
 | `acknowledge(epoch)` | `DISPUTE` before its deadline, current epoch, with the referee's signature (timed games) | Records the dispute's epoch and deadline as acknowledged |
-| `resolve(epoch)` | `DISPUTE`, deadline passed | Commits the candidate. `SETTLED` if finished. Otherwise `ACTIVE` if the game is timed and its referee acknowledged this dispute, else `FORCED` with a fresh window |
-| `forced(epoch, seat, end)` | `FORCED` before its deadline, and `seat` is the anchor's due seat | Commits `end`. `SETTLED` if finished, otherwise a fresh window |
-| `resume(epoch, approved)` | `FORCED` before its deadline, with every seat's reopen approval or, in a timed game, the referee's | `ACTIVE` |
-| `claim_timeout(epoch, seat)` | `FORCED`, deadline passed, and `seat` isn't the due seat | `SETTLED`: the due seat forfeits (`REASON_ABANDON`, 130) |
+| `resolve(epoch)` | `DISPUTE`, deadline passed | Commits the candidate. `SETTLED` if finished. Otherwise `ACTIVE` if the game is timed and its referee acknowledged this dispute, else `FORCED` with a fresh window, or paused if the candidate waits for the referee's roll |
+| `forced(epoch, seat, end)` | `FORCED` before its deadline, and `seat` is the anchor's due seat | Commits `end`. `SETTLED` if finished, otherwise a fresh window. If `end` waits for the referee's roll, forced play pauses for up to 3 days instead |
+| `rolled(epoch, end)` | `FORCED` before its deadline, and the anchor waits for the referee's roll. `end` is the anchor with the referee's value applied | Commits `end`. `SETTLED` if finished, otherwise a fresh window for the next seat |
+| `void(epoch, approved)` | `FORCED`, and the anchor waits for the referee's roll: at any time with every seat's void approval, otherwise once the pause's deadline has passed | `SETTLED` with `REASON_VOID` (131): no result |
+| `resume(epoch, approved)` | `FORCED` before its deadline, paused or not, with every seat's reopen approval or, in a timed game, the referee's | `ACTIVE` |
+| `claim_timeout(epoch, seat)` | `FORCED`, a seat is due, its deadline passed, and `seat` isn't the due seat | `SETTLED`: the due seat forfeits (`REASON_ABANDON`, 130) |
 | `resign(seat)` | Any live status (`ACTIVE`, `DISPUTE`, `FORCED`) | `SETTLED`: `seat` forfeits (`REASON_RESIGN`) |
 
 `receive` is what `submit_history` and `accept_verified` call, after replaying
 or verifying a proof from the anchor or the candidate. `approved` is true when the submission
 carries every seat's checkpoint signature over
 `(context, epoch, state hash of end)`, and false when every signature is zero.
-Anything else reverts.
+Anything else reverts. `rolled` and `void` are what the binding's `roll` and
+`void` call (see [A roll that waits for the referee](#a-roll-that-waits-for-the-referee)).
 
 ## Epochs
 
 `epoch` increments whenever the anchor changes (a commit, `resolve`, a forced
-move), and on `resume`, `claim_timeout` and `resign`. Every call that changes
+move, a posted roll), and on `resume`, `void`, `claim_timeout` and `resign`.
+Every call that changes
 the channel names the epoch it expects, and proofs and approvals bind it too. A
 stale submission fails with `'Stale channel epoch'` instead of landing on a
 newer state.
@@ -82,9 +86,10 @@ end.support_turn > candidate.support_turn
   or (end.support_turn == candidate.support_turn and end.seq > candidate.seq)
 ```
 
-`support_turn` counts changes of signer. A history the other seat answered
-always beats a history that stops before the answer, however many steps one
-seat piled on alone. `seq` breaks ties.
+`support_turn` counts changes of signing seat. A history the other seat
+answered always beats a history that stops before the answer, however many
+steps one seat piled on alone. The referee's steps (a `Flag`, a `Start`, a
+roll) count for neither seat. `seq` breaks ties.
 
 An **approved** submission needs only
 `end.support_turn >= candidate.support_turn`. Both seats signed off on it, so it
@@ -131,6 +136,46 @@ enters **forced play**:
 
 `resolve` always gives forced play a **fresh** window, so a candidate submitted
 at the last second of a dispute can't also steal the next turn by timeout.
+
+### A roll that waits for the referee
+
+In a game that takes its randomness from the referee (see
+[Randomness](/concepts/randomness#randomness-from-the-referee)), a state can
+wait for the referee's roll. Its `due` is `REFEREE`, and no seat can move.
+Forced play reaches such a state when the due seat plays a `PlayRandom`
+onchain, or when a dispute resolves into a candidate that ends on one.
+
+Forced play then **pauses**. The deadline becomes `now + PAUSE_SECONDS`: 3
+days, whatever the game's response window. No seat is due, so no seat can play
+onchain (`forced` fails with `'Not your turn'`), and `claim_timeout` fails with
+`'Waiting for the referee'`. Nobody can be timed out while the referee is down.
+
+```mermaid
+flowchart LR
+  F["FORCED<br/>a seat is due"] -- "force: PlayRandom" --> P["FORCED, paused<br/>the referee is due<br/>deadline = now + 3 days"]
+  P -- "roll" --> F
+  P -- "resume" --> A["ACTIVE<br/>the referee rolls offchain"]
+  P -- "void" --> S["SETTLED<br/>REASON_VOID"]
+```
+
+| Way out | Needs | Effect |
+| --- | --- | --- |
+| `roll` | The referee's next hash-chain value, before the pause's deadline. Anyone may post it | The chain the referee committed vouches for the value, so it takes no signature. The roll commits, and the next seat gets a fresh window |
+| `resume_by_referee`, or `resume` | The referee's signature, or every seat's reopen approval, before the pause's deadline | `ACTIVE`. The anchor still waits for the roll, which the referee gives offchain |
+| `void` with approvals | Every seat's signature over `void_hash(context, epoch, anchor hash)`. Anyone may send it, at any time during the pause | `SETTLED` with `REASON_VOID` |
+| `void` without approvals | The pause's deadline has passed. Anyone may call it | `SETTLED` with `REASON_VOID` |
+
+A seat may also `resign` from its wallet at any time. Once the pause's deadline
+has passed, `roll` and `resume` fail with `'Turn deadline passed'`, and only
+`void` and `resign` remain.
+
+A void game has **no result**. It settles with
+`Outcome { finished: true, winner: 0, reason: REASON_VOID }`. `winner` 0 also
+means a draw, so code that pays rewards must check the reason first.
+
+The pause never falls back to the other seat's reveal. A referee that colluded
+with a seat could then choose between two rolls by going quiet. Void lets it
+only cancel a game.
 
 ### Late candidates don't extend the deadline
 
@@ -204,3 +249,7 @@ sequenceDiagram
 
 An untimed game has no referee key, so both calls revert with `'Untimed game'`.
 See [Clocks and the referee](/concepts/clocks).
+
+A game that takes its randomness from the referee adds one more case: forced
+play that waits for the referee's roll pauses, and `resume_by_referee` is one
+way out. See [A roll that waits for the referee](#a-roll-that-waits-for-the-referee).

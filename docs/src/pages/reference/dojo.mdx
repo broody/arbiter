@@ -32,6 +32,7 @@ One referee channel: its terms and its state together. Derives `Copy`, `Drop`, `
 | `response_seconds` | `u32` | Window length. |
 | `referee` | `felt252` | A timed game's referee key; zero for an untimed game. |
 | `clock_settings` | `Span<felt252>` | A timed game's `TimeControl.settings`; empty for an untimed game. |
+| `referee_tip` | `felt252` | A timed game's `TimeControl.rng_tip`: the tip of the referee's hash chain when the game takes its randomness from the referee, otherwise zero. Before `join` it is only non-zero when the creator asked for that. |
 | `anchor` | `StoredRef` | The committed state. |
 | `candidate` | `StoredRef` | The best dispute candidate. |
 | `anchor_block` | `u64` | Block of the last anchor change or resume. |
@@ -40,7 +41,7 @@ One referee channel: its terms and its state together. Derives `Copy`, `Drop`, `
 | `acked_epoch`, `acked_deadline` | `u32`, `u64` | The dispute (epoch and deadline) the referee acknowledged. |
 | `result` | `StoredOutcome` | The final result once settled. |
 
-`referee` and `clock_settings` form the game's `TimeControl`. The channel fields mirror `referee::channel::Channel` ([Channel](/reference/cairo#stateref-and-channel)).
+`referee`, `clock_settings` and `referee_tip` form the game's `TimeControl`. The channel fields mirror `referee::channel::Channel` ([Channel](/reference/cairo#stateref-and-channel)).
 
 | Function | Behavior |
 | --- | --- |
@@ -53,7 +54,7 @@ One referee channel: its terms and its state together. Derives `Copy`, `Drop`, `
 
 ### ChannelTerms
 
-What a channel fixes when it opens. `#[dojo::model]`, keyed by `id`. `create` writes it, and `join` writes it again with seat 1 and the context.
+What a channel fixes when it opens. `#[dojo::model]`, keyed by `id`. `create` writes it, and `join` writes it again with seat 1, the referee's tip and the context.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -67,6 +68,7 @@ What a channel fixes when it opens. `#[dojo::model]`, keyed by `id`. `create` wr
 | `response_seconds` | `u32` | Window length. |
 | `referee` | `felt252` | Referee key; zero for an untimed game. |
 | `clock_settings` | `Span<felt252>` | Serialized time settings; empty for an untimed game. |
+| `referee_tip` | `felt252` | The referee's hash-chain tip, as in `ChannelGame`; zero when the seats reveal to each other. |
 
 ### ChannelState
 
@@ -145,6 +147,8 @@ The reported state is the candidate while the channel is in `DISPUTE`, and the a
 | `TIMED_OUT` | `8` | `claim_timeout` |
 | `RESIGNED` | `9` | `resign` |
 | `ACKNOWLEDGED` | `10` | `acknowledge` |
+| `ROLLED` | `11` | `roll` |
+| `VOIDED` | `12` | `void` |
 
 :::warning
 `kind` values are not channel statuses. `models::CANCELLED` is 2 and `models::FORCED` is 6, while the statuses `referee::channel::CANCELLED` and `FORCED` are 5 and 3. Read `status` for the channel's status.
@@ -156,7 +160,7 @@ The reported state is the candidate while the channel is in `DISPUTE`, and the a
 
 "Caller" is `get_caller_address()` inside the game system, so the wallet that called it. "Now" and "block" are the block timestamp and number.
 
-Helpers that read the channel's terms first panic with `'Unknown channel'` for a game that does not exist: `join`, `cancel`, `accept_verified`, `submit_history`, `open_dispute`, `force`, `claim_timeout`, `resign`, `snapshot` and `read`. The others read only the packed state, which is all zeros (`WAITING`) for an unknown game, and fail on its status or its zero referee key instead; `result` returns `None` and `status` returns `0`.
+Helpers that read the channel's terms first panic with `'Unknown channel'` for a game that does not exist: `join`, `cancel`, `accept_verified`, `submit_history`, `open_dispute`, `force`, `roll`, `claim_timeout`, `resign`, `snapshot` and `read`. The others read only the packed state, which is all zeros (`WAITING`) for an unknown game, and fail on its status or its zero referee key instead; `result` returns `None` and `status` returns `0`.
 
 ### Who may call
 
@@ -165,7 +169,7 @@ Helpers that read the channel's terms first panic with `'Unknown channel'` for a
 | Any wallet | `create` (becomes seat 0), `join` (becomes seat 1; only the invited wallet if one was named) |
 | The creator | `cancel` |
 | A player (`seat_of` the caller) | `open_dispute`, `force`, `claim_timeout`, `resign` |
-| Anyone | `submit_history`, `resolve`, `resume`: authenticated by signatures and the channel's windows, not by the caller. `acknowledge`, `resume_by_referee`: authenticated by the referee's signature. |
+| Anyone | `submit_history`, `resolve`, `resume`: authenticated by signatures and the channel's windows, not by the caller. `acknowledge`, `resume_by_referee`: authenticated by the referee's signature. `roll`: authenticated by the referee's hash chain. `void`: authenticated by every seat's signature, or allowed once the pause has run out. |
 | The game's prover | `accept_verified` |
 | A namespace owner | `allow_prover` |
 | Read-only | `terms`, `snapshot`, `result`, `read`, `read_state`, `status`, `seat_of` |
@@ -177,15 +181,27 @@ fn create<impl R: GameRules>(
     ref world: WorldStorage, config: R::Config, invited: ContractAddress, session_key: felt252,
     rng_tip: felt252, prover: ContractAddress, response_seconds: u32, clock: Option<TimeControl>,
 ) -> felt252;
-fn join<impl R: GameRules>(ref world: WorldStorage, game_id: felt252, session_key: felt252, rng_tip: felt252);
+fn join<impl R: GameRules>(
+    ref world: WorldStorage, game_id: felt252, session_key: felt252, rng_tip: felt252,
+    referee_tip: felt252, referee_signature: Signature,
+);
 fn cancel(ref world: WorldStorage, game_id: felt252);
 ```
 
 | Helper | Checks (panic) | Effect |
 | --- | --- | --- |
-| `create` | Session key non-zero and the x coordinate of a curve point (`'Invalid session key'`); `check_clock::<R>(clock)` (`'Invalid referee'` and any panic of the game's `ClockRules::check`, such as `StandardTime`'s `'Invalid time control'`); for a timed game, the referee key valid (`'Invalid session key'`) and not the session key (`'Referee is a seat'`); non-zero tip (`'Invalid tip'`); non-zero prover (`'Zero prover'`) whose class is allowed (`'Untrusted prover class'`); non-zero caller and `invited != caller` (`'Invalid players'`); `R::init(config)` succeeds; `response_seconds` in range (`'Invalid response window'`). | Writes `ChannelTerms` with the caller as `player_0`, `invited` as `player_1` (zero for an open game), and the clock's `referee` and `settings` (zero and empty for an untimed game), and a `WAITING` `ChannelState`. Returns the new game id. |
-| `join` | Caller non-zero and not `player_0` (`'Invalid players'`); caller is `player_1` if one was invited (`'Not invited'`); valid session key (`'Invalid session key'`) that differs from `key_0` (`'Shared session key'`) and from the referee key (`'Referee is a seat'`); tip non-zero and not `tip_0` (`'Invalid tip'`); the prover's class still allowed; channel `WAITING` (`'Not waiting'`). | Takes seat 1, builds the terms, sets `context = context_hash(terms)` and the anchor and candidate to `state_ref(open(terms))` at the current block. Writes `ChannelTerms` again and the `ACTIVE` state. |
+| `create` | Session key non-zero and the x coordinate of a curve point (`'Invalid session key'`); `check_clock::<R>(clock)` (`'Invalid referee'` and any panic of the game's `ClockRules::check`, such as `StandardTime`'s `'Invalid time control'`); for a timed game, the referee key valid (`'Invalid session key'`) and not the session key (`'Referee is a seat'`); non-zero tip (`'Invalid tip'`); non-zero prover (`'Zero prover'`) whose class is allowed (`'Untrusted prover class'`); non-zero caller and `invited != caller` (`'Invalid players'`); `R::init(config)` succeeds; `response_seconds` in range (`'Invalid response window'`). | Writes `ChannelTerms` with the caller as `player_0`, `invited` as `player_1` (zero for an open game), and the clock's `referee`, `settings` and `rng_tip` (zero, empty and zero for an untimed game), and a `WAITING` `ChannelState`. Returns the new game id. A non-zero `clock.rng_tip` asks for the referee's randomness. Its value is not the tip: the game id does not exist yet, so the referee's signed tip comes with `join`. |
+| `join` | Caller non-zero and not `player_0` (`'Invalid players'`); caller is `player_1` if one was invited (`'Not invited'`); valid session key (`'Invalid session key'`) that differs from `key_0` (`'Shared session key'`) and from the referee key (`'Referee is a seat'`); tip non-zero and not `tip_0` (`'Invalid tip'`); the prover's class still allowed; the referee's tip (below); channel `WAITING` (`'Not waiting'`). | Takes seat 1, stores `referee_tip`, builds the terms, sets `context = context_hash(terms)` and the anchor and candidate to `state_ref(open(terms))` at the current block. Writes `ChannelTerms` again and the `ACTIVE` state. |
 | `cancel` | Caller is `player_0` (`'Only creator'`); channel `WAITING` (`'Not waiting'`). | Status `CANCELLED`. |
+
+`join` checks the referee's tip against what the creator asked for:
+
+| The creator | `join` requires (panic) |
+| --- | --- |
+| Asked for the referee's randomness (a non-zero `clock.rng_tip` at `create`) | A non-zero `referee_tip` (`'Referee tip needed'`), and `referee_signature` the referee's signature over `tip_hash(chain_id, channel, game_id, referee_tip)`, with the transaction's chain id and the game system's address (any `verify` panic, such as `'Invalid session signature'`). |
+| Did not ask, or the game is untimed | A zero `referee_tip` (`'Seats reveal in this game'`). `referee_signature` is not checked: pass zeros. |
+
+The signature is what keeps a seat from choosing the tip: a tip a seat made up would let that seat know every roll. It names the game, so a tip signed for one game is refused in another.
 
 ### Submitting states
 
@@ -217,6 +233,11 @@ fn force<impl R: GameRules>(
     ref world: WorldStorage, game_id: felt252, epoch: u32, start: Envelope<R::State>,
     witness: R::Witness, steps: Span<Move<R::Action>>,
 );
+fn roll<impl R: GameRules>(
+    ref world: WorldStorage, game_id: felt252, epoch: u32, start: Envelope<R::State>,
+    witness: R::Witness, value: felt252,
+);
+fn void<impl R: GameRules>(ref world: WorldStorage, game_id: felt252, epoch: u32, acks: Span<Signature>);
 fn resume<impl R: GameRules>(ref world: WorldStorage, game_id: felt252, epoch: u32, acks: Span<Signature>);
 fn resume_by_referee<impl R: GameRules>(ref world: WorldStorage, game_id: felt252, epoch: u32, signature: Signature);
 fn claim_timeout(ref world: WorldStorage, game_id: felt252, epoch: u32);
@@ -227,11 +248,13 @@ fn resign(ref world: WorldStorage, game_id: felt252);
 | --- | --- | --- |
 | `open_dispute` | Caller is a player (`'Not a player'`); then `channel::open_dispute`. | Opens a dispute from the anchor. |
 | `acknowledge` | The game is timed (`'Untimed game'`); `signature` is the referee's over `live_hash(context, epoch, deadline)`, with the channel's current deadline (any `verify` panic); then `channel::acknowledge` (`'No dispute'`, `'Stale channel epoch'`, `'Dispute window closed'`). | Records that the referee is live during this dispute, so `resolve` returns an unfinished game to offchain play instead of forced play. The status does not change. |
-| `resolve` | `channel::resolve` (`'No dispute'`, `'Stale channel epoch'`, `'Dispute window open'`), with `timed` true when the game has a referee key. | Commits the candidate: settles a finished game; otherwise returns an acknowledged timed game to `ACTIVE` and starts forced play for any other. |
-| `force` | Caller is a player; `state_hash(start)` equals the anchor hash (`'Wrong anchor state'`); `referee::force` with the caller's seat (`'Not your step'` and any step panic); then `channel::forced` (`'Not your turn'`, `'Turn deadline passed'`, ...). | Applies the caller's steps onchain. The wallet call authenticates them instead of signatures. They carry no stamps, so a timed game's clock pauses. |
+| `resolve` | `channel::resolve` (`'No dispute'`, `'Stale channel epoch'`, `'Dispute window open'`), with `timed` true when the game has a referee key. | Commits the candidate: settles a finished game; otherwise returns an acknowledged timed game to `ACTIVE` and starts forced play for any other. Forced play starts paused when the candidate waits for the referee's roll. |
+| `force` | Caller is a player; `state_hash(start)` equals the anchor hash (`'Wrong anchor state'`); `referee::force` with the caller's seat (`'Not your step'` and any step panic); then `channel::forced` (`'Not your turn'`, `'Turn deadline passed'`, ...). | Applies the caller's steps onchain. The wallet call authenticates them instead of signatures. They carry no stamps, so a timed game's clock pauses. If they end on a request for the referee's randomness, forced play pauses for up to `PAUSE_SECONDS` (3 days): no seat is due until the roll. |
+| `roll` | `state_hash(start)` equals the anchor hash (`'Wrong anchor state'`); `referee::roll` (`'No roll due'`, `'Invalid reveal'` and any step panic); then `channel::rolled` (`'Not in forced play'`, `'Stale channel epoch'`, `'Turn deadline passed'`, ...). | Posts the referee's value for the roll the anchor waits for, during forced play. Anyone may call it: the referee's hash chain vouches for the value, so it needs no signature. The next seat gets a fresh window. |
+| `void` | `acks` over `void_hash(context, epoch, anchor.hash)` from every seat, or all zero (`'Wrong approval count'`, any `verify` panic); then `channel::void` (`'Not in forced play'`, `'Stale channel epoch'`, `'No roll due'`, and `'Pause still open'` when `acks` are all zero before the pause's deadline). | Ends a game whose roll waits for a referee that is down, with no result: `SETTLED` with `REASON_VOID`. At once with every seat's approval, or by anyone once the pause has run out. |
 | `resume` | `acks` over `reopen_hash(context, epoch, anchor.hash)` from every seat; then `channel::resume` (`'Need every approval'` when `acks` are all zero). | Returns to offchain play from the anchor. |
-| `resume_by_referee` | The game is timed (`'Untimed game'`); `signature` is the referee's over `referee_resume_hash(context, epoch, anchor.hash)` (any `verify` panic); then `channel::resume` (`'Not in forced play'`, `'Stale channel epoch'`, `'Turn deadline passed'`). | Returns a timed game to offchain play from the anchor on the referee's signature alone, so a seat can't keep a game onchain by refusing to approve. |
-| `claim_timeout` | Caller is a player; then `channel::claim_timeout` (`'Only waiting seat'`, `'Turn window open'`, ...). | Settles against the due seat with `REASON_ABANDON`. |
+| `resume_by_referee` | The game is timed (`'Untimed game'`); `signature` is the referee's over `referee_resume_hash(context, epoch, anchor.hash)` (any `verify` panic); then `channel::resume` (`'Not in forced play'`, `'Stale channel epoch'`, `'Turn deadline passed'`). | Returns a timed game to offchain play from the anchor on the referee's signature alone, so a seat can't keep a game onchain by refusing to approve. It also takes back a game paused for a roll, which the referee then gives offchain. |
+| `claim_timeout` | Caller is a player; then `channel::claim_timeout` (`'Waiting for the referee'` while the referee owes a roll, `'Only waiting seat'`, `'Turn window open'`, ...). | Settles against the due seat with `REASON_ABANDON`. |
 | `resign` | Caller is a player; then `channel::resign` (`'Channel not live'`). | Settles against the caller's seat with `REASON_RESIGN`. |
 
 ### Admin and reads
@@ -252,9 +275,9 @@ fn seat_of(game: @ChannelGame, address: ContractAddress) -> u8;
 | Helper | Behavior | Panics |
 | --- | --- | --- |
 | `allow_prover` | Writes `ProverAllowed { class_hash, allowed }`. Emits no event. Revoking a class also stops `join` and `accept_verified` for channels whose prover has that class. | `'Only namespace owner'` unless the caller owns the world's namespace. |
-| `terms` | The game's `Terms`: `chain_id` from the transaction, `channel` = the game system's own address, then the stored game id, prover, window, time control (`None` when `referee` is zero, otherwise `referee` and `clock_settings`), players, keys, tips and config. | `'Invalid stored config'` if the config does not deserialize. |
+| `terms` | The game's `Terms`: `chain_id` from the transaction, `channel` = the game system's own address, then the stored game id, prover, window, time control (`None` when `referee` is zero, otherwise `referee`, `clock_settings` and `referee_tip` as its `rng_tip`), players, keys, tips and config. | `'Invalid stored config'` if the config does not deserialize. |
 | `snapshot` | What the adapter needs to prove from: terms, epoch, anchor hash, anchor block, candidate hash and candidate block. Outside a dispute the candidate is the anchor. | `'Channel not live'` unless `ACTIVE`, `DISPUTE` or `FORCED`. |
-| `result` | `Some(outcome)` once `SETTLED`, otherwise `None`. Games pay rewards from this. | |
+| `result` | `Some(outcome)` once `SETTLED`, otherwise `None`. Games pay rewards from this. Check `reason` before `winner`: a void game (`REASON_VOID`) has `winner` 0 but is not a draw. | |
 | `read` | The `ChannelGame` view, from `ChannelTerms` and `ChannelState`. | `'Unknown channel'` if `player_0` is zero. |
 | `read_state` | The `Channel` alone, from `ChannelState` and the terms' `response_seconds`, without reading the rest of the terms: its `context` reads as zero. | |
 | `status` | The channel's status, read from the packed state. | |
@@ -276,9 +299,18 @@ pub mod channel {
 
     #[abi(embed_v0)]
     impl CounterChannelImpl of super::ICounterChannel<ContractState> {
-        fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip: felt252) {
+        fn join(
+            ref self: ContractState,
+            game_id: felt252,
+            session_key: felt252,
+            rng_tip: felt252,
+            referee_tip: felt252,
+            referee_signature: Signature,
+        ) {
             let mut world = self.world_default();
-            binding::join::<CounterRules>(ref world, game_id, session_key, rng_tip);
+            binding::join::<
+                CounterRules,
+            >(ref world, game_id, session_key, rng_tip, referee_tip, referee_signature);
         }
 
         fn submit_history(
@@ -308,8 +340,8 @@ pub mod channel {
         }
 
         // create, cancel, accept_verified, open_dispute, acknowledge, resolve,
-        // force, resume, resume_by_referee, claim_timeout, resign, allow_prover,
-        // terms: one call each.
+        // force, roll, void, resume, resume_by_referee, claim_timeout, resign,
+        // allow_prover, terms: one call each.
     }
 
     #[generate_trait]

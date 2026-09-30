@@ -3,7 +3,8 @@
 Who has to trust whom, and for what. The short version: the chain trusts only
 your rules and cryptography; players trust nobody for correctness; and players
 trust infrastructure, where they use it, only for liveness. The exception is
-the referee of a timed game, which players trust with time.
+the referee of a timed game, which players trust with time, and with
+randomness in a game that takes its randomness from it.
 
 ## The chain
 
@@ -35,7 +36,7 @@ nothing:
 | sends an illegal or forged step | Nothing: it's rejected |
 | submits an old state | Nothing, if you answer the dispute within the window |
 | stops moving | Time: a dispute, then forced play onchain, then a win on timeout (`REASON_ABANDON`). In a timed game with a live referee, a flag once its time runs out |
-| refuses to reveal randomness | Time: a stall ends in a forced reveal or a timeout |
+| refuses to reveal randomness | Time: a stall ends in a forced reveal or a timeout. In a game that takes its randomness from the referee, no seat reveals |
 | refuses to approve the result | Time: the result settles after one response window |
 | equivocates | Nothing for you: two signatures by one key at one position are evidence |
 
@@ -66,8 +67,8 @@ only by players who rely on it:
 
 ## The referee (timed games only)
 
-The referee of a timed game is the one party players trust beyond liveness,
-and only with time:
+The referee of a timed game is the one party players trust beyond liveness:
+with time, and with randomness when the game takes its randomness from it.
 
 - **It can't** forge, reorder or edit moves, or settle anything the rules
   wouldn't produce.
@@ -81,6 +82,26 @@ and only with time:
 - **It's accountable.** Two attestations at one seq with different transcripts
   are evidence of equivocation.
 - **It's opt-in.** Its key is in the terms, and joining accepts it.
+
+With randomness from the referee (see
+[Randomness](/concepts/randomness#randomness-from-the-referee)):
+
+- **It can't bias a roll.** Its values are fixed by the hash chain it
+  committed. The channel takes that chain's tip only with the referee's
+  signature for the one game, so no seat can make one up.
+- **It can't know a roll before the requester's step arrives.** The seed mixes
+  in the requester's chain value.
+- **It could leak a roll.** It knows its own next value ahead of time. A
+  referee that colluded with the requester could tell it that value before the
+  action is signed. Players trust it not to.
+- **If it's down, the game pauses.** Offchain nothing is stamped anyway. In
+  forced play a roll waits up to 3 days, and nobody can be timed out
+  meanwhile. Anyone can post the referee's value onchain. Otherwise the game
+  ends void, with no result: at once if both seats agree, or by anyone after
+  the pause. A referee that withholds a roll can only cancel a game this way.
+  It can't get a different roll.
+- **It's opt-in too.** The terms carry the referee's chain tip. Seat
+  commit-reveal needs no trusted party, and stays the default.
 
 ## The prover
 

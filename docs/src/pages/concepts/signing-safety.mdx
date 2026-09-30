@@ -36,11 +36,11 @@ for that seat: `{ seq, transcript, message, step, signature, seat }`. `sign` (an
 | Past the mark, where the referee's step took the marked step's position | Allowed (timed games): see below |
 | Starting after the mark (a later anchor) | Allowed: the committed anchor supersedes it |
 
-In a timed game the referee may append a step of its own, a `start`, at the
-seq where the seat's unstamped step waited. That step then never enters the
-history, and the seat has to sign its move again at the next seq. The guard
-allows it: the lost step was never stamped, and a timed replay needs the
-referee's attestation, so no branch through it can settle.
+In a timed game the referee may append a step of its own, a `start` or a
+roll, at the seq where the seat's unstamped step waited. That step then never
+enters the history, and the seat has to sign its move again at the next seq.
+The guard allows it: the lost step was never stamped, and a timed replay needs
+the referee's attestation, so no branch through it can settle.
 
 Marks are opt-in state. A `Session` with no marks behaves as if it has never
 signed, which is what tests that build forks on purpose want.
@@ -79,8 +79,8 @@ needs the referee's stamp first. The step joins `session.pending`, and the seat
 can sign the rest of its turn from there. The mark keeps the whole pending
 chain, so `load` puts it back in `pending` for the client to resend
 (`KeeperClient.submit`) instead of re-applying it. A different step landing
-first at a pending step's seq (a flag, a start, or the other seat resigning)
-drops the chain. A failed write discards the step it signed, so that signature
+first at a pending step's seq (a flag, a start, a roll, or the other seat
+resigning) drops the chain. A failed write discards the step it signed, so that signature
 never leaves.
 
 ## Keys and marks
