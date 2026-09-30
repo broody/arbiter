@@ -1,0 +1,46 @@
+# Glossary
+
+| Term | Meaning |
+| --- | --- |
+| **Actor** | The seat a step belongs to. It's implied by the state (`actor`): the due seat, the pending seat for a `Reveal`, the named seat for a `Resign`, or the referee for a `Flag` or a `Start` |
+| **Acknowledgement** | The referee's signature over `live_hash(context, epoch, deadline)`, sent with `acknowledge` during a dispute of a timed game. `resolve` then returns an unfinished game to `ACTIVE` instead of forced play |
+| **Adapter** | A game's proof adapter: an account contract whose virtual `__execute__` replays a batch for a prover, and whose `settle` checks a proof and hands the result to the channel. See [Add a proof adapter](/guide/adapter) |
+| **Anchor** | The channel's committed state. Replays and proofs start from it, or from the candidate. It changes on every commit, and each change increments the epoch |
+| **Approval (ack)** | A seat's signature over a checkpoint (`checkpoint_hash`) or a reopen (`reopen_hash`). With every seat's approval, a submission commits at once |
+| **Attestation** | The referee's signature over `stamp_hash(context, seq, transcript, clock)`, the state a timed step reached. The last one covers every earlier stamp |
+| **Batch** | What a replay takes: steps, stamps, one final signature per seat, and the referee's attestation |
+| **Candidate** | The best state submitted during a dispute. It commits when the window closes, unless a higher-ranked one replaces it. A submission may start from it to extend it |
+| **Channel** | A game's onchain state machine: status, epoch, anchor, candidate, deadline and result. See [The channel and disputes](/concepts/channel) |
+| **Checkpoint** | An approved, unfinished state committed as the new anchor, so later replays start from it |
+| **Clock** | A timed game's `{ seats, used, stamp }` in the envelope: each seat's clocks as the time rules keep them, the time the current turn used, and the last stamp. See [Clocks and the referee](/concepts/clocks) |
+| **Codec** | A game's JS mirror of its rules and Cairo serialization, passed to `Session` as `game`. See [Mirror the rules in JS](/guide/codec) |
+| **Context** | `context_hash` of the terms. Every signature in a game includes it |
+| **Due seat** | The seat whose turn it is (`due`): the one your `GameRules::due` names, or the pending seat while a reveal is outstanding |
+| **Envelope** | Your game state wrapped with the protocol's bookkeeping: `seq`, `transcript`, `support_turn`, `last_seat`, `pending`, `rng_heads`, `rng_fresh`, `clock`, `outcome` |
+| **Epoch** | A counter the channel increments whenever the anchor changes, and on `resume`, `claim_timeout` and `resign`. Submissions, approvals and proofs name it |
+| **Equivocation** | Signing two different steps at one position. Evidence of it is two signatures by one key at the same `(seq, transcript)` |
+| **Final signature** | A seat's last signature in a batch. It covers that seat's earlier steps through the transcript, so a replay verifies only final signatures |
+| **Flag** | The referee's step that ends a timed game when the due seat's time runs out (`REASON_TIMEOUT`) |
+| **Forced play** | The `FORCED` status: an unfinished game after a dispute, played onchain one window at a time by the due seat (`force`) |
+| **Keeper** | A service that archives and forwards steps, answers disputes, resolves and settles, and optionally referees timed games. See [Keeper](/infra/keeper) |
+| **Max steps** | The transcript cap a game sets with `GameRules::max_steps(config)`. At the first step at or past it that leaves no reveal pending, `adjudicate` ends the game |
+| **Mark** | The record of the last step a key signed (`Session.lastSigned`), stored apart from the transcript, which keeps the key from equivocating. See [Signing safety](/concepts/signing-safety) |
+| **Referee** | The key named in a timed game's terms. It stamps steps, starts the clock, flags a seat whose time runs out, acknowledges disputes and returns games from forced play (`resume_by_referee`) |
+| **Reveal** | A seat's next hash-chain value, sent to complete a randomness request |
+| **Scratch** | The working memory `load` builds from a witness, used by `apply` and `resolve` |
+| **Seat** | A player's position, 0 or 1. Seat 0 creates the game and seat 1 joins |
+| **Segment** | One submission of a history too long for one: the first starts at the anchor, and each next one extends the candidate, within one dispute window |
+| **Session** | One client's verified copy of a game (`Session` in the SDK) |
+| **Session key** | A per-game key that signs a seat's steps. Its public half is in the terms |
+| **Seq** | A step's position: the number of steps before it since the game opened |
+| **Start** | The referee's step that starts or restarts a timed game's clock, charging no one |
+| **Stamp** | The referee's time, in milliseconds, for a step of a timed game. It's carried beside the step, not in the transcript |
+| **State hash** | `state_hash` of an envelope, which is how the channel refers to states |
+| **Step** | One move: `Play`, `PlayRandom`, `Reveal`, `Recommit`, `Resign`, `Flag` or `Start` |
+| **Support turn** | The number of signer changes so far. Dispute candidates rank by it, then by `seq` |
+| **Terms** | Everything the seats accepted by joining: chain, channel, game id, prover, response window, time control, wallets, session keys, chain tips and config |
+| **Time rules** | A game's `ClockRules` (`GameRules::Time`): what each seat has and what a finished turn costs. `StandardTime` covers turn timers, banks, increments and byo-yomi |
+| **Tip** | The last value of a seat's hash chain, committed at join |
+| **Transcript** | A hash chain of every step's message: `transcript' = poseidon(transcript, message)` |
+| **Witness** | Extra replay input a game may need (for example Go's position history), supplied as calldata and checked by `load` |
+| **Window** | The response window, `response_seconds` (5 minutes to 7 days), for disputes and each forced move |

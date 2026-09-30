@@ -1,0 +1,222 @@
+# Deploy the channel
+
+Your game's onchain contract is a Dojo system whose entrypoints each forward to
+a helper in `referee_dojo::channel`. The helpers do the work: storage, caller
+authentication, prover checks, signature checks and the channel state machine.
+Your system adds the game's types and one line per entrypoint.
+
+## Package setup
+
+```toml
+[package]
+name = "my_game_dojo"
+edition = "2024_07"
+cairo-version = "2.13.1"
+
+[[target.starknet-contract]]
+sierra = true
+build-external-contracts = [
+    "dojo::world::world_contract::world",
+    "referee_dojo::models::m_ChannelTerms",
+    "referee_dojo::models::m_ChannelState",
+    "referee_dojo::models::m_ProverAllowed",
+    "referee_dojo::models::e_ChannelUpdated",
+]
+
+[dependencies]
+referee = { git = "https://github.com/broody/referee.git", rev = "<commit>" }
+referee_dojo = { git = "https://github.com/broody/referee.git", rev = "<commit>" }
+my_game = { path = "../rules" }          # your GameRules crate
+starknet = "2.13.1"
+dojo = "1.8.0"
+dojo_cairo_macros = "1.8.0"
+
+[tool.scarb]
+allow-prebuilt-plugins = ["dojo_cairo_macros"]
+```
+
+The `build-external-contracts` list registers referee's models and event in your
+namespace. Dojo 1.8 is pinned to Cairo 2.13, which is why `referee` also builds
+on 2.13.
+
+A channel is stored in two models. `ChannelTerms` holds what the channel fixes
+when it opens (seats, session keys, tips, prover, config, time control, context
+and window) and is written at `create` and `join` only. `ChannelState` holds
+the state machine in four felts (the anchor's hash, the candidate's, and two
+packed words) and is written on every transition. `get_channel` returns both
+as one `ChannelGame`.
+
+Give the system write access to the namespace in `dojo_<profile>.toml`:
+
+```toml
+[namespace]
+default = "counter"
+
+[writers]
+"counter" = ["counter-channel"]
+```
+
+## The system
+
+This is the counter's system
+([`dojo/examples/counter/src/lib.cairo`](https://github.com/broody/referee/blob/main/dojo/examples/counter/src/lib.cairo)),
+abridged. The interface names your types. Each entrypoint is one call into the
+binding.
+
+```cairo
+#[starknet::interface]
+pub trait ICounterChannel<T> {
+    fn create(
+        ref self: T, target: u8, invited: ContractAddress, session_key: felt252, rng_tip: felt252,
+        prover: ContractAddress, response_seconds: u32, clock: Option<TimeControl>,
+    ) -> felt252;
+    fn join(ref self: T, game_id: felt252, session_key: felt252, rng_tip: felt252);
+    fn cancel(ref self: T, game_id: felt252);
+    fn accept_verified(
+        ref self: T, game_id: felt252, epoch: u32, start_hash: felt252, end: Envelope<Counter>,
+        acks: Span<Signature>,
+    );
+    fn submit_history(
+        ref self: T, game_id: felt252, epoch: u32, start: Envelope<Counter>, batch: Batch<Action>,
+        acks: Span<Signature>,
+    );
+    fn open_dispute(ref self: T, game_id: felt252, epoch: u32);
+    fn acknowledge(ref self: T, game_id: felt252, epoch: u32, signature: Signature);
+    fn resolve(ref self: T, game_id: felt252, epoch: u32);
+    fn force(
+        ref self: T, game_id: felt252, epoch: u32, start: Envelope<Counter>, steps: Span<Move<Action>>,
+    );
+    fn resume(ref self: T, game_id: felt252, epoch: u32, acks: Span<Signature>);
+    fn resume_by_referee(ref self: T, game_id: felt252, epoch: u32, signature: Signature);
+    fn claim_timeout(ref self: T, game_id: felt252, epoch: u32);
+    fn resign(ref self: T, game_id: felt252);
+    fn allow_prover(ref self: T, class_hash: felt252, allowed: bool);
+    fn terms(self: @T, game_id: felt252) -> Terms<Config>;
+    fn snapshot(self: @T, game_id: felt252) -> (Terms<Config>, u32, felt252, u64, felt252, u64);
+    fn get_channel(self: @T, game_id: felt252) -> ChannelGame;
+}
+
+#[dojo::contract]
+pub mod channel {
+    use referee_dojo::channel as binding;
+    // …
+
+    #[abi(embed_v0)]
+    impl CounterChannelImpl of super::ICounterChannel<ContractState> {
+        fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip: felt252) {
+            let mut world = self.world_default();
+            binding::join::<CounterRules>(ref world, game_id, session_key, rng_tip);
+        }
+
+        fn submit_history(
+            ref self: ContractState, game_id: felt252, epoch: u32, start: Envelope<Counter>,
+            batch: Batch<Action>, acks: Span<Signature>,
+        ) {
+            let mut world = self.world_default();
+            // The counter's witness is `()`; a game with a witness takes it as an argument.
+            binding::submit_history::<CounterRules>(ref world, game_id, epoch, start, (), batch, acks);
+        }
+
+        fn get_channel(self: @ContractState, game_id: felt252) -> ChannelGame {
+            let world = self.world_default();
+            binding::read(@world, game_id)
+        }
+        // … one line per entrypoint, likewise
+    }
+
+    #[generate_trait]
+    impl InternalImpl of InternalTrait {
+        fn world_default(self: @ContractState) -> WorldStorage {
+            self.world(@"counter")
+        }
+    }
+}
+```
+
+A game whose `Witness` isn't `()` adds a `witness` argument to `submit_history`
+and `force`, right after `start`, and passes it through.
+
+## The entrypoints
+
+| Entrypoint | Caller | What it does |
+| --- | --- | --- |
+| `create` | Seat 0's wallet | Opens a game (`WAITING`) with the config, an optional invited wallet (zero for an open game), seat 0's session key and chain tip, the prover adapter, the response window and an optional `TimeControl`. Returns the game id |
+| `join` | Seat 1's wallet (the invited one, if any) | Takes seat 1 with its session key and chain tip. Fixes the terms and context, and commits the opening state as the anchor (`ACTIVE`) |
+| `cancel` | Seat 0's wallet | Cancels a game nobody joined |
+| `submit_history` | Anyone | Replays a batch of signed steps from the anchor, or from the dispute candidate to extend it. With every seat's checkpoint approval (`acks`) it commits. Without, it becomes the dispute candidate |
+| `accept_verified` | The game's prover adapter only | The proved equivalent of `submit_history`. The adapter's `settle` calls it |
+| `open_dispute` | A seat's wallet | Challenges the other seat to respond within the window (`DISPUTE`) |
+| `acknowledge` | Anyone, with the referee's signature | Timed games: the referee shows it is live during this dispute, so `resolve` returns an unfinished game to `ACTIVE` |
+| `resolve` | Anyone | After the window, commits the best candidate: `SETTLED` if the game finished, `ACTIVE` if a timed game's referee acknowledged the dispute, `FORCED` otherwise |
+| `force` | The due seat's wallet | During forced play, applies that seat's own steps onchain. The wallet call authenticates them, so they carry no signatures |
+| `resume` | Anyone, with every seat's reopen approval | Returns from forced play to offchain play |
+| `resume_by_referee` | Anyone, with the referee's signature | Timed games: the same, on the referee's signature alone |
+| `claim_timeout` | The waiting seat's wallet | Wins once the due seat misses its forced-play window (`REASON_ABANDON`) |
+| `resign` | A seat's wallet | Concedes, in any live status |
+| `allow_prover` | A namespace owner | Allowlists or revokes a proof adapter class |
+| `terms`, `snapshot`, `get_channel` | Anyone (views) | Read the game: its terms; what the adapter proves from (terms, epoch, and the hash and block of the anchor and of the candidate); the whole channel, as a `ChannelGame` |
+
+Every submission that changes the channel names the `epoch` it expects. The
+epoch increments whenever the anchor changes, so a stale submission fails with
+`'Stale channel epoch'` instead of landing on a newer state.
+
+## What `create` checks
+
+- The session key is a curve point (`'Invalid session key'`), and the chain tip
+  is nonzero.
+- The prover is a deployed contract whose class is allowlisted
+  (`'Untrusted prover class'`).
+- The config passes your `init`.
+- The response window is between 300 seconds and 7 days
+  (`'Invalid response window'`).
+- If `clock` is set, the time control is valid, and its referee key is a curve
+  point that neither seat uses (`'Referee is a seat'`). See [Add a clock](/guide/clocks).
+
+`join` checks that the joining wallet isn't seat 0, that it was invited if
+anyone was, and that its session key and tip differ from seat 0's.
+
+## Deploy
+
+:::steps
+
+### Build and migrate
+
+```bash
+sozo build
+sozo migrate --rpc-url <RPC> --account-address <ADDRESS> --private-key <KEY>
+```
+
+The manifest (`manifest_<profile>.json`) lists your system's address under its
+tag, for example `counter-channel`.
+
+### Allowlist the proof adapter
+
+Games name a prover adapter at creation, and both `create` and `join` refuse an
+adapter whose class isn't allowlisted. A namespace owner allowlists it once per
+adapter class:
+
+```bash
+sozo execute counter-channel allow_prover <ADAPTER_CLASS_HASH> 1
+```
+
+Declare and deploy the adapter first. See [Add a proof adapter](/guide/adapter).
+
+:::
+
+## Watching games
+
+Every entrypoint that changes a game emits `ChannelUpdated`, keyed by
+`game_id`:
+
+| Field | Meaning |
+| --- | --- |
+| `kind` | `CREATED` 0, `JOINED` 1, `CANCELLED` 2, `DISPUTED` 3, `RECEIVED` 4, `RESOLVED` 5, `FORCED` 6, `RESUMED` 7 (either resume), `TIMED_OUT` 8, `RESIGNED` 9, `ACKNOWLEDGED` 10 |
+| `epoch`, `status`, `deadline` | The channel after the update |
+| `seq`, `state_hash` | The candidate during a dispute, otherwise the anchor |
+| `winner`, `reason` | The result once settled, otherwise that state's outcome |
+
+From JS, read a game with `getChannel` (the decoded `ChannelGame`), and its
+terms with `decodeTerms` over the `terms` view (see
+[@referee/sdk/proving](/reference/proving)). Rewards read
+`referee_dojo::channel::result(world, game_id)`, which is `Some(outcome)` once
+the game is `SETTLED`.

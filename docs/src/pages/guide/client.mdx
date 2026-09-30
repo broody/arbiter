@@ -1,0 +1,227 @@
+# Build the client
+
+This page wires the pieces into a game client:
+
+1. make a seat's secrets;
+2. open the game onchain;
+3. play through a `SessionStore`, with a keeper as the transport;
+4. settle, and watch for disputes.
+
+It uses the counter's codec. Substitute yours.
+
+```js
+import { ec } from 'starknet'
+import { Session, decodeTerms, disputeAnswer, play, playRandom, publicKey, reveal, rngChain, rebase } from '@referee/sdk'
+import { SessionStore, indexedDbBackend } from '@referee/sdk/store'
+import { KeeperClient } from '@referee/sdk/keeper'
+import { contractCall, getChannel, historyCall } from '@referee/sdk/proving'
+import { ADD, GAMBLE, counter } from './counter.mjs' // your game codec
+
+const store = new SessionStore(indexedDbBackend('my-game'))
+const keeper = new KeeperClient('https://keeper.example')
+```
+
+## 1. Make the seat's secrets
+
+Before creating or joining, a client makes two secrets that exist only on this
+device:
+
+- a **session key**, which signs this game's moves. It's per game, holds no
+  funds, and is bound into the terms;
+- a **randomness chain**: a random seed and a length. Only the chain's tip goes
+  onchain.
+
+```js
+const randomKey = () =>
+  BigInt('0x' + [...ec.starkCurve.utils.randomPrivateKey()].map(b => b.toString(16).padStart(2, '0')).join(''))
+
+const privateKey = randomKey()
+const seed = randomKey(), length = 64
+const tip = rngChain(seed, length)[length]
+
+// Keep them before anything onchain references them.
+await store.saveKey(privateKey, { seed, length })
+```
+
+:::warning
+Lose the session key and you can't move: you'll lose on time, though you can
+still resign from your wallet. Lose the seed and you can't reveal randomness,
+which also ends in a loss on time. `saveKey` keeps both. Never put either in a
+transcript, an export or a URL.
+:::
+
+## 2. Open the game onchain
+
+Seat 0 calls `create` and seat 1 calls `join`, each from their wallet, with the
+session **public** key and the chain tip:
+
+```js
+// seat 0
+await wallet.execute(contractCall(CHANNEL, 'create', [
+  20,                  // the counter's config: target
+  opponentAddress,     // or 0 for an open game
+  publicKey(privateKey),
+  tip,
+  ADAPTER_ADDRESS,     // the game's prover
+  3600,                // response window, seconds
+  1,                   // Option<TimeControl>: 1 is None (untimed)
+]))
+
+// seat 1
+await wallet.execute(contractCall(CHANNEL, 'join', [gameId, publicKey(privateKey), tip]))
+```
+
+Once seat 1 has joined, read the terms back from the chain and open the session
+on them. Never build terms yourself: the context hash has to match the
+channel's.
+
+```js
+const terms = decodeTerms(counter, (await provider.callContract(contractCall(CHANNEL, 'terms', [gameId]))).map(BigInt))
+const session = await store.open(counter, terms)
+await keeper.register(session)
+const { seat } = await store.keyFor(terms)   // which seat this device plays
+```
+
+## 3. Play
+
+### Your move
+
+```js
+const { privateKey } = await store.keyFor(terms)
+const record = await store.move(session, play({ kind: ADD, amount: 3 }), privateKey)
+await keeper.send(session, record.seq)
+```
+
+`store.move` checks the step against the rules, signs it, saves a durable
+*mark* of what it signed, applies it and saves the session, all before it
+returns. It refuses to sign where the session doesn't extend the last step
+this key signed. That can happen after a stale restore or in a second tab, and
+signing there would be equivocation. See [Signing safety](/concepts/signing-safety).
+
+### Their move
+
+```js
+// Waits up to 30 seconds, then applies each verified step through the store.
+const steps = await keeper.pull(session, { wait: 30, store })
+```
+
+Every pulled step is verified again locally. `pull` refuses a branch that
+diverges from yours with `The keeper holds another branch at seq N`.
+
+Instead of polling, you can keep one server-sent event stream open. It applies
+each step as the keeper gets it, the same way:
+
+```js
+const stop = new AbortController()
+keeper.follow(session, { store, signal: stop.signal, onSteps: records => render(session) })
+```
+
+The keeper is only a transport. Without one, send `record` (its `step` and
+`signature`) over any channel you like, and apply what arrives with
+`store.receive(session, signed)`.
+
+### Whose turn
+
+`session.due()` is the seat to act, including a seat that owes a reveal.
+`session.env.outcome.finished` ends the game. `session.env.game` is your game's
+state, for rendering.
+
+### Randomness
+
+When your action requests randomness, send it as `playRandom` with your next
+chain value. The other seat's client then owes a `reveal` of its own:
+
+```js
+/** The seat's next chain value: the one that hashes to its current head. */
+function nextValue(session, seat, { seed, length }) {
+  const chain = rngChain(seed, length), head = session.env.rng_heads[seat]
+  const at = chain.findIndex(v => v === head)
+  if (at <= 0) throw Error('Chain exhausted: recommit a new tip first')
+  return chain[at - 1]
+}
+
+const mine = await store.keyFor(terms)
+// Your gamble
+await store.move(session, playRandom({ kind: GAMBLE, amount: 0 }, nextValue(session, mine.seat, mine)), mine.privateKey)
+// When session.env.pending.active and pending.seat is yours: reveal
+await store.move(session, reveal(nextValue(session, mine.seat, mine)), mine.privateKey)
+```
+
+Each value can be revealed once, walking back from the tip. Before a chain runs
+out, send `recommit(newTip)` on your turn with a fresh chain, and save its seed.
+A seat may recommit only after it has revealed from its current tip, once per
+reveal (`'Nothing revealed to recommit'`). See [Randomness](/concepts/randomness).
+
+### Resigning
+
+`store.move(session, resign(seat), privateKey)` concedes with a signed step, at
+any time. Your wallet can also call `resign` onchain.
+
+## 4. Settle
+
+When the game finishes, both clients sign a checkpoint of the final state for
+the channel's current epoch, and exchange the approvals:
+
+```js
+const channel = await getChannel(provider, counter, CHANNEL, gameId)
+const approval = session.checkpointSignature(channel.epoch, privateKey)
+// … send `approval` to the other seat and collect theirs: acks = [seat0, seat1]
+```
+
+Anyone then submits the history **from the channel's anchor** with both
+approvals, and the game settles in one transaction:
+
+```js
+const base = rebase(session, channel.anchor.hash)   // the session from the anchor
+await wallet.execute(historyCall(base, channel.epoch, { acks }))
+```
+
+For long games, prove instead of replaying onchain: see
+[Add a proof adapter](/guide/adapter). A keeper settles finished games on its
+own, without approvals, by opening a dispute window and resolving it.
+
+The same flow on an unfinished state is a **checkpoint**. The channel commits
+it as the new anchor and play continues offchain. Every later submission
+starts from that anchor, which `rebase` takes care of.
+
+## 5. Watch for disputes
+
+If the other seat submits an old state or stops responding, the channel moves
+to `DISPUTE` or `FORCED` (see [The channel and disputes](/concepts/channel)).
+You respond with:
+
+| Channel | Your move |
+| --- | --- |
+| `DISPUTE`, the candidate is older than your transcript | `submit_history` (or a proof) of `disputeAnswer(session, channel)` before the deadline: your transcript from the candidate when your history holds it, otherwise from the anchor |
+| `DISPUTE`, the deadline passed | `resolve` (anyone may) |
+| `FORCED`, you're due | `force` your steps onchain from your wallet before the deadline |
+| `FORCED`, they're due and missed the deadline | `claim_timeout` from your wallet |
+| `FORCED`, both want to go back offchain | Both sign `session.reopenSignature(epoch, anchorHash, key)`, and anyone calls `resume` |
+
+```js
+const channel = await getChannel(provider, counter, CHANNEL, gameId)
+const answer = disputeAnswer(session, channel)   // null if nothing you hold outranks the candidate
+if (answer) await wallet.execute(historyCall(answer, channel.epoch))
+```
+
+In a timed game, the referee keeps its games out of forced play while it is
+live: it acknowledges each dispute, so `resolve` returns an unfinished game to
+`ACTIVE`, and it returns a game from forced play on its own
+(`resume_by_referee`). See [Clocks and the referee](/concepts/clocks#disputes-and-forced-play).
+
+A client can't watch while it's closed. A keeper answers disputes and resolves
+them on its players' behalf. See [Keeper](/infra/keeper).
+
+## Restore after a refresh or on a new device
+
+```js
+// Same device: the transcript, your marks and your keys come back from the store.
+const session = await store.load(counter, { chain_id, channel: CHANNEL, game_id: gameId })
+
+// New device: the keeper's copy, verified step by step, plus your key and marks.
+const restored = await keeper.load(counter, { channel: CHANNEL, game_id: gameId })
+```
+
+On a new device, bring the key **and its marks** from the old one. Without the
+marks, a stale copy of the game could lead the new device to sign a second step
+at a position you already signed. See [Signing safety](/concepts/signing-safety).

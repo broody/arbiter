@@ -1,0 +1,151 @@
+# @referee/sdk/store
+
+Durable client sessions: each game's transcript, the last step the client signed for each seat, and the client's session keys, in a small async key-value backend. `SessionStore.move` makes the [signing guard](/concepts/signing-safety) survive restarts, second tabs and stale copies, and in a timed game it keeps the steps that still await the referee's stamp.
+
+```js
+import { SessionStore, indexedDbBackend, memoryBackend, stringify, parse } from '@referee/sdk/store'
+import { fileBackend } from '@referee/sdk/store/file' // Node only
+```
+
+Source: [`sdk/src/store.mjs`](https://github.com/broody/referee/blob/main/sdk/src/store.mjs) and [`sdk/src/store-file.mjs`](https://github.com/broody/referee/blob/main/sdk/src/store-file.mjs). See [Build the client](/guide/client).
+
+## Backends
+
+A backend is an async key-value store of plain data: objects, arrays, strings, numbers, booleans and `BigInt`s. Writes resolve once they are durable.
+
+| Name | Signature | What it does |
+| --- | --- | --- |
+| `get` | `(key)` | The value, or `undefined`. |
+| `put` | `(key, value)` | Writes `value`. |
+| `update` | `(key, fn)` | Writes `fn(current)` and returns it, with no other write to `key` in between, even from another tab or handle on the same storage. `fn` is synchronous; if it throws, nothing is written. |
+| `keys` | `(prefix)` | The keys that start with `prefix`. |
+| `close` | `()` | Releases the backend. `indexedDbBackend` and `fileBackend` have it; `memoryBackend` does not. |
+
+| Backend | Signature | Where |
+| --- | --- | --- |
+| [`memoryBackend`](#memorybackend) | `()` | In memory, for tests and short-lived clients. |
+| [`indexedDbBackend`](#indexeddbbackend) | `(name = 'referee', { indexedDB = globalThis.indexedDB } = {})` | An IndexedDB database, for browsers. |
+| [`fileBackend`](#filebackend) | `(dir)`, async | A directory of JSON files, for Node. |
+
+### memoryBackend
+
+A `Map`. Values are copied with `structuredClone` on the way in and out.
+
+### indexedDbBackend
+
+An IndexedDB database named `name`, at version 1, with one object store, `records`. It opens on first use. Tabs of one origin share it: `update` is one readwrite transaction, and every write resolves after a `strict`-durability commit. `close()` closes the connection; the next call opens it again. Pass `indexedDB` to use another factory, such as `fake-indexeddb` in tests.
+
+### fileBackend
+
+```js
+import { fileBackend } from '@referee/sdk/store/file'
+
+const backend = await fileBackend('./sessions')
+// ...
+await backend.close()
+```
+
+Opens `dir`, creating it, and takes its lock.
+
+- **One file per key.** A key is stored in `dir` as `encodeURIComponent(key)` plus `.json`, written with `stringify`. Each write goes to a `.tmp` file, which is synced and renamed over the old one; the directory is then synced where the platform allows.
+- **Serial writes.** `put` and `update` run one at a time within a backend.
+- **LOCK file.** One process owns a directory at a time. `fileBackend` creates `dir/LOCK` holding its pid. If `LOCK` exists and names a live process, this one included, it throws `Session store ${dir} is in use by process ${pid}`. A lock left by a process that exited is taken over. `close()` waits for pending writes and removes `LOCK`.
+
+## SessionStore
+
+```js
+new SessionStore(backend)
+```
+
+Keeps each game's transcript, the last step this client signed for each seat (`Session.lastSigned`), and the client's session keys, in `backend`.
+
+- `move` records the step it signs as the seat's mark before returning it, and refuses to sign where the session does not extend the stored mark, even when another tab or a stale copy has moved on since.
+- `load` verifies the whole transcript (`Session.import`) and re-applies a signed step that never reached it, after a crash between the two writes. In a timed game it restores the steps awaiting a stamp instead, to resend.
+- Marks are stored apart from transcripts, so restoring an old transcript from a backup, the other seat or a keeper never rolls one back.
+- A transcript is stored in pieces, and a save writes only the steps it has not saved yet (see [Stored keys](#stored-keys)).
+
+### Methods
+
+| Name | Signature | What it does |
+| --- | --- | --- |
+| `load` | `(game, ids)` | The stored session for `ids` (`{ chain_id, channel, game_id }`; terms work), or `null`. Reads the transcript from its pieces, verifies every step (`Session.import`) and attaches the stored marks. In an untimed game it also re-applies any marked step the transcript lacks, and saves if it did. In a timed game it puts each mark's pending steps back into `session.pending` (`Session.resume`). |
+| `open` | `(game, terms, options)` | The stored session for these terms or, if there is none, a new `Session(game, terms, options)`, with the stored marks attached as `load` does, and saved. An existing session ignores `options`. Throws `Stored session has other terms` if the stored session's context differs. |
+| `save` | `(session, { replace = false } = {})` | Saves the transcript: the steps past the stored pointer, then the pointer. Throws `Stale session: the store holds a transcript this one does not extend` if another tab moved on, unless `replace`. |
+| `move` | `(session, step, privateKey)` | Signs our step and stores it as the seat's mark. In an untimed game it applies the step and saves; in a timed game the step joins `session.pending`. Returns the signed record to send. See [move](#move). |
+| `receive` | `(session, signed)` | Verifies and applies a signed step (`Session.receive`): the other seat's, or a stamped one from the referee, which clears our own step from `session.pending`. Then saves, and returns the record. |
+| `saveKey` | `(privateKey, secrets = {})` | Keeps a session key, with anything else the seat must not lose, such as its randomness seed. |
+| `keyFor` | `(terms)` | `{ seat, privateKey, ...secrets }` for the first seat of `terms` whose key is stored, or `null`. |
+| `list` | `()` | `{ chain_id, channel, game_id }` of every stored session, as `BigInt`s. |
+
+### move
+
+```js
+await store.move(session, step, privateKey)
+```
+
+1. Finds the step's seat at `session.env` (`actorOf`). Throws `Invalid seat` unless it is 0 or 1.
+2. In one `backend.update` of that seat's mark, takes the later of the session's `lastSigned[seat]` and the stored mark (the stored mark wins a tie), then calls `session.sign(step, privateKey)` against it and writes the new record as the mark. In a timed game the mark is the record plus `pending`, the whole chain in `session.pending`.
+3. In an untimed game, applies the record with `session.receive`, saves the session and returns the record. In a timed game, returns the record without applying or saving.
+
+If the step breaks the rules or would contradict a step this key already signed, `move` throws before any signature leaves it, and nothing is written. The messages are those of [`Session.sign`](/reference/sdk#sign), such as `Would equivocate: this key signed a different step at seq ${seq}` and `Session is behind seq ${seq}, which this key signed`. If the write of the mark fails, `move` restores `lastSigned[seat]` and, in a timed game, drops the step it signed from `session.pending` (`Session.discard`), so that signature never leaves.
+
+:::note
+In a timed game, `move` signs from `session.tip`, the state after our pending steps, so a seat can sign several steps of its turn without waiting for the referee. Each step joins `session.pending` and is not applied. Send the chain to the referee and `receive` the stamped records it returns ([`KeeperClient.submit`](/reference/keeper-client#submit) does both); each stamped record clears its step from `pending`. A different step that lands first at a pending step's seq (a `flag`, a `start`, or the other seat resigning) drops the whole chain. `load` puts the chain from the mark back into `pending`, skipping steps the transcript already holds, so after a restart `submit` resends it.
+:::
+
+### Session keys
+
+A session key moves in one game (its terms bind it) and holds no funds, so keeping it in the store (`saveKey`) is the intended tradeoff. Anything that can run script on the page can read it, as with any key held in JS.
+
+:::warning
+- Never put a session key in a transcript, an export or a URL.
+- Keep the seat's randomness seed with its key. Without the seed the seat cannot reveal, and it loses on time.
+- Use a key on one device at a time. Two stores holding the same key do not share marks and can equivocate. To switch devices, move the key and its marks together and stop using the old copy.
+:::
+
+### Stored keys
+
+| Key | Value |
+| --- | --- |
+| `session/${chain_id}/${channel}/${game_id}` | The pointer: `{ start: { seq, transcript }, seq, transcript }`, the position the saved transcript starts at and the one it reaches. |
+| `start/${chain_id}/${channel}/${game_id}/${seq}/${transcript}` | The transcript's start: `{ version, terms, start, witness, steps: [] }`, `session.export()` without its steps. |
+| `step/${chain_id}/${channel}/${game_id}/${seq}/${transcript}` | One step, keyed by the position it reaches: `{ transcript, signed }`, the transcript it was signed at and its `signedStep`. |
+| `signed/${context}/${seat}` | The seat's mark: the record of the last step signed for it. In a timed game it also holds `pending`, the steps awaiting a stamp. |
+| `key/${publicKey}` | `{ ...secrets, privateKey }`. |
+
+Ids, contexts, transcripts and public keys appear in hex (`hex`); `seq` is decimal.
+
+A position's transcript hash commits to the whole history before it, so two branches never share a key and no piece is rewritten. A save:
+
+1. Checks the pointer and throws `Stale session` if the stored transcript is not in this session's history, unless `replace`.
+2. Writes the start piece if the pointer names another start (a new anchor).
+3. Writes the steps past the pointer's end: every step after a new start or with `replace`.
+4. Writes the pointer in one `backend.update`, which repeats the stale check. The pointer is the only key a save overwrites.
+
+`load` follows the steps back from the pointer's end, through each step's `transcript`, to its start. A missing piece throws `Stored session is missing its start`, `Stored session is missing its step at seq ${seq}` or `Stored session does not reach its start`. Pieces of a replaced branch stay in the backend.
+
+A transcript that an older SDK saved whole, as `{ record, seq, transcript }` under the `session/` key, still loads, and the next save stores it in pieces.
+
+### Example
+
+```js
+import { SessionStore, indexedDbBackend } from '@referee/sdk/store'
+import { counter } from './counter.mjs' // your game codec
+
+const store = new SessionStore(indexedDbBackend())
+await store.saveKey(sessionKey, { seed }) // once, when joining
+
+const session = await store.open(counter, terms)
+const { privateKey } = await store.keyFor(terms)
+const record = await store.move(session, step, privateKey) // send `record` to the other seat
+await store.receive(session, theirs)                       // their signed step, verified
+```
+
+## stringify and parse
+
+```js
+stringify(value)
+parse(text)
+```
+
+JSON that keeps `BigInt`s, as `{ "$n": "<decimal>" }`, for backends that store text. `parse` turns any object whose only key is `$n`, with a string value, back into a `BigInt`. `fileBackend` and the keeper's HTTP API use this encoding ([Keeper HTTP API](/reference/keeper-api)).

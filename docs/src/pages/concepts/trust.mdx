@@ -1,0 +1,97 @@
+# Trust model
+
+Who has to trust whom, and for what. The short version: the chain trusts only
+your rules and cryptography; players trust nobody for correctness; and players
+trust infrastructure, where they use it, only for liveness. The exception is
+the referee of a timed game, which players trust with time.
+
+## The chain
+
+The channel commits a state only if it's a replay of signed steps from the
+committed anchor, directly or through a dispute candidate that was one, run
+onchain (`submit_history`) or proved (the adapter). So the chain trusts:
+
+- **your `GameRules`**, which must be deterministic and panic on illegal
+  actions, and whose `max_steps` and `adjudicate` end any game that runs too
+  long;
+- **STARK-curve ECDSA and Poseidon**;
+- **Starknet's proof verification**, for games settled with proofs;
+- **the namespace owner's allowlist of adapter classes.** An allowlisted
+  adapter can settle any game that names it. The counter's adapter has no
+  admin, no upgrade path and no custody, and it pins one virtual OS program.
+
+Signatures alone never commit a state. Two colluding seats can sign anything,
+but they can't make the channel accept a state the rules wouldn't produce from
+the anchor.
+
+## Players
+
+Each client verifies every signature and every step it receives, and never
+signs from a state it hasn't verified. A player trusts the other player for
+nothing:
+
+| The other player… | Costs |
+| --- | --- |
+| sends an illegal or forged step | Nothing: it's rejected |
+| submits an old state | Nothing, if you answer the dispute within the window |
+| stops moving | Time: a dispute, then forced play onchain, then a win on timeout (`REASON_ABANDON`). In a timed game with a live referee, a flag once its time runs out |
+| refuses to reveal randomness | Time: a stall ends in a forced reveal or a timeout |
+| refuses to approve the result | Time: the result settles after one response window |
+| equivocates | Nothing for you: two signatures by one key at one position are evidence |
+
+A player's own risks are operational: losing the session key or the
+randomness seed (a loss on time), and signing from a stale copy (see
+[Signing safety](/concepts/signing-safety)).
+
+## The keeper
+
+A keeper archives, forwards and settles. It's trusted for **availability**, and
+only by players who rely on it:
+
+- **It can't forge a step.** It stores only steps that verify, and every client
+  verifies again whatever it pulls.
+- **It can delay or withhold steps.** Both players keep their own copies, so
+  it's never the only one.
+- **It holds no player keys.** Its account pays only for `submit_history`,
+  `resolve`, the adapter's `settle`, and a referee's `acknowledge` and
+  `resume_by_referee`, which anyone may send.
+- **An offline player who relies on it to answer disputes** trusts it to be
+  up. If it's down, or colluding with the opponent, a stale candidate settles
+  after the window. Mitigations: your own client watching, more than one
+  keeper, a longer response window.
+- **Restoring on a new device from a keeper** also trusts it to serve the
+  latest copy, unless your marks came with your key (see
+  [Signing safety](/concepts/signing-safety)).
+- Anyone can run one.
+
+## The referee (timed games only)
+
+The referee of a timed game is the one party players trust beyond liveness,
+and only with time:
+
+- **It can't** forge, reorder or edit moves, or settle anything the rules
+  wouldn't produce.
+- **It can** skew time or refuse to stamp. An honest seat's worst case is
+  losing on time.
+- **It decides where a dispute goes.** Its acknowledgement returns an
+  unfinished dispute to offchain play instead of forced play, and its signature
+  alone brings a game back from forced play. Neither changes a state: the
+  channel still commits the best candidate, and a resume starts from the
+  anchor.
+- **It's accountable.** Two attestations at one seq with different transcripts
+  are evidence of equivocation.
+- **It's opt-in.** Its key is in the terms, and joining accepts it.
+
+## The prover
+
+A prover, hosted or self-hosted, sees public transcripts and signatures, never
+keys. It can delay or refuse a proof but can't forge one: Starknet verifies the
+proof, and the adapter checks that it proves exactly the expected transition.
+`submit_history` is always there as a fallback.
+
+## Privacy
+
+Transcripts are public by design. The keeper serves them to anyone who asks,
+`submit_history` puts the steps in calldata, and a prover sees every step it
+proves. Referee suits games where every move is visible to both players. It has
+no hidden-information support.

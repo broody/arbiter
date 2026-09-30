@@ -1,0 +1,167 @@
+# @referee/sdk/keeper
+
+A client for a referee [keeper](/infra/keeper)'s HTTP API: archive a session, send our steps, fetch the other seat's by long poll or follow them as a stream, restore a game on a new device, and, in a timed game, submit our steps for the keeper to stamp. Game clients use it as their transport.
+
+```js
+import { KeeperClient } from '@referee/sdk/keeper'
+```
+
+Source: [`sdk/src/keeper.mjs`](https://github.com/broody/referee/blob/main/sdk/src/keeper.mjs). The keeper cannot forge steps, since this client verifies each step it applies, but it can withhold them, so a client keeps its own copy with [`@referee/sdk/store`](/reference/store). The routes are in [Keeper HTTP API](/reference/keeper-api).
+
+## Constructor
+
+```js
+new KeeperClient(url, { fetch = globalThis.fetch } = {})
+```
+
+| Option | Default | What it is |
+| --- | --- | --- |
+| `url` | | The keeper's base URL. A trailing `/` is dropped. |
+| `fetch` | `globalThis.fetch` | The `fetch` to send requests with. |
+
+Requests and answers are JSON with `BigInt`s as `{ "$n": "<decimal>" }` (`stringify` and `parse` from `@referee/sdk/store`). A game is addressed by `ids`, any object with `channel` and `game_id`, such as its terms.
+
+## Methods
+
+| Name | Signature | What it does |
+| --- | --- | --- |
+| `register` | `(session, { authorizations } = {})` | Archives `session` (`POST /games` with `session.export()`), or merges it into the keeper's copy. Returns the keeper's answer. An unanchored game needs `authorizations` the first time. See [register](#register). |
+| `send` | `(session, from = session.start.seq)` | Sends `session`'s signed steps from seq `from` to its end (`POST …/steps`). `from` is raised to `session.start.seq` if it is lower. Returns the keeper's answer. |
+| `submit` | `(session, options = {})` | Timed games: sends our steps awaiting a stamp (`session.pending`) to the keeper that referees the game, then pulls them back stamped, with anything after them. See [submit](#submit). |
+| `steps` | `(ids, from, { wait = 0, signal } = {})` | The keeper's step records (as in `Session.steps`) from seq `from`, as `{ start, seq, transcript, steps }`. With `wait` (seconds), waits for at least one. Applies nothing. |
+| `pull` | `(session, { wait = 0, store, signal } = {})` | Applies the keeper's steps past `session`'s end and returns them. See [pull](#pull). |
+| `follow` | `(session, { store, signal, onSteps = () => {} } = {})` | Keeps the game's step stream open and applies each step as the keeper gets it. See [follow](#follow). |
+| `load` | `(game, ids)` | The keeper's copy of a game, as a `Session` rebuilt with `Session.import`, so with every signature verified. |
+| `evidence` | `(ids)` | The equivocation evidence the keeper recorded for a game: entries `{ seq, seat, transcript, steps }`, each with the different steps one seat signed at that position. |
+
+`wait` is a long poll: the keeper answers as soon as a step at `from` or later exists, and caps the wait at its `max_wait_seconds`. `signal` is an `AbortSignal` for the request.
+
+### register
+
+```js
+await keeper.register(session)                     // an anchored game
+await keeper.register(session, { authorizations }) // an unanchored game, the first time
+```
+
+A keeper entry with `anchored: false` keeps games that no channel holds (see [Keeper](/infra/keeper#unanchored-games)). Such a game is admitted only with each seat's wallet signature over `termsTypedData(game, terms)` from [`@referee/sdk`](/reference/sdk), in seat order, as `authorizations`. The keeper checks each against the seat's account contract and keeps them with the game. Without them it answers 403.
+
+### pull
+
+```js
+await keeper.pull(session, { wait: 30, store })
+```
+
+Fetches the keeper's steps from `session.env.seq` and applies each in order: through `store.receive` (verified and saved) when a [`SessionStore`](/reference/store#sessionstore) is given, otherwise through `session.receive`. Returns the records it applied.
+
+For each record:
+
+1. Before the session's end, it skips a record the session already holds (the same `message` at that seq) or one before `session.start.seq`. Any other throws `The keeper holds another branch at seq ${seq}`.
+2. At the session's end, it checks that the record's `seq` and `transcript` are the session's current position, and throws `The keeper holds another branch at seq ${seq}` if not. Then it applies the record.
+
+A client still on the keeper's branch just follows it. `pull` also throws any error of `receive`.
+
+### follow
+
+```js
+const stop = new AbortController()
+const following = keeper.follow(session, { store, signal: stop.signal, onSteps: records => render(session) })
+// later
+stop.abort()
+await following
+```
+
+Opens `GET …/events?from=${session.env.seq}` ([the step stream](/reference/keeper-api#get-gameschannelgameevents)) with `fetch`, so it runs in Node and browsers without a dependency. For each `steps` event it applies the records as `pull` does, skipping our own steps echoed back, and then calls `onSteps` with the records it applied. It ignores heartbeat comments and other events.
+
+It resolves when `signal` aborts or the keeper ends the stream. It rejects with the keeper's error if the stream does not open (see [Errors](#errors)), with `The keeper holds another branch at seq ${seq}`, or with any error of `receive`. A stream counts against the keeper's `max_waiters`, as a long poll does.
+
+### submit
+
+```js
+await store.move(session, step, privateKey) // joins session.pending
+await keeper.submit(session, { store })
+```
+
+In a timed game, `store.move` signs a step without applying it: the step waits in `session.pending` until the referee stamps it. `submit` posts every pending step from the first one's seq (`POST …/steps`), and the keeper that referees the game stamps each as it arrives. Then it calls `pull(session, options)` and returns what that returns, our stamped steps first. With no pending step it only pulls.
+
+Sending again is harmless: the keeper skips steps it already holds. After a restart, [`store.load`](/reference/store#methods) puts the pending steps back, and `submit` resends them.
+
+`send` sends only steps the session has applied, so a timed game's unstamped steps go through `submit`.
+
+If the keeper refuses the steps, `submit` throws before pulling:
+
+| Status | Message | When |
+| --- | --- | --- |
+| `400` | `Step ${seq} rejected: Flag fell: the seat's time ran out first` | The seat's time ran out first. The keeper flags the seat. |
+| `409` | `Conflicts with the archived step at seq ${seq}` | Another step holds that seq: the referee's `flag` or `start`, or the other seat's resignation. |
+| `409` | `The game is in forced play onchain: steps wait until the channel resumes` | The keeper saw the channel in forced play. |
+| `400` | `Step ${seq} rejected: Transcripts are limited to ${n} steps` | The transcript is at the keeper's `max_steps` for the game. |
+
+After a conflict, a `pull` brings in the step that took the seq, which drops the pending chain. After the referee's `start`, the seat may sign its step again.
+
+## Errors
+
+A keeper answer outside 2xx throws an `Error` with:
+
+| Field | What it is |
+| --- | --- |
+| `message` | The keeper's `error.message`, or `HTTP ${status}` when the body has none. |
+| `status` | The HTTP status. |
+| `data` | The keeper's `error.data`, or `undefined`. |
+
+For example, a step that conflicts with the keeper's branch fails with status 409 and `data.equivocation` telling whether the same seat signed both steps, a rejected step fails with status 400, `Step ${seq} rejected: …`, and `data.accepted`, and a full keeper answers 503 or, for a wallet's unanchored games, 429. See [Keeper HTTP API](/reference/keeper-api) for every answer.
+
+## Examples
+
+A two-player game through a keeper. Each seat runs the same loop with its own store and key:
+
+```js
+import { SessionStore, indexedDbBackend } from '@referee/sdk/store'
+import { KeeperClient } from '@referee/sdk/keeper'
+import { counter } from './counter.mjs' // your game codec
+
+const store = new SessionStore(indexedDbBackend())
+const keeper = new KeeperClient('https://keeper.example')
+
+const session = await store.open(counter, terms)
+const { seat, privateKey } = await store.keyFor(terms)
+await keeper.register(session) // once, after joining
+
+while (!session.env.outcome.finished) {
+  if (session.due() === seat) {
+    const record = await store.move(session, await chooseStep(session), privateKey) // your UI or bot
+    await keeper.send(session, record.seq)
+  } else {
+    await keeper.pull(session, { wait: 30, store }) // the other seat's steps, verified and saved
+  }
+}
+```
+
+In a timed game `store.move` signs the step without applying it, and the keeper that referees the game stamps it:
+
+```js
+await keeper.submit(session, { store }) // after a restart: resend any pending steps
+
+while (!session.env.outcome.finished) {
+  if (session.due() === seat) {
+    await store.move(session, await chooseStep(session), privateKey) // signed, not applied: in session.pending
+    await keeper.submit(session, { store }) // stamped by the keeper, then pulled back
+  } else {
+    await keeper.pull(session, { wait: 30, store }) // also brings the referee's flag or start
+  }
+}
+```
+
+Instead of polling, a client can keep one stream open. It gets the other seat's steps, the referee's steps and our own stamped steps as the keeper archives them:
+
+```js
+const stop = new AbortController()
+keeper.follow(session, { store, signal: stop.signal, onSteps: () => render(session) })
+```
+
+A new device restores a game from the keeper, verified:
+
+```js
+const restored = await keeper.load(counter, terms)
+```
+
+See [Add a clock](/guide/clocks) and [Clocks and the referee](/concepts/clocks) for timed games.

@@ -1,0 +1,308 @@
+# Write the rules
+
+A game's rules are one Cairo trait, `GameRules`. The same code runs in three
+places: the Dojo channel replays disputed history with it, the proof adapter
+replays settlements with it inside a Stwo proof, and the Cairo tests check the
+JS mirror against it. This page builds the counter game's rules and explains
+each part of the trait.
+
+## Set up the package
+
+Rules live in their own Cairo package that depends only on `referee`. Keep Dojo
+and Starknet storage out of it, so the same crate builds for the Dojo channel
+(Cairo 2.13) and for the proof adapter (Cairo 2.18).
+
+```toml
+[package]
+name = "my_game"
+version = "0.1.0"
+edition = "2024_07"
+cairo-version = "2.13.1"
+
+[dependencies]
+referee = { git = "https://github.com/broody/referee.git", rev = "<commit>" }
+
+[dev-dependencies]
+cairo_test = "2.13.1"
+```
+
+## The trait
+
+```cairo
+pub trait GameRules {
+    type Config;   // terms fixed at creation (board size, map, target score)
+    type State;
+    type Action;
+    type Witness;  // extra replay input from calldata (position history, terrain)
+    type Scratch;  // working memory built from the witness (e.g. a Felt252Dict)
+
+    const TAG: felt252;
+    const RULES_VERSION: u32;
+    const SEATS: u8;   // 2 for now
+    impl Time: ClockRules<Self::State>;   // how its clocks run when timed
+
+    fn init(config: @Self::Config) -> Self::State;
+    fn load(config: @Self::Config, state: @Self::State, witness: Self::Witness) -> Self::Scratch;
+    fn apply(
+        config: @Self::Config, ref scratch: Self::Scratch, state: Self::State, seat: u8,
+        action: Self::Action,
+    ) -> (Self::State, Option<u8>);
+    fn resolve(
+        config: @Self::Config, ref scratch: Self::Scratch, state: Self::State, seed: felt252,
+    ) -> Self::State;
+    fn due(state: @Self::State) -> u8;
+    fn outcome(state: @Self::State) -> Option<(u8, u8)>;
+    fn max_steps(config: @Self::Config) -> u32;
+    fn adjudicate(config: @Self::Config, state: @Self::State) -> (u8, u8);
+}
+```
+
+Two rules apply to every function:
+
+- **Be deterministic.** Clients, the channel and the prover must reach the same
+  state from the same steps. Read nothing from the environment: no block
+  number, no caller, no storage.
+- **Panic on an illegal action.** Panicking is how the rules reject a step. A
+  client stops before signing, a receiving client rejects the step, and an
+  onchain replay reverts.
+
+## The counter, part by part
+
+The counter's state, config and action are plain structs deriving `Serde`.
+Their serialization is what gets hashed, signed and replayed:
+
+```cairo
+use referee::GameRules;
+
+pub const ADD: u8 = 0;
+pub const GAMBLE: u8 = 1;
+/// Finish reason: the counter reached the target.
+pub const REACHED: u8 = 1;
+/// Finish reason: the transcript reached `max_steps`, a draw.
+pub const LIMIT: u8 = 2;
+
+#[derive(Copy, Drop, Serde, PartialEq, Debug)]
+pub struct Config {
+    pub target: u8,
+}
+
+#[derive(Copy, Drop, Serde, PartialEq, Debug)]
+pub struct Counter {
+    pub total: u8,
+    pub next: u8,
+    /// True while a GAMBLE waits for the opponent's reveal.
+    pub gamble: bool,
+    /// Seat + 1 once someone reached the target.
+    pub winner: u8,
+    pub target: u8,
+}
+
+#[derive(Copy, Drop, Serde, PartialEq, Debug)]
+pub struct Action {
+    pub kind: u8,
+    pub amount: u8,
+}
+```
+
+### Identity: `TAG`, `RULES_VERSION`, `SEATS`, `Time`
+
+```cairo
+pub impl CounterRules of GameRules {
+    type Config = Config;
+    type State = Counter;
+    type Action = Action;
+    type Witness = ();
+    type Scratch = ();
+
+    const TAG: felt252 = 'COUNTER';
+    const RULES_VERSION: u32 = 1;
+    const SEATS: u8 = 2;
+    impl Time = referee::clocks::StandardTime<Counter>;
+```
+
+- `TAG` domain-separates every hash the game produces: contexts, states, step
+  messages, seeds and proof payloads. Two games never share a signature.
+- `RULES_VERSION` is part of the context hash. Change it whenever a rule
+  changes, so that old signatures can't replay under new rules.
+- `SEATS` must be 2 today. `open` rejects anything else.
+- `Time` names the game's time rules, a `referee::clocks::ClockRules`. They
+  apply only to games created with a clock. `StandardTime` covers per-turn
+  timers, Fischer increments and byo-yomi; a game can write its own (see
+  [Add a clock](/guide/clocks#time-rules)).
+
+### `init`: the opening state
+
+```cairo
+    fn init(config: @Config) -> Counter {
+        assert(*config.target > 0, 'Invalid target');
+        Counter { total: 0, next: 0, gamble: false, winner: 0, target: *config.target }
+    }
+```
+
+`init` also validates the config. The Dojo binding calls it in `create`, so an
+invalid config never reaches the chain.
+
+### `apply`: one action
+
+```cairo
+    fn apply(
+        config: @Config, ref scratch: (), state: Counter, seat: u8, action: Action,
+    ) -> (Counter, Option<u8>) {
+        if action.kind == ADD {
+            assert(action.amount >= 1 && action.amount <= 3, 'Invalid amount');
+            (advance(state, seat, action.amount), Option::None)
+        } else {
+            assert(action.kind == GAMBLE && action.amount == 0, 'Invalid action');
+            (Counter { gamble: true, ..state }, Option::Some(1 - seat))
+        }
+    }
+```
+
+`apply` receives the seat that acts. The protocol has already checked that
+`seat` is the one `due` names, so the rules never check turn order themselves.
+It returns the new state and, optionally, a request for randomness:
+
+- `Option::None`: the action is complete.
+- `Option::Some(other)`: the action needs a random value. `other` must reveal
+  from its hash chain before play continues, and then `resolve` finishes the
+  action. The step must be sent as `PlayRandom`, not `Play` (see
+  [Randomness](/concepts/randomness)).
+
+### `resolve`: finish a random action
+
+```cairo
+    fn resolve(config: @Config, ref scratch: (), state: Counter, seed: felt252) -> Counter {
+        assert(state.gamble, 'Nothing to resolve');
+        let seed: u256 = seed.into();
+        let roll: u8 = (seed.low % 6 + 1).try_into().unwrap();
+        advance(Counter { gamble: false, ..state }, state.next, roll)
+    }
+```
+
+`seed` is a hash of both seats' revealed values. Neither seat could predict it
+or bias it. A game that never requests randomness can panic here.
+
+### `due` and `outcome`
+
+```cairo
+    fn due(state: @Counter) -> u8 {
+        *state.next
+    }
+
+    fn outcome(state: @Counter) -> Option<(u8, u8)> {
+        if *state.winner != 0 {
+            Option::Some((*state.winner, REACHED))
+        } else {
+            Option::None
+        }
+    }
+```
+
+- `due` names the seat whose turn it is. It decides who may sign the next
+  `Play`, and in a timed game whose clock runs. While a reveal is pending, the
+  protocol overrides it with the revealing seat.
+- `outcome` returns `(winner, reason)` once the game is over. `winner` is the
+  seat plus 1, or `DRAW` (0). `reason` is yours to define, from 1 to 127. The
+  protocol reserves 128 and up: 128 (`REASON_RESIGN`), 129 (`REASON_TIMEOUT`,
+  the referee's flag) and 130 (`REASON_ABANDON`, a missed forced-play
+  window). A winner above `SEATS` panics with `'Invalid winner'`, and a reason
+  outside 1 to 127 with `'Invalid finish reason'`.
+- `outcome` is also where your game bounds its own length, with a move or
+  round limit, so that every game ends.
+
+### `max_steps` and `adjudicate`
+
+```cairo
+    /// Every action raises the counter, so a game takes at most `target`
+    /// actions; a gamble adds a reveal and allows each seat one recommit.
+    fn max_steps(config: @Config) -> u32 {
+        let target: u32 = (*config.target).into();
+        4 * target + 16
+    }
+
+    fn adjudicate(config: @Config, state: @Counter) -> (u8, u8) {
+        (referee::DRAW, LIMIT)
+    }
+}
+```
+
+`max_steps` caps the transcript: the most steps (`seq`) it may hold. At the
+first step at or past it that leaves no reveal pending, the protocol ends the
+game with `adjudicate`, which returns `(winner, reason)` as `outcome` does.
+The counter calls it a draw, with its own reason `LIMIT`.
+
+The cap is a safety net for transcripts, proofs and keeper archives, not your
+game's own limit. It holds even if your own limit has a bug. Set it to at least
+your longest game times (1 + protocol steps per game action): a `Reveal` or a
+`Recommit` is a step too. A keeper refuses a game whose `maxSteps(config) + 1`
+exceeds its configured `max_steps`.
+
+## Witness and scratch
+
+Most games keep everything they need in `State`, and set `Witness` and
+`Scratch` to `()`. Use them when replay needs data that is too large to hash on
+every step:
+
+- `Witness` is extra input that arrives with a replay, as calldata. The state
+  holds only a commitment to it.
+- `load` checks the witness against the state's commitment and builds
+  `Scratch`, the working memory `apply` and `resolve` use. For example, a
+  `Felt252Dict` for fast lookups.
+
+Surround (Go) uses them for superko. Its state carries `history_root`, a hash
+of every earlier position. The witness is the list of positions, and `load`
+rebuilds the set of seen positions after checking the list against the root:
+
+```cairo
+fn load(config: @GoConfig, state: @GoState, witness: Span<felt252>) -> Felt252Dict<felt252> {
+    assert(!witness.is_empty(), 'Missing position history');
+    let mut seen: Felt252Dict<felt252> = Default::default();
+    let mut root = 0;
+    for position in witness {
+        assert(seen.get(*position) == 0, 'Repeated history position');
+        seen.insert(*position, 1);
+        root = append_history(root, *position);
+    }
+    assert(root == *state.history_root, 'Wrong position history');
+    seen
+}
+```
+
+A replay needs the witness for its **starting** state only. Scratch then evolves
+step by step. The JS mirror provides the matching `load`, `witness` and
+`encodeWitness` (see [Mirror the rules in JS](/guide/codec)).
+
+## What you get for free
+
+Your rules never deal with signatures, turn enforcement, randomness bookkeeping
+or clocks. The protocol wraps your `State` in an `Envelope` and adds six moves
+of its own around your `Action`:
+
+| Move | What it does |
+| --- | --- |
+| `Play(action)` | Your action, from the due seat |
+| `PlayRandom((action, entropy))` | An action whose `apply` requests randomness, with the actor's next hash-chain value |
+| `Reveal(value)` | The requested seat's next hash-chain value. The protocol then calls `resolve` |
+| `Recommit(tip)` | The due seat replaces its chain tip before the chain runs out, once per reveal |
+| `Resign(seat)` | A seat concedes, at any time |
+| `Flag` | The referee of a timed game ends it when the due seat's time runs out |
+| `Start` | The referee of a timed game starts or restarts the clock |
+
+## Test the rules
+
+Test the rules on their own with `apply_steps`, which applies unsigned steps
+from the opening state:
+
+```cairo
+use referee::{Move, apply_steps, open};
+
+fn run(steps: Array<Move<Action>>) -> Envelope<Counter> {
+    apply_steps::<CounterRules>(CONTEXT, @terms(), open::<CounterRules>(@terms()), (), steps.span(), array![].span())
+}
+```
+
+The counter's tests go further: they replay transcripts that the JS SDK signed
+(`examples/counter/src/fixtures.cairo`, generated by
+`sdk/scripts/gen-counter-fixtures.mjs`), which pins the Cairo and JS
+implementations to each other. Do the same for your game once the
+[JS mirror](/guide/codec) exists.

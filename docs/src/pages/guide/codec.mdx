@@ -1,0 +1,198 @@
+# Mirror the rules in JS
+
+Clients check every step before they sign on top of it, so they need the rules
+too. A **game codec** is a plain JS object that mirrors your Cairo `GameRules`
+and knows your types' Cairo serialization. `Session`, the keeper and the proving
+client all take it as their `game` argument.
+
+The mirror must agree with the Cairo **byte for byte**. Hashes and signatures
+cover serialized values, so one mismatched field makes every signature fail
+onchain. The fixtures test at the end of this page catches that early.
+
+## The counter's codec
+
+This is the whole codec for the counter from [Write the rules](/guide/rules)
+([`sdk/examples/counter.mjs`](https://github.com/broody/referee/blob/main/sdk/examples/counter.mjs)):
+
+```js
+import { low128 } from '@referee/sdk'
+
+export const ADD = 0, GAMBLE = 1, REACHED = 1, LIMIT = 2
+
+function advance(s, seat, amount) {
+  const total = s.total + amount
+  return { total, next: 1 - seat, gamble: false, winner: total >= s.target ? seat + 1 : 0, target: s.target }
+}
+
+export const counter = {
+  tag: 'COUNTER',
+  rulesVersion: 1,
+  encodeConfig: c => [BigInt(c.target)],
+  decodeConfig: r => ({ target: r.num() }),
+  encodeAction: a => [BigInt(a.kind), BigInt(a.amount)],
+  encodeState: s => [s.total, s.next, s.gamble ? 1 : 0, s.winner, s.target].map(BigInt),
+  init: c => ({ total: 0, next: 0, gamble: false, winner: 0, target: c.target }),
+  apply(config, s, seat, a) {
+    if (a.kind === ADD) {
+      if (a.amount < 1 || a.amount > 3) throw Error('Invalid amount')
+      return [advance(s, seat, a.amount), null]
+    }
+    if (a.kind !== GAMBLE || a.amount !== 0) throw Error('Invalid action')
+    return [{ ...s, gamble: true }, 1 - seat]
+  },
+  resolve(config, s, seed) {
+    if (!s.gamble) throw Error('Nothing to resolve')
+    return advance({ ...s, gamble: false }, s.next, Number(low128(seed) % 6n) + 1)
+  },
+  due: s => s.next,
+  outcome: s => (s.winner !== 0 ? [s.winner, REACHED] : null),
+  maxSteps: c => 4 * c.target + 16,
+  adjudicate: () => [0, LIMIT],
+}
+```
+
+## The contract
+
+### Identity
+
+| Field | Mirrors | Notes |
+| --- | --- | --- |
+| `tag` | `TAG` | The short string itself, e.g. `'COUNTER'`. The SDK encodes it |
+| `rulesVersion` | `RULES_VERSION` | A number |
+
+### Serialization
+
+Each encoder returns the felts that Cairo's `Serde` would write, as BigInts.
+
+| Function | Encodes |
+| --- | --- |
+| `encodeConfig(config)` | `Config`, inside the terms and so inside the context hash |
+| `decodeConfig(reader)` | `Config`, read from a `Reader`, when decoding terms, snapshots or channels read from the chain |
+| `encodeAction(action)` | `Action`, inside every step message and in replay calldata |
+| `encodeState(state)` | `State`, inside the envelope, whose hash is the state hash |
+| `encodeWitness(witness)` | `Witness`. Required when the game has `load`. A game without it has the unit witness `()`, which encodes to nothing |
+
+Cairo's `Serde` layout:
+
+| Cairo type | Felts |
+| --- | --- |
+| `u8` … `u128`, `felt252`, `ContractAddress` | one felt each |
+| `bool` | `1` or `0` |
+| struct | its fields, in declaration order |
+| `Span<T>` / `Array<T>` | the length, then each element (`span(values)` in the SDK) |
+| enum | the variant index, then its payload |
+| `Option<T>` | `0` then the payload for `Some`, `1` for `None` |
+| `u256` | `low`, then `high` |
+
+`Reader` reads felts back in order. Its methods are `next()` (a BigInt),
+`num()` (a Number), `bool()` and `span()`.
+
+### Rules
+
+| Function | Mirrors | Returns |
+| --- | --- | --- |
+| `init(config)` | `init` | The opening state |
+| `apply(config, state, seat, action, scratch)` | `apply` | `[state, request]`, where `request` is `null` or the seat that must reveal randomness |
+| `resolve(config, state, seed, scratch)` | `resolve` | The state once the requested randomness arrives. `seed` is a BigInt |
+| `due(state)` | `due` | The seat whose turn it is |
+| `outcome(state)` | `outcome` | `null`, or `[winner, reason]` with `winner` the seat plus 1, or 0 for a draw |
+| `maxSteps(config)` | `max_steps` | The transcript cap, a Number. Required: `applyStep` calls it, and a keeper refuses a codec without it |
+| `adjudicate(config, state)` | `adjudicate` | `[winner, reason]` for a game stopped at `maxSteps`, as `outcome` reports it |
+
+Reject an illegal action by throwing, where the Cairo panics. `Session` stages
+each step on copies of the state and scratch, so a throw leaves the session
+unchanged. `apply` and `outcome` must return `null`, not `undefined`, for "no
+request" and "not over": the SDK compares with `=== null`.
+
+### Optional: witness and scratch
+
+Games whose Cairo `load` builds scratch memory from a witness also provide:
+
+| Function | Does |
+| --- | --- |
+| `load(config, state, witness)` | Checks the witness and builds scratch (JS values: arrays, `Set`s, `Map`s) |
+| `witness(scratch)` | The witness for the current state, used when that state becomes an anchor (`session.witness()`, `rebase`) |
+| `openingWitness(config)` | The witness of the opening state |
+| `cloneScratch(scratch)` | A deep copy. It defaults to `structuredClone` |
+| `encodeWitness(witness)` | The witness's Cairo serialization |
+
+Surround's Go codec keeps the position history as its witness:
+
+```js
+openingWitness: config => [positionHash({ black: 0n, white: 0n }, config.size)],
+encodeWitness: history => referee.span(history),
+load(config, state, witness) {
+  const history = witness.map(felt), seen = new Set(history)
+  // … check `history` against state.history_root, as the Cairo `load` does
+  return { history, seen }
+},
+cloneScratch: s => ({ history: [...s.history], seen: new Set(s.seen) }),
+witness: s => [...s.history],
+```
+
+### Optional: time rules
+
+A timed game's clocks run by its time rules. Without `time`, the codec uses
+`standardTime`, the mirror of `referee::clocks::StandardTime`. A game whose
+Cairo `GameRules::Time` is its own `ClockRules` mirrors it as `time`:
+
+| Function | Mirrors | Does |
+| --- | --- | --- |
+| `encodeSettings(settings)`, `decodeSettings(reader)` | The settings' `Serde` | The settings inside `TimeControl` |
+| `encodeClock(clocks)` | The clocks' `Serde` | Each seat's clocks inside `Clock.seats` |
+| `check(settings)` | `check` | Throws on settings a game could not be played under |
+| `open(settings, seats)` | `open` | Each seat's clocks when the game opens |
+| `limit(settings, clocks, seat, state)` | `limit` | The time `seat` can use in a turn that starts now |
+| `settle(settings, clocks, seat, used, reveal, state)` | `settle` | The clocks the next turn starts with |
+| `view(settings, clocks, seat, used, state)` | | Optional. What `timeLeft` shows for a seat |
+
+The counter's hourglass rules, where the time a seat uses flows to its
+opponent, are the example
+([`sdk/examples/counter.mjs`](https://github.com/broody/referee/blob/main/sdk/examples/counter.mjs)):
+
+```js
+export const hourglassTime = {
+  encodeSettings: s => [BigInt(s.bank_ms)],
+  decodeSettings: r => ({ bank_ms: r.num() }),
+  encodeClock: c => [BigInt(c.banks.length), ...c.banks.map(BigInt)],
+  check(s) {
+    if (!(Number.isSafeInteger(s.bank_ms) && s.bank_ms > 0 && s.bank_ms <= MAX_CLOCK_MS)) throw Error('Invalid hourglass')
+  },
+  open: (s, seats) => ({ banks: Array(seats).fill(s.bank_ms) }),
+  limit: (s, c, seat) => c.banks[seat],
+  settle(s, c, seat, used) {
+    const banks = [...c.banks]
+    banks[seat] -= used
+    banks[1 - seat] += used
+    return { banks }
+  },
+  view: (s, c, seat, used) => ({ bank: Math.max(0, c.banks[seat] - used) }),
+}
+
+export const hourglassCounter = { ...counter, time: hourglassTime }
+```
+
+## Pin the two implementations together
+
+Unit tests on each side aren't enough. You want the Cairo to replay what the JS
+signed. The counter does this with a fixture generator:
+
+1. [`sdk/scripts/gen-counter-fixtures.mjs`](https://github.com/broody/referee/blob/main/sdk/scripts/gen-counter-fixtures.mjs)
+   plays scripted games through the JS SDK (one untimed, and three timed games
+   a referee stamps: on the standard time rules, with byo-yomi, and on the
+   hourglass rules, whose clock the referee starts with a `start`), signs every
+   step, and writes the terms, steps, signatures, context hash and expected
+   final state as Cairo constants in `examples/counter/src/fixtures.cairo`.
+2. The Cairo tests replay those steps with `replay` and compare the context,
+   the state hash and the final envelope to what the JS computed.
+3. `scripts/check.sh` regenerates the fixtures and fails if they changed, so
+   neither side can drift silently.
+
+Copy that script for your game. It is the single most useful test you can
+write.
+
+:::tip
+Values that JS holds as Numbers (a `u8` count, a seat) and values that must be
+BigInts (felts, hashes, keys) are easy to mix up. The encoders convert with
+`BigInt(...)`, and `felt(...)` checks that a value is in the field.
+:::

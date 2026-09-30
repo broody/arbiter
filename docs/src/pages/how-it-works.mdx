@@ -1,0 +1,181 @@
+# How it works
+
+This page follows one game from creation to settlement, then shows what happens
+when a player stops cooperating. Each part links to a page with the details.
+
+## The pieces
+
+```mermaid
+flowchart LR
+  subgraph Clients
+    A["Alice's client<br/>Session + store"]
+    B["Bob's client<br/>Session + store"]
+  end
+  K["Keeper (optional)<br/>archive, transport,<br/>watcher, referee"]
+  subgraph Starknet
+    C["Game system<br/>(Dojo channel)"]
+    P["Proof adapter"]
+  end
+  G["Prover"]
+  A <-- signed steps --> K
+  B <-- signed steps --> K
+  A -. any transport .- B
+  A -- create, settle, dispute --> C
+  B -- join, settle, dispute --> C
+  K -- "submit_history, resolve,<br/>acknowledge, resume_by_referee" --> C
+  K -- settle with proof --> P
+  P -- accept_verified --> C
+  K -. prove .-> G
+```
+
+- **Clients** each hold a `Session`: their own verified copy of the game. They
+  sign their moves with a per-game session key and check every move they
+  receive against the rules.
+- **The game system** is your Dojo contract. It stores each game's channel: who
+  plays, the committed state (the *anchor*), and the dispute status. It stores
+  hashes, not transcripts.
+- **The proof adapter** is a small account contract. A prover proves a replay
+  that the adapter runs, and `settle` hands the proved result to the channel.
+- **The keeper** is optional infrastructure. It stores and forwards steps, and
+  it can answer disputes and settle for players who are offline. It can also
+  keep time as the referee of timed games.
+
+## A game, start to finish
+
+```mermaid
+sequenceDiagram
+  participant A as Alice
+  participant B as Bob
+  participant C as Game system
+  A->>C: create(config, invited, session key, rng tip, prover, window, clock?)
+  B->>C: join(game_id, session key, rng tip)
+  Note over C: terms and context fixed,<br/>opening anchor committed (ACTIVE)
+  loop offchain, no transactions
+    A->>B: step signed over (context, seq, transcript, move)
+    Note over B: verify signature, apply rules
+    B->>A: step
+    Note over A: verify signature, apply rules
+  end
+  Note over A,B: game over: both sign a checkpoint<br/>of the final state
+  A->>C: submit_history or proof, with both approvals
+  Note over C: SETTLED, winner recorded
+```
+
+:::steps
+
+### Open (onchain)
+
+Alice creates a game and Bob joins it, each from their wallet. Each registers:
+
+- a **session key**, a fresh key that signs moves in this game only;
+- the tip of a **hash chain**, which will supply randomness.
+
+Joining fixes the game's **terms**: chain, contract, game id, prover, response
+window, optional clock, wallets, session keys, chain tips and game config. Their
+hash is the **context**, and every signature in the game includes it. The
+channel commits the opening state as the first **anchor**.
+
+### Play (offchain)
+
+A move is a **step**. The seat whose turn it is signs a message that binds the
+context, the step's position (`seq`), the **transcript** (a hash chain of every
+earlier step's message) and the move itself. The other client checks the
+signature, runs the rules, and appends the step. No transaction happens.
+
+Because every signature covers the transcript, history can't be reordered or
+edited later. The two clients can exchange steps over any transport: a keeper,
+a WebSocket or a peer-to-peer link.
+
+### Settle (onchain)
+
+When the game ends, both players sign a **checkpoint** approval of the final
+state. Anyone submits the history from the anchor, together with both approvals.
+Every game ends: your rules bound its length, and the protocol caps every
+transcript at your `max_steps`.
+It goes through one of two paths:
+
+- **`submit_history`**: the channel replays the steps onchain against each
+  seat's last signature;
+- **a native proof**: a prover proves the same replay, and the adapter's `settle`
+  submits the result.
+
+With both approvals the game settles in one transaction. The same flow with an
+unfinished state is a checkpoint: it becomes the new anchor, and play goes on
+from there.
+
+:::
+
+## When a player stops cooperating
+
+Signatures alone never commit a state. A state commits only if it was replayed
+or proved from the anchor (or from a dispute candidate that was), so two
+colluding accounts cannot sign a fake result into existence. When approvals are missing, the channel falls back to a
+**dispute window** (5 minutes to 7 days, chosen at creation):
+
+```mermaid
+stateDiagram-v2
+    [*] --> WAITING: create
+    WAITING --> CANCELLED: cancel
+    WAITING --> ACTIVE: join
+    ACTIVE --> SETTLED: finished history + all approvals
+    ACTIVE --> ACTIVE: unfinished history + all approvals (checkpoint)
+    ACTIVE --> DISPUTE: unapproved history, or open_dispute
+    DISPUTE --> DISPUTE: a higher-ranked history, or the referee's acknowledge
+    DISPUTE --> ACTIVE: history + all approvals (checkpoint)
+    DISPUTE --> ACTIVE: resolve (unfinished, timed, acknowledged)
+    DISPUTE --> SETTLED: resolve after the window (finished)
+    DISPUTE --> FORCED: resolve after the window (unfinished)
+    FORCED --> FORCED: the due seat plays onchain (force)
+    FORCED --> ACTIVE: resume with all approvals, or the referee's
+    FORCED --> SETTLED: claim_timeout, or the game finishes
+    ACTIVE --> SETTLED: resign
+    DISPUTE --> SETTLED: resign
+    FORCED --> SETTLED: resign
+```
+
+| Situation | What happens |
+| --- | --- |
+| **Won't approve the result** | Submit the history without approvals. It becomes the *candidate* and opens a dispute. If nobody submits a higher-ranked history before the window closes, anyone calls `resolve` and the game settles. |
+| **Submits an old state** | During the window, the other player (or a keeper) submits the newer history. Candidates rank by `support_turn` (how many times the signer changed), then `seq`, so a player can't win by stopping before the opponent's last move. |
+| **Stalls** | In a timed game, the referee flags the staller once its time runs out. Otherwise, open a dispute. If the window passes with the game unfinished, `resolve` moves it to **forced play**: the due seat must move onchain within each window, or the other seat claims the game on timeout. A live referee keeps a timed game's disputes out of forced play. |
+| **Gives up** | Either player resigns at any time, with a signed `Resign` step or a wallet call. |
+
+Details: [The channel and disputes](/concepts/channel).
+
+## Who checks what
+
+| Where | What is verified |
+| --- | --- |
+| Each client (`Session.receive`) | Every signature, every step against the rules, and in a timed game every stamp. Clients never sign from a state they haven't fully verified. |
+| The channel (`submit_history`) | A replay from the committed anchor, or from the dispute candidate, against **each seat's final signature**. That signature covers every earlier step through the transcript. |
+| The adapter (`settle`) | Network-verified proof facts: the right virtual OS program, a recent base block, and exactly the expected start → end transition, from the anchor or the candidate. |
+| The keeper | The same as a client, before it stores or forwards anything. |
+
+## The life of a step
+
+```mermaid
+flowchart TD
+  S["Seat builds a step:<br/>Play(action), PlayRandom, Reveal,<br/>Recommit, Resign"] --> M["message = signing_hash(TAG, 'REFEREE_ACTION_V1',<br/>context, seq, transcript, move)"]
+  M --> G["sign with the seat's session key"]
+  G --> T["send to the other seat<br/>(or the keeper)"]
+  T --> V["receiver: check the signature<br/>against the seat's key in the terms"]
+  V --> R["apply the rules to a copy of the state"]
+  R --> C["commit: seq + 1,<br/>transcript = poseidon(transcript, message)"]
+```
+
+The seat is never part of the step. The state says whose turn it is, so only
+`Resign`, which either seat may send, names its seat. Details:
+[Steps and transcripts](/concepts/protocol).
+
+## Optional pieces
+
+- **Randomness.** When an action needs dice, the acting seat attaches its next
+  hash-chain value and the other seat reveals theirs. The roll is a hash of
+  both, so neither can predict or bias it. See [Randomness](/concepts/randomness).
+- **Clocks.** A game can name a **referee** in its terms: a third key that
+  stamps every step with the time, starts the clock and flags a seat whose time
+  runs out. Players sign moves; the referee signs time. See
+  [Clocks and the referee](/concepts/clocks).
+- **A keeper** stores transcripts so players can refresh or switch devices,
+  forwards steps between seats, answers disputes for offline players and settles
+  finished games. See [Keeper](/infra/keeper).

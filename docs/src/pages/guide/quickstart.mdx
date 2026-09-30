@@ -1,0 +1,134 @@
+# Quickstart
+
+Run the counter game end to end: first in Node with no chain at all, then on a
+local Starknet with real transactions. The counter is a complete referee game:
+seats take turns adding 1 to 3 to a shared total, a `GAMBLE` adds a die roll,
+and whoever reaches the target wins.
+
+## Requirements
+
+| For | You need |
+| --- | --- |
+| The JS SDK, keeper and tests | Node 22 or later |
+| The Cairo crates (`scripts/check.sh`) | Scarb 2.13.1 and 2.18.0 (asdf switches with `ASDF_SCARB_VERSION`), Sozo 1.8.5, Starknet Foundry 0.63.0 |
+| The local-chain run (`keeper/katana.sh`) | Katana 1.7.1 and Sozo 1.8.0 |
+
+:::steps
+
+### Install
+
+```bash
+git clone https://github.com/broody/referee
+cd referee
+npm install
+```
+
+### Run the JS tests
+
+```bash
+npm test
+```
+
+This runs the SDK, prover gateway and keeper tests against fakes: no network
+and no chain.
+
+### Play a game in Node
+
+Save this as `play.mjs` in the repository root and run `node play.mjs`. Two
+`Session`s stand in for two players' clients. They share the game's terms, and
+each verifies every step the other sends.
+
+```js
+import { Session, play, playRandom, publicKey, reveal, rngChain, tag } from './sdk/src/index.mjs'
+import { ADD, GAMBLE, counter } from './sdk/examples/counter.mjs'
+
+// Each seat's session key and randomness chain. A real client makes its own
+// and registers the public key and the chain's tip when it creates or joins.
+const keys = [0x1a2b3cn, 0x4d5e6fn]
+const chains = [rngChain(0x5eed0n, 16), rngChain(0x5eed1n, 16)]
+
+// The terms both seats accepted onchain. Made up here: no chain involved.
+const terms = {
+  chain_id: tag('SN_SEPOLIA'), channel: 0xc4a11e1n, game_id: 1n, prover: 0xad0b7e5n,
+  response_seconds: 3600, clock: null,
+  players: [0xa11cen, 0xb0bn], keys: keys.map(publicKey), rng_tips: chains.map(c => c[16]),
+  config: { target: 20 },
+}
+
+// Each player holds their own verified copy of the game.
+const alice = new Session(counter, terms)
+const bob = new Session(counter, terms)
+
+// Alice adds 3: she signs the step, and Bob verifies and applies it.
+bob.receive(alice.move(play({ kind: ADD, amount: 3 }), keys[0]))
+
+// Bob gambles on a die. He attaches his next chain value, and Alice reveals hers.
+alice.receive(bob.move(playRandom({ kind: GAMBLE, amount: 0 }, chains[1][15]), keys[1]))
+bob.receive(alice.move(reveal(chains[0][15]), keys[0]))
+console.log(`after the roll: total ${alice.env.game.total}, seq ${alice.env.seq}`)
+
+// Play on until someone reaches 20.
+while (!alice.env.outcome.finished) {
+  const seat = alice.due()
+  const [mover, other] = seat === 0 ? [alice, bob] : [bob, alice]
+  other.receive(mover.move(play({ kind: ADD, amount: 3 }), keys[seat]))
+}
+console.log(`seat ${alice.env.outcome.winner - 1} won after ${alice.env.seq} steps`)
+console.log('same state on both sides:', alice.stateHash() === bob.stateHash())
+
+// A forged step never gets in.
+const forged = { ...alice.steps[0], signature: { ...alice.steps[0].signature, s: 1n } }
+try { new Session(counter, terms).receive(forged) } catch (e) { console.log('forged step:', e.message) }
+
+// Both seats approve the final state for settlement (epoch 0: nothing committed since joining).
+const acks = [alice.checkpointSignature(0, keys[0]), bob.checkpointSignature(0, keys[1])]
+console.log('replay calldata:', alice.batch().steps.length, 'steps and', acks.length, 'approvals')
+```
+
+```
+after the roll: total 9, seq 3
+seat 1 won after 7 steps
+same state on both sides: true
+forged step: Invalid session signature
+replay calldata: 7 steps and 2 approvals
+```
+
+The roll is the same on every run: both chains come from fixed seeds, and the
+seed of a roll is a hash of both revealed values.
+
+### Test the Cairo side
+
+```bash
+scripts/check.sh
+```
+
+`check.sh` regenerates the counter's fixtures with the JS SDK and fails if they
+changed. It then runs every JS test, the pure crates on Cairo 2.13.1 and 2.18.0,
+the Dojo world, and the proof adapter under Starknet Foundry. The Cairo tests
+replay transcripts the SDK signed, which keeps the two implementations
+byte-identical.
+
+### Run it on a local chain
+
+```bash
+keeper/katana.sh
+```
+
+This starts a Katana node, deploys the counter's Dojo world and runs
+[`keeper/katana.mjs`](https://github.com/broody/referee/blob/main/keeper/katana.mjs)
+with real transactions. It takes about a minute:
+
+1. A **stale dispute.** Alice disputes after four signed steps, hoping the
+   opening state stands. A keeper answers with the transcript, and after the
+   window it resolves the game into forced play.
+2. A **finished game nobody submitted.** The keeper submits it, waits out the
+   window and resolves it to `SETTLED`.
+3. A **timed game.** The keeper referees a game with a 2-second turn. Alice
+   moves, Bob stalls, and the keeper flags Bob and settles the win on time.
+
+:::
+
+## Next
+
+- [How it works](/how-it-works) explains what you just ran.
+- [Write the rules](/guide/rules) starts your own game.

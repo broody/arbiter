@@ -1,0 +1,84 @@
+# Prover
+
+Games settled with native proofs need a `starknet_proveTransaction` endpoint.
+By default that's StarkWare's hosted prover. [`prover/`](https://github.com/broody/referee/tree/main/prover)
+runs the same endpoint yourself. The full operating manual is
+[`prover/README.md`](https://github.com/broody/referee/blob/main/prover/README.md).
+This page is the overview.
+
+## What it is
+
+| Process | What it is |
+| --- | --- |
+| backend | StarkWare's `starknet_transaction_prover`, the service behind the hosted prover, built from source at the sequencer revision pinned in `pins.json`. It runs the adapter's virtual transaction in the virtual OS and proves it with Stwo in process (`PROOF1`) |
+| gateway | [`server.mjs`](https://github.com/broody/referee/blob/main/prover/server.mjs): the same JSON-RPC API in front of the backend. It admits only referee settlements, queues and rate-limits them, and runs each backend worker in its own cgroup |
+
+Clients point at the gateway and change nothing else:
+
+```js
+await proveSession({ rpcUrl, proverUrl: 'http://prover-host:3100', session, epoch, expectedClassHash })
+```
+
+The proof, its facts and the `settle` call are exactly what the hosted prover
+returns, and the network verifies them the same way. Proofs from this prover
+have been byte-identical to the hosted prover's.
+
+## Admission
+
+A public prover must not prove arbitrary transactions. Before a request gets a
+proving slot, the gateway checks that:
+
+- it is a zero-fee virtual `INVOKE_V3` against a `{ block_hash }` or
+  `{ block_number }`, with calldata under `max_calldata` felts;
+- at that block, the sender's class is in `adapter_classes`, an allowlist of
+  referee adapters like the channel's own;
+- that adapter pins `virtual_os_program`, the program the backend runs, so the
+  proof can settle.
+
+The backend repeats its own checks. Per-client rate limits and a bounded queue
+keep one client from holding the prover.
+
+## Trust
+
+The prover sees public transcripts and signatures, never session keys. It can
+delay or refuse a proof but can't forge one. Anyone can run one, and onchain
+replay (`submit_history`) and disputes remain the fallback.
+
+## Memory
+
+A proof of a large game needs tens of GiB. The gateway's `memory` setting picks
+how the backend holds a proof's working data. Both modes give byte-identical
+proofs, so only memory and time differ:
+
+| `memory` | Largest game (529 steps): peak | Proof time |
+| --- | ---: | ---: |
+| `standard` (default) | about 40 GiB | about 15 s |
+| `bounded` | about 22 GiB | about 30 s |
+
+Use `standard` where memory allows. `bounded` fits smaller hosts, and gives
+memory back between proofs. Each worker proves one job at a time in its own
+cgroup, with a memory limit. A job that runs out of memory fails alone, and its
+worker restarts.
+
+## Run it
+
+```bash
+pip install cairo-lang==0.14.3a3
+TARGET_CPU=native prover/build.sh          # about 15 minutes on 36 cores
+prover/run.sh my-config.json               # see config.example.json
+```
+
+`run.sh` starts the gateway in a systemd user scope, so it can give each
+worker its own cgroup. `prover/deploy/` has a systemd unit and a Dockerfile.
+
+:::note
+The gateway's workers listen on `workers.base_port` (default 3200) and up, on
+localhost. A [keeper](/infra/keeper) also defaults to port 3200. If both run on
+one host, change one of them.
+:::
+
+## Results
+
+On a 36-core, 125 GiB machine, games of 68 to 529 steps each proved in one
+`PROOF1`, in 15 to 20 seconds end to end from the client. Surround games proved
+here have settled on Sepolia.

@@ -1,0 +1,500 @@
+# Cairo: referee_dojo and referee_adapter
+
+`referee_dojo` binds the [channel state machine](/reference/cairo#the-channel-module) to a Dojo world: models, an event, and one helper per entrypoint of a game system. `referee_adapter` is the logic of a proof adapter, the account contract that proves a replay and hands the result to the channel. This page lists both crates' public items. For a walkthrough, see [Deploy the channel](/guide/channel) and [Add a proof adapter](/guide/adapter).
+
+| Crate | Path | Toolchain |
+| --- | --- | --- |
+| `referee_dojo` | [`dojo/referee_dojo`](https://github.com/broody/referee/blob/main/dojo/referee_dojo/src/lib.cairo) | Cairo 2.13.1, Dojo 1.8.0. The `dojo/` workspace builds it with the counter example. |
+| `referee_adapter` | [`adapter/referee_adapter`](https://github.com/broody/referee/blob/main/adapter/referee_adapter/src/lib.cairo) | Cairo 2.18.0, for execution-info v3 proof facts. The `adapter/` workspace builds it with the counter example. |
+
+## referee_dojo models
+
+`referee_dojo::models` ([`models.cairo`](https://github.com/broody/referee/blob/main/dojo/referee_dojo/src/models.cairo)). A game registers the models and the event in its namespace through `build-external-contracts` (see [Wrapping the helpers](#wrapping-the-helpers)).
+
+A channel is stored in two models: `ChannelTerms`, written at `create` and `join` only, and `ChannelState`, four felts written on every transition. `ChannelGame` is not a model: it is the combined view that `read` builds and a game's `get_channel` returns.
+
+### ChannelGame
+
+One referee channel: its terms and its state together. Derives `Copy`, `Drop`, `Serde`, `PartialEq` and `Debug`. Seat 0 is the creator, seat 1 the joiner.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | `felt252` | Game id, from the world's `uuid()`. |
+| `player_0` | `ContractAddress` | Creator's wallet. |
+| `player_1` | `ContractAddress` | Invited wallet, or zero for an open game until someone joins. |
+| `key_0`, `key_1` | `felt252` | Session public keys (`key_1` is zero until `join`). |
+| `tip_0`, `tip_1` | `felt252` | Committed hash-chain tips (`tip_1` is zero until `join`). |
+| `prover` | `ContractAddress` | The game's proof adapter. |
+| `config` | `Span<felt252>` | The game's `Config`, serialized. |
+| `status` | `u8` | Channel status (`referee::channel::WAITING` ... `CANCELLED`). |
+| `epoch` | `u32` | Channel epoch. |
+| `context` | `felt252` | `context_hash` of the terms, set at `join`. |
+| `response_seconds` | `u32` | Window length. |
+| `referee` | `felt252` | A timed game's referee key; zero for an untimed game. |
+| `clock_settings` | `Span<felt252>` | A timed game's `TimeControl.settings`; empty for an untimed game. |
+| `anchor` | `StoredRef` | The committed state. |
+| `candidate` | `StoredRef` | The best dispute candidate. |
+| `anchor_block` | `u64` | Block of the last anchor change or resume. |
+| `candidate_block` | `u64` | Block the candidate was set in. |
+| `deadline` | `u64` | End of the current window, or 0. |
+| `acked_epoch`, `acked_deadline` | `u32`, `u64` | The dispute (epoch and deadline) the referee acknowledged. |
+| `result` | `StoredOutcome` | The final result once settled. |
+
+`referee` and `clock_settings` form the game's `TimeControl`. The channel fields mirror `referee::channel::Channel` ([Channel](/reference/cairo#stateref-and-channel)).
+
+| Function | Behavior |
+| --- | --- |
+| `channel_of(game: @ChannelGame) -> Channel` | The channel fields as a `Channel`. |
+| `with_channel(game: ChannelGame, channel: Channel) -> ChannelGame` | `game` with its channel fields replaced by `channel`'s. |
+| `game_of(terms: @ChannelTerms, state: @ChannelState) -> ChannelGame` | The combined view: `unpack_state` with the terms' context and window, plus the terms. |
+| `terms_of(game: @ChannelGame) -> ChannelTerms` | The terms fields of a view. |
+| `pack_state(id: felt252, channel: @Channel) -> ChannelState` | Packs a channel (below). Panics with `'Value exceeds 40 bits'` if `deadline`, `anchor_block`, `candidate_block` or `acked_deadline` is `2^40` or more. |
+| `unpack_state(state: @ChannelState, context: felt252, response_seconds: u32) -> Channel` | Unpacks a channel. `context` and `response_seconds` live in `ChannelTerms`, so the caller passes them. |
+
+### ChannelTerms
+
+What a channel fixes when it opens. `#[dojo::model]`, keyed by `id`. `create` writes it, and `join` writes it again with seat 1 and the context.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | `felt252` (key) | Game id. |
+| `player_0`, `player_1` | `ContractAddress` | Wallets, as in `ChannelGame`. |
+| `key_0`, `key_1` | `felt252` | Session public keys. |
+| `tip_0`, `tip_1` | `felt252` | Committed hash-chain tips. |
+| `prover` | `ContractAddress` | The game's proof adapter. |
+| `config` | `Span<felt252>` | The game's `Config`, serialized. |
+| `context` | `felt252` | `context_hash` of the terms; zero until `join`. |
+| `response_seconds` | `u32` | Window length. |
+| `referee` | `felt252` | Referee key; zero for an untimed game. |
+| `clock_settings` | `Span<felt252>` | Serialized time settings; empty for an untimed game. |
+
+### ChannelState
+
+The channel state machine's fields in four felts. `#[dojo::model]`, keyed by `id`. Every transition reads and writes it; clients read the `ChannelUpdated` event or `get_channel` instead.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | `felt252` (key) | Game id. |
+| `anchor` | `felt252` | The anchor's hash. |
+| `candidate` | `felt252` | The candidate's hash, or zero while it equals the anchor's. |
+| `times` | `felt252` | Status, epoch, deadline, blocks and the acknowledgement, packed. |
+| `refs` | `felt252` | Both references' small fields and the result, packed. |
+
+`pack_state` lays out `times` and `refs` as follows, from bit 0:
+
+| Word | Bits | Field |
+| --- | --- | --- |
+| `times` | 0..8 | `status` |
+| | 8..40 | `epoch` |
+| | 40..80 | `deadline` |
+| | 80..120 | `anchor_block` |
+| | 128..168 | `candidate_block` |
+| | 168..200 | `acked_epoch` |
+| | 200..240 | `acked_deadline` |
+| `refs` | 0..89 | The anchor's reference |
+| | 89..106 | `result` |
+| | 128..217 | The candidate's reference |
+
+A reference (89 bits) is `seq` (bits 0..32), `support_turn` (32..64), `due` (64..72) and its outcome (72..89). An outcome (17 bits) is `finished` (bit 0), `winner` (1..9) and `reason` (9..17). Blocks and timestamps get 40 bits each, which lasts for millennia.
+
+### ProverAllowed
+
+Proof adapter classes the namespace owner accepts. `#[dojo::model]`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `class_hash` | `felt252` (key) | Adapter class hash. |
+| `allowed` | `bool` | Whether channels accept provers of this class. |
+
+### Stored types
+
+Storable (`Introspect`, `DojoStore`) mirrors of the core types, with `Into` conversions both ways. `ChannelGame` uses them for its references and result.
+
+| Type | Mirrors | Fields | Conversions |
+| --- | --- | --- | --- |
+| `StoredOutcome` | `Outcome` | `finished`, `winner`, `reason` | `OutcomeIntoStored`, `StoredIntoOutcome` |
+| `StoredRef` | `StateRef` | `hash`, `seq`, `support_turn`, `due`, `outcome: StoredOutcome` | `RefIntoStored`, `StoredIntoRef` |
+
+### ChannelUpdated
+
+A `#[dojo::event]` emitted by every helper that writes a channel's state.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `game_id` | `felt252` (key) | The game. |
+| `kind` | `u8` | Which helper wrote it (below). |
+| `epoch` | `u32` | Channel epoch after the write. |
+| `seq` | `u32` | `seq` of the reported state. |
+| `status` | `u8` | Channel status after the write. |
+| `deadline` | `u64` | Channel deadline after the write. |
+| `state_hash` | `felt252` | Hash of the reported state. |
+| `winner`, `reason` | `u8` | The result when settled, otherwise the reported state's outcome. |
+
+The reported state is the candidate while the channel is in `DISPUTE`, and the anchor otherwise.
+
+| `kind` constant | Value | Emitted by |
+| --- | --- | --- |
+| `CREATED` | `0` | `create` |
+| `JOINED` | `1` | `join` |
+| `CANCELLED` | `2` | `cancel` |
+| `DISPUTED` | `3` | `open_dispute` |
+| `RECEIVED` | `4` | `accept_verified`, `submit_history` |
+| `RESOLVED` | `5` | `resolve` |
+| `FORCED` | `6` | `force` |
+| `RESUMED` | `7` | `resume`, `resume_by_referee` |
+| `TIMED_OUT` | `8` | `claim_timeout` |
+| `RESIGNED` | `9` | `resign` |
+| `ACKNOWLEDGED` | `10` | `acknowledge` |
+
+:::warning
+`kind` values are not channel statuses. `models::CANCELLED` is 2 and `models::FORCED` is 6, while the statuses `referee::channel::CANCELLED` and `FORCED` are 5 and 3. Read `status` for the channel's status.
+:::
+
+## referee_dojo helpers
+
+`referee_dojo::channel` ([`channel.cairo`](https://github.com/broody/referee/blob/main/dojo/referee_dojo/src/channel.cairo)). Each helper wraps a transition of `referee::channel` with storage, caller authentication, prover checks and signature checks, then saves the channel's state and emits `ChannelUpdated`. Generic helpers take the game's rules, e.g. `join::<MyRules>(ref world, ...)`; trait bounds are omitted below.
+
+"Caller" is `get_caller_address()` inside the game system, so the wallet that called it. "Now" and "block" are the block timestamp and number.
+
+Helpers that read the channel's terms first panic with `'Unknown channel'` for a game that does not exist: `join`, `cancel`, `accept_verified`, `submit_history`, `open_dispute`, `force`, `claim_timeout`, `resign`, `snapshot` and `read`. The others read only the packed state, which is all zeros (`WAITING`) for an unknown game, and fail on its status or its zero referee key instead; `result` returns `None` and `status` returns `0`.
+
+### Who may call
+
+| Caller | Helpers |
+| --- | --- |
+| Any wallet | `create` (becomes seat 0), `join` (becomes seat 1; only the invited wallet if one was named) |
+| The creator | `cancel` |
+| A player (`seat_of` the caller) | `open_dispute`, `force`, `claim_timeout`, `resign` |
+| Anyone | `submit_history`, `resolve`, `resume`: authenticated by signatures and the channel's windows, not by the caller. `acknowledge`, `resume_by_referee`: authenticated by the referee's signature. |
+| The game's prover | `accept_verified` |
+| A namespace owner | `allow_prover` |
+| Read-only | `terms`, `snapshot`, `result`, `read`, `read_state`, `status`, `seat_of` |
+
+### Channel lifecycle
+
+```cairo
+fn create<impl R: GameRules>(
+    ref world: WorldStorage, config: R::Config, invited: ContractAddress, session_key: felt252,
+    rng_tip: felt252, prover: ContractAddress, response_seconds: u32, clock: Option<TimeControl>,
+) -> felt252;
+fn join<impl R: GameRules>(ref world: WorldStorage, game_id: felt252, session_key: felt252, rng_tip: felt252);
+fn cancel(ref world: WorldStorage, game_id: felt252);
+```
+
+| Helper | Checks (panic) | Effect |
+| --- | --- | --- |
+| `create` | Session key non-zero and the x coordinate of a curve point (`'Invalid session key'`); `check_clock::<R>(clock)` (`'Invalid referee'` and any panic of the game's `ClockRules::check`, such as `StandardTime`'s `'Invalid time control'`); for a timed game, the referee key valid (`'Invalid session key'`) and not the session key (`'Referee is a seat'`); non-zero tip (`'Invalid tip'`); non-zero prover (`'Zero prover'`) whose class is allowed (`'Untrusted prover class'`); non-zero caller and `invited != caller` (`'Invalid players'`); `R::init(config)` succeeds; `response_seconds` in range (`'Invalid response window'`). | Writes `ChannelTerms` with the caller as `player_0`, `invited` as `player_1` (zero for an open game), and the clock's `referee` and `settings` (zero and empty for an untimed game), and a `WAITING` `ChannelState`. Returns the new game id. |
+| `join` | Caller non-zero and not `player_0` (`'Invalid players'`); caller is `player_1` if one was invited (`'Not invited'`); valid session key (`'Invalid session key'`) that differs from `key_0` (`'Shared session key'`) and from the referee key (`'Referee is a seat'`); tip non-zero and not `tip_0` (`'Invalid tip'`); the prover's class still allowed; channel `WAITING` (`'Not waiting'`). | Takes seat 1, builds the terms, sets `context = context_hash(terms)` and the anchor and candidate to `state_ref(open(terms))` at the current block. Writes `ChannelTerms` again and the `ACTIVE` state. |
+| `cancel` | Caller is `player_0` (`'Only creator'`); channel `WAITING` (`'Not waiting'`). | Status `CANCELLED`. |
+
+### Submitting states
+
+```cairo
+fn accept_verified<impl R: GameRules>(
+    ref world: WorldStorage, game_id: felt252, epoch: u32, start_hash: felt252,
+    end: Envelope<R::State>, acks: Span<Signature>,
+);
+fn submit_history<impl R: GameRules>(
+    ref world: WorldStorage, game_id: felt252, epoch: u32, start: Envelope<R::State>,
+    witness: R::Witness, batch: Batch<R::Action>, acks: Span<Signature>,
+);
+```
+
+Both start from the anchor or from the candidate, and end in `referee::channel::receive`. Starting from the candidate extends it, so a long transcript can arrive in segments within one dispute window. `acks` holds one signature per seat over `checkpoint_hash(context, epoch, state_hash(end))`: all zeros submits without approval (the state becomes a dispute candidate), otherwise every seat's signature must verify (`'Wrong approval count'`, `'Invalid session signature'`, ...) and the state commits at once. See [Settlement and proofs](/concepts/settlement).
+
+| Helper | Checks (panic) | Effect |
+| --- | --- | --- |
+| `accept_verified` | Caller is the game's `prover` (`'Only prover'`) and its class is still allowed (`'Untrusted prover class'`); `start_hash` equals the anchor's or the candidate's hash (`'Wrong proof anchor'`); then `receive`'s checks. | Receives `end`, which the adapter proved replays from `start_hash`. |
+| `submit_history` | `state_hash(start)` equals the anchor's or the candidate's hash (`'Wrong anchor state'`); `replay` from `start` with the stored context and terms (every [replay panic](/reference/cairo#replay)); then `receive`'s checks. | Replays `batch` onchain, without a prover, and receives the end state. |
+
+### Disputes and forced play
+
+```cairo
+fn open_dispute(ref world: WorldStorage, game_id: felt252, epoch: u32);
+fn acknowledge<impl R: GameRules>(ref world: WorldStorage, game_id: felt252, epoch: u32, signature: Signature);
+fn resolve(ref world: WorldStorage, game_id: felt252, epoch: u32);
+fn force<impl R: GameRules>(
+    ref world: WorldStorage, game_id: felt252, epoch: u32, start: Envelope<R::State>,
+    witness: R::Witness, steps: Span<Move<R::Action>>,
+);
+fn resume<impl R: GameRules>(ref world: WorldStorage, game_id: felt252, epoch: u32, acks: Span<Signature>);
+fn resume_by_referee<impl R: GameRules>(ref world: WorldStorage, game_id: felt252, epoch: u32, signature: Signature);
+fn claim_timeout(ref world: WorldStorage, game_id: felt252, epoch: u32);
+fn resign(ref world: WorldStorage, game_id: felt252);
+```
+
+| Helper | Checks (panic) | Effect |
+| --- | --- | --- |
+| `open_dispute` | Caller is a player (`'Not a player'`); then `channel::open_dispute`. | Opens a dispute from the anchor. |
+| `acknowledge` | The game is timed (`'Untimed game'`); `signature` is the referee's over `live_hash(context, epoch, deadline)`, with the channel's current deadline (any `verify` panic); then `channel::acknowledge` (`'No dispute'`, `'Stale channel epoch'`, `'Dispute window closed'`). | Records that the referee is live during this dispute, so `resolve` returns an unfinished game to offchain play instead of forced play. The status does not change. |
+| `resolve` | `channel::resolve` (`'No dispute'`, `'Stale channel epoch'`, `'Dispute window open'`), with `timed` true when the game has a referee key. | Commits the candidate: settles a finished game; otherwise returns an acknowledged timed game to `ACTIVE` and starts forced play for any other. |
+| `force` | Caller is a player; `state_hash(start)` equals the anchor hash (`'Wrong anchor state'`); `referee::force` with the caller's seat (`'Not your step'` and any step panic); then `channel::forced` (`'Not your turn'`, `'Turn deadline passed'`, ...). | Applies the caller's steps onchain. The wallet call authenticates them instead of signatures. They carry no stamps, so a timed game's clock pauses. |
+| `resume` | `acks` over `reopen_hash(context, epoch, anchor.hash)` from every seat; then `channel::resume` (`'Need every approval'` when `acks` are all zero). | Returns to offchain play from the anchor. |
+| `resume_by_referee` | The game is timed (`'Untimed game'`); `signature` is the referee's over `referee_resume_hash(context, epoch, anchor.hash)` (any `verify` panic); then `channel::resume` (`'Not in forced play'`, `'Stale channel epoch'`, `'Turn deadline passed'`). | Returns a timed game to offchain play from the anchor on the referee's signature alone, so a seat can't keep a game onchain by refusing to approve. |
+| `claim_timeout` | Caller is a player; then `channel::claim_timeout` (`'Only waiting seat'`, `'Turn window open'`, ...). | Settles against the due seat with `REASON_ABANDON`. |
+| `resign` | Caller is a player; then `channel::resign` (`'Channel not live'`). | Settles against the caller's seat with `REASON_RESIGN`. |
+
+### Admin and reads
+
+```cairo
+fn allow_prover(ref world: WorldStorage, class_hash: felt252, allowed: bool);
+fn terms<impl R: GameRules>(game: @ChannelGame) -> Terms<R::Config>;
+fn snapshot<impl R: GameRules>(
+    world: @WorldStorage, game_id: felt252,
+) -> (Terms<R::Config>, u32, felt252, u64, felt252, u64);
+fn result(world: @WorldStorage, game_id: felt252) -> Option<Outcome>;
+fn read(world: @WorldStorage, game_id: felt252) -> ChannelGame;
+fn read_state(world: @WorldStorage, game_id: felt252) -> Channel;
+fn status(world: @WorldStorage, game_id: felt252) -> u8;
+fn seat_of(game: @ChannelGame, address: ContractAddress) -> u8;
+```
+
+| Helper | Behavior | Panics |
+| --- | --- | --- |
+| `allow_prover` | Writes `ProverAllowed { class_hash, allowed }`. Emits no event. Revoking a class also stops `join` and `accept_verified` for channels whose prover has that class. | `'Only namespace owner'` unless the caller owns the world's namespace. |
+| `terms` | The game's `Terms`: `chain_id` from the transaction, `channel` = the game system's own address, then the stored game id, prover, window, time control (`None` when `referee` is zero, otherwise `referee` and `clock_settings`), players, keys, tips and config. | `'Invalid stored config'` if the config does not deserialize. |
+| `snapshot` | What the adapter needs to prove from: terms, epoch, anchor hash, anchor block, candidate hash and candidate block. Outside a dispute the candidate is the anchor. | `'Channel not live'` unless `ACTIVE`, `DISPUTE` or `FORCED`. |
+| `result` | `Some(outcome)` once `SETTLED`, otherwise `None`. Games pay rewards from this. | |
+| `read` | The `ChannelGame` view, from `ChannelTerms` and `ChannelState`. | `'Unknown channel'` if `player_0` is zero. |
+| `read_state` | The `Channel` alone, from `ChannelState` and the terms' `response_seconds`, without reading the rest of the terms: its `context` reads as zero. | |
+| `status` | The channel's status, read from the packed state. | |
+| `seat_of` | `0` for `player_0`, `1` for a non-zero `player_1`. | `'Not a player'` for any other address. |
+
+## Wrapping the helpers
+
+A game system exposes one entrypoint per helper, each one line on top of `referee_dojo::channel`. From the counter's system ([`dojo/examples/counter/src/lib.cairo`](https://github.com/broody/referee/blob/main/dojo/examples/counter/src/lib.cairo)), with the other entrypoints following the same shape:
+
+```cairo
+#[dojo::contract]
+pub mod channel {
+    use dojo::world::WorldStorage;
+    use referee::{Batch, Envelope, Move, Signature, Terms, TimeControl};
+    use referee_counter::{Action, Config, Counter, CounterRules};
+    use referee_dojo::channel as binding;
+    use referee_dojo::models::ChannelGame;
+    use starknet::ContractAddress;
+
+    #[abi(embed_v0)]
+    impl CounterChannelImpl of super::ICounterChannel<ContractState> {
+        fn join(ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip: felt252) {
+            let mut world = self.world_default();
+            binding::join::<CounterRules>(ref world, game_id, session_key, rng_tip);
+        }
+
+        fn submit_history(
+            ref self: ContractState,
+            game_id: felt252,
+            epoch: u32,
+            start: Envelope<Counter>,
+            batch: Batch<Action>,
+            acks: Span<Signature>,
+        ) {
+            let mut world = self.world_default();
+            binding::submit_history::<
+                CounterRules,
+            >(ref world, game_id, epoch, start, (), batch, acks);
+        }
+
+        fn snapshot(
+            self: @ContractState, game_id: felt252,
+        ) -> (Terms<Config>, u32, felt252, u64, felt252, u64) {
+            let world = self.world_default();
+            binding::snapshot::<CounterRules>(@world, game_id)
+        }
+
+        fn get_channel(self: @ContractState, game_id: felt252) -> ChannelGame {
+            let world = self.world_default();
+            binding::read(@world, game_id)
+        }
+
+        // create, cancel, accept_verified, open_dispute, acknowledge, resolve,
+        // force, resume, resume_by_referee, claim_timeout, resign, allow_prover,
+        // terms: one call each.
+    }
+
+    #[generate_trait]
+    impl InternalImpl of InternalTrait {
+        fn world_default(self: @ContractState) -> WorldStorage {
+            self.world(@"counter")
+        }
+    }
+}
+```
+
+The counter's `Witness` is `()`, so it passes `()` where the helpers take a witness, and its `create` builds `Config { target }` from an entrypoint argument. A game with a real witness takes it as an entrypoint argument.
+
+The entrypoint names matter to other components:
+
+- The proof adapter calls `snapshot(game_id)` and `accept_verified(game_id, epoch, start_hash, end, acks)` by selector, so keep those names, argument orders and the snapshot's six return values.
+- The [keeper](/infra/keeper) reads `get_channel(game_id) -> ChannelGame` and `terms`, and sends `submit_history`, `resolve`, `acknowledge` and `resume_by_referee`. Its config can rename these six.
+
+The game's `Scarb.toml` registers the models and the event in its world, as the counter does ([`dojo/examples/counter/Scarb.toml`](https://github.com/broody/referee/blob/main/dojo/examples/counter/Scarb.toml)):
+
+```toml
+[[target.starknet-contract]]
+sierra = true
+build-external-contracts = [
+    "dojo::world::world_contract::world",
+    "referee_dojo::models::m_ChannelTerms",
+    "referee_dojo::models::m_ChannelState",
+    "referee_dojo::models::m_ProverAllowed",
+    "referee_dojo::models::e_ChannelUpdated",
+]
+```
+
+The system also needs write access to its namespace; the counter grants it in `dojo_dev.toml` with `[writers] "counter" = ["counter-channel"]`.
+
+## referee_adapter
+
+A proof adapter is an immutable account contract ([`adapter/referee_adapter`](https://github.com/broody/referee/blob/main/adapter/referee_adapter/src/lib.cairo)):
+
+1. **Proving.** Its `__execute__` runs as a zero-fee virtual `INVOKE_V3` that is never broadcast. It reads the channel snapshot, replays the signed steps from the anchor or the candidate with the game's rules, and sends one L2→L1 message committing to the transition. A prover proves that execution.
+2. **Settling.** A real transaction calls the adapter's `settle` with the proof attached. The network verifies the proof; `settle` checks that the proof facts commit to exactly this transition and calls the channel's `accept_verified`.
+
+The adapter calls the channel through raw syscalls, so it works with any game system that exposes `referee_dojo`'s `snapshot` and `accept_verified` entrypoints. See [Settlement and proofs](/concepts/settlement).
+
+### Functions
+
+`referee_adapter::prover`, re-exported at the crate root.
+
+```cairo
+fn execute<impl R: GameRules>(
+    channel: ContractAddress, game_id: felt252, epoch: u32, start: Envelope<R::State>,
+    witness: R::Witness, batch: Batch<R::Action>,
+);
+fn settle<impl R: GameRules>(
+    channel: ContractAddress, game_id: felt252, epoch: u32, start_hash: felt252,
+    end: Envelope<R::State>, acks: Span<Signature>, os_program: felt252,
+);
+fn assert_virtual();
+fn snapshot<impl R: GameRules>(
+    channel: ContractAddress, game_id: felt252,
+) -> (Terms<R::Config>, u32, felt252, u64, felt252, u64);
+fn payload<impl R: GameRules>(
+    class_hash: felt252, prover: felt252, chain_id: felt252, channel: felt252, game_id: felt252,
+    context: felt252, epoch: u32, start_hash: felt252, end_hash: felt252,
+) -> Array<felt252>;
+fn message_hash(prover: felt252, payload: Span<felt252>) -> felt252;
+```
+
+| Function | Behavior | Panics |
+| --- | --- | --- |
+| `execute` | The virtual `__execute__`. Calls `assert_virtual`, reads and checks the snapshot with `state_hash(start)` as the start hash, replays `batch` with `context_hash(terms)`, then sends `payload(own class hash, own address, ..., state_hash(start), state_hash(end))` to L1 address 0. | `assert_virtual`'s; the snapshot checks; every [replay panic](/reference/cairo#replay). |
+| `settle` | The real settlement. Reads and checks the snapshot with `start_hash`, rebuilds the expected payload for `start_hash` to `end`, runs `check_facts` on the transaction's proof facts against `message_hash(own address, payload)`, `os_program`, the current block and the base block, then calls the channel's `accept_verified(game_id, epoch, start_hash, end, acks)`. It has no caller check. | The snapshot checks; any `check_facts` panic; any panic of `accept_verified`. |
+| `assert_virtual` | Only a zero-fee virtual `INVOKE_V3` from the OS may run the proving path. | `'Only OS caller'` for a non-zero caller; `'Only invoke v3'` unless the transaction version is 3 (or its query version); `'Nonzero tip'`; `'Nonzero gas price'` if any resource bound has a non-zero `max_price_per_unit`. |
+| `snapshot` | Calls the channel's `snapshot(game_id)`: terms, epoch, anchor hash, anchor block, candidate hash and candidate block. | `'Malformed snapshot'` if the result does not deserialize. |
+| `payload` | `[class_hash, TAG, 'REFEREE_PROVED_V1', chain_id, prover, channel, game_id, context, epoch, start_hash, end_hash]`: what a proved transition commits to. | |
+| `message_hash` | Poseidon of `prover`, `0` and the serialized `payload`: the hash the proof facts carry for `payload` sent by `prover` to L1 address 0. | |
+
+Both `execute` and `settle` check the snapshot the same way: the terms name this channel and game (`'Wrong channel terms'`) and this chain (`'Wrong chain terms'`), `epoch` is the channel's current epoch (`'Stale proof epoch'`), the terms' `prover` is this contract (`'Wrong game prover'`), and the start hash is the anchor's or the candidate's (`'Wrong proof anchor'`). That picks the base block: the anchor block for the anchor, otherwise the candidate block. The channel's own `snapshot` panics with `'Channel not live'` for a settled, cancelled or waiting channel.
+
+### Proof facts
+
+`referee_adapter::facts`, re-exported at the crate root.
+
+```cairo
+pub const MAX_PROOF_AGE: u64 = 4000;
+
+#[derive(Copy, Drop, Serde)]
+pub struct ProofFacts {
+    pub proof_version: felt252,
+    pub program_variant: felt252,
+    pub virtual_program_hash: felt252,
+    pub output_version: felt252,
+    pub base_block_number: u64,
+    pub base_block_hash: felt252,
+    pub config_hash: felt252,
+    pub messages: Span<felt252>,
+}
+
+fn check_facts(encoded: Span<felt252>, expected: felt252, os_program: felt252, current: u64, anchor: u64);
+```
+
+`MAX_PROOF_AGE` is the maximum age, in blocks, of a proof's base block at settlement. `check_facts` deserializes network-verified `ProofFacts` and checks, in order, with `anchor` the block the start state was set in (the base block `settle` picks):
+
+| Check | Panic |
+| --- | --- |
+| `encoded` is not empty | `'Missing proof facts'` |
+| It deserializes as `ProofFacts` | `'Malformed proof facts'` |
+| Nothing follows | `'Trailing proof facts'` |
+| `proof_version` is `'PROOF1'` (the small path) or `'PROOF2'` (the large path added in Starknet v0.14.4) | `'Wrong proof version'` |
+| `program_variant` is `'VIRTUAL_SNOS'` | `'Wrong program variant'` |
+| `virtual_program_hash` equals `os_program` | `'Wrong OS program'` |
+| `output_version` is `'VIRTUAL_SNOS0'` | `'Wrong output version'` |
+| `base_block_number >= anchor` | `'Proof predates anchor'` |
+| `base_block_number < current` | `'Invalid base block'` |
+| `current - base_block_number <= MAX_PROOF_AGE` | `'Expired proof'` |
+| `messages` is exactly `[expected]` | `'Wrong proved transition'` |
+
+### The account contract
+
+A game's adapter is a thin `#[starknet::contract(account)]` over these functions. The counter's ([`adapter/examples/counter/src/lib.cairo`](https://github.com/broody/referee/blob/main/adapter/examples/counter/src/lib.cairo)) has no admin, upgrade path, arbitrary calls or custody. Its virtual OS program is fixed at deployment, so an OS upgrade needs a new instance. Deploy one instance per Starknet OS program and allow its class in the game's channel with `allow_prover`.
+
+```cairo
+#[starknet::contract(account)]
+pub mod CounterProver {
+    use referee::{Batch, Envelope, Signature};
+    use referee_adapter::prover;
+    use referee_counter::{Action, Counter, CounterRules};
+    use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
+    use starknet::{ContractAddress, VALIDATED};
+
+    #[storage]
+    struct Storage {
+        os_program: felt252,
+    }
+
+    #[constructor]
+    fn constructor(ref self: ContractState, os_program: felt252) {
+        assert(os_program != 0, 'Zero OS program');
+        self.os_program.write(os_program);
+    }
+
+    #[abi(embed_v0)]
+    impl ProverImpl of super::ICounterProver<ContractState> {
+        fn settle(
+            ref self: ContractState,
+            channel: ContractAddress,
+            game_id: felt252,
+            epoch: u32,
+            start_hash: felt252,
+            end: Envelope<Counter>,
+            acks: Span<Signature>,
+        ) {
+            prover::settle::<
+                CounterRules,
+            >(channel, game_id, epoch, start_hash, end, acks, self.os_program.read());
+        }
+
+        fn os_program(self: @ContractState) -> felt252 {
+            self.os_program.read()
+        }
+    }
+
+    #[abi(embed_v0)]
+    impl VirtualImpl of super::IVirtualCounter<ContractState> {
+        fn __validate__(
+            self: @ContractState,
+            channel: ContractAddress,
+            game_id: felt252,
+            epoch: u32,
+            start: Envelope<Counter>,
+            batch: Batch<Action>,
+        ) -> felt252 {
+            prover::assert_virtual();
+            VALIDATED
+        }
+
+        fn __execute__(
+            ref self: ContractState,
+            channel: ContractAddress,
+            game_id: felt252,
+            epoch: u32,
+            start: Envelope<Counter>,
+            batch: Batch<Action>,
+        ) {
+            prover::execute::<CounterRules>(channel, game_id, epoch, start, (), batch);
+        }
+    }
+}
+```

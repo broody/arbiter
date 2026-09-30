@@ -1,0 +1,229 @@
+# Add a clock
+
+Clocks are **optional**, and each game opts in. Without a clock, a player who
+stops moving can only be pushed by a dispute, which gives them a whole response
+window (5 minutes to 7 days) to answer and then forced play onchain. With a
+clock, a **referee** keeps time offchain: it stamps every step as it arrives and
+flags a seat whose time runs out, so a stall costs the staller the game in
+seconds, not days.
+
+Players sign moves; the referee signs time. It can't forge a move or a result.
+Its power is over time only, and it's the one party of a timed game that
+players must trust to be fair and online. See
+[Clocks and the referee](/concepts/clocks) for how charging, stamps and flags
+work.
+
+## Choose a time control
+
+A game's `TimeControl` is part of its terms:
+
+| Field | Meaning |
+| --- | --- |
+| `referee` | The referee's **public** key. It signs stamps, starts and flags |
+| `settings` | The settings of the game's time rules |
+
+Most games use the standard time rules (`StandardTime` in Cairo,
+`standardTime` in the SDK, the default for a codec without `time`). Their
+settings, in milliseconds:
+
+| Setting | Meaning |
+| --- | --- |
+| `turn_ms` | Time each turn gets first. Unused time doesn't carry over |
+| `bank_ms` | Each seat's main time, spent once a turn's `turn_ms` runs out |
+| `increment_ms` | Added to a seat's bank when its turn ends |
+| `byoyomi` | `null`, or `{ periods, period_ms }`: once its bank is spent, a seat must end each turn within a period. A turn that ends inside a period costs none, each period that runs out is lost, and a seat that outlasts its last period has flagged |
+
+A turn is a run of steps while your game's `due` seat stays the same. A pending
+reveal is timed on its own, as a turn of one step for the revealer, so
+withholding a reveal burns the revealing seat's clock.
+
+| Style | `turn_ms` | `bank_ms` | `increment_ms` | `byoyomi` |
+| --- | ---: | ---: | ---: | --- |
+| 60 seconds per move, nothing saved (Surround's old per-turn clock) | 60000 | 0 | 0 | `null` |
+| Blitz 3+2 | 0 | 180000 | 2000 | `null` |
+| Per-turn timer with a small reserve (Hashfront-style) | 90000 | 30000 | 0 | `null` |
+| Japanese byo-yomi, 10 min + 5 × 30 s | 0 | 600000 | 0 | `{ periods: 5, period_ms: 30000 }` |
+
+Each setting is at most 30 days (`MAX_CLOCK_MS`), byo-yomi has 1 to 255
+periods (`MAX_PERIODS`) of a positive length, and `turn_ms`, `bank_ms` or
+byo-yomi must be positive. `create` rejects anything else
+(`'Invalid time control'`, `'Invalid byo-yomi'`).
+
+### Time rules
+
+A game with a different notion of time writes its own rules: a Cairo
+`referee::clocks::ClockRules` named by `GameRules::Time`, and its JS mirror as
+the codec's `time` (see [Mirror the rules in JS](/guide/codec#optional-time-rules)).
+The counter's hourglass rules, where the time a seat uses flows to its
+opponent, are a complete example in about 40 lines
+([`examples/counter/src/hourglass.cairo`](https://github.com/broody/referee/blob/main/examples/counter/src/hourglass.cairo)).
+The settings are then whatever those rules define, for instance
+`{ bank_ms }` for the hourglass.
+
+## Run a referee
+
+The referee is usually a [keeper](/infra/keeper) started with a referee key:
+
+```json
+{
+  "referee": { "private_key_env": "KEEPER_REFEREE_KEY" }
+}
+```
+
+```bash
+KEEPER_PRIVATE_KEY=0x… KEEPER_REFEREE_KEY=0x… node keeper/server.mjs keeper/config.local.json
+```
+
+The keeper referees every timed game whose terms name its referee key. It
+stamps steps as they arrive, starts a clock that no step started within the
+entry's `start_grace_seconds`, flags on a timer, and never stamps two steps at
+one seq. `GET /info` shows its referee public key. With the game's Dojo
+`world` and `namespace` in its config, it also finds new timed games that name
+its key from the channel's `JOINED` events, so they get a referee even if no
+seat registers them.
+
+:::warning
+Use a referee key that is different from the keeper's account key, and from
+every seat's session key. `create` and `join` refuse a referee key that equals a
+seat's session key (`'Referee is a seat'`).
+:::
+
+## Create a timed game
+
+Pass the time control as `create`'s last argument, as Cairo `Option` serialization:
+`0` followed by the fields for `Some`, or `1` for an untimed game.
+
+```js
+import { encodeTimeControl } from '@referee/sdk'
+
+const clock = { referee: REFEREE_PUBLIC_KEY, settings: { turn_ms: 60000, bank_ms: 0, increment_ms: 0, byoyomi: null } }
+await wallet.execute(contractCall(CHANNEL, 'create', [
+  20, opponentAddress, publicKey(privateKey), tip, ADAPTER_ADDRESS, 3600,
+  0, ...encodeTimeControl(counter, clock),   // Some(TimeControl), encoded with the game's time rules
+]))
+```
+
+Joining a timed game accepts its referee. The time control is bound into the
+context, like every other term.
+
+## Play a timed game
+
+In a timed game a step counts only once the referee has stamped it, so a seat
+can't apply its own step. `store.move` signs and marks the step but doesn't
+apply it: it waits in `session.pending`. You submit your pending steps to the
+referee and pull them back stamped:
+
+```js
+await store.move(session, play({ kind: ADD, amount: 3 }), privateKey) // signed, not applied
+await keeper.submit(session, { store })  // the keeper stamps every pending step; pulled back and applied
+```
+
+Stamps stay out of the transcript, so within your turn you can sign the next
+step before the last one comes back: each `store.move` signs from
+`session.tip`, the state after your pending steps.
+
+The other seat's steps, and the referee's `start` and `flag`, arrive through
+`pull` (or `follow`) as usual. Every stamped record carries its `stamp`
+(referee time, in milliseconds) and the referee's `attestation`.
+`Session.receive` verifies both, and refuses an unstamped step in a timed game.
+
+:::note
+`Session.move` throws in a timed game
+(`'Timed games apply a step once the referee stamps it: sign, send, then receive'`).
+Use `sign` then `receive`, or `store.move` with `keeper.submit`.
+:::
+
+### Show the clocks
+
+`timeLeft(game, terms, env, at)` gives each seat's clock at referee time `at`,
+as the time rules' `view` shows it. With `standardTime` each seat's entry is
+`{ turn, bank, periods, period }`. The due seat's counts the time it has used
+since its turn began; the others show what they start their next turn with.
+Clients don't know the referee's clock exactly, so estimate it from the last
+stamp:
+
+```js
+import { timeLeft } from '@referee/sdk'
+
+const receivedAt = Date.now()   // when the latest stamped step arrived
+function render() {
+  const at = session.env.clock.stamp + (Date.now() - receivedAt)
+  const [mine, theirs] = timeLeft(counter, session.terms, session.env, at)
+  // mine.turn, mine.bank, mine.periods, mine.period …
+}
+```
+
+The clock starts at the first stamp, or at the referee's `start`. Until then,
+and while it's paused, `env.clock.stamp` is 0 and nobody is charged.
+
+### When time runs out
+
+Once the due seat has used more than its time rules allow, the referee can
+**flag**:
+
+- a step from that seat arriving afterwards is refused (`'Flag fell'`);
+- the referee appends a `Flag` step, which ends the game with the other seat
+  winning and `REASON_TIMEOUT` (129).
+
+A flagged game is a finished game like any other. Anyone can settle it, and a
+keeper does so on its own.
+
+## Disputes in a timed game
+
+While the referee is live, a dispute doesn't stop the clock. A keeper that
+referees the game sends `acknowledge` with the referee's signature as soon as
+a dispute opens. When the window passes, `resolve` commits the best candidate
+and, if the game isn't finished, returns it to `ACTIVE`, not forced play. Play
+goes on offchain, and a staller is flagged there.
+
+## If the referee goes down
+
+Nothing can be stamped, so the game stalls. The fallback is the untimed
+channel: a player opens a dispute, the best signed history is submitted, and,
+with no acknowledgement from the referee, an unfinished game moves to forced
+play onchain. Forced steps carry no stamps, so the clock **pauses** during
+forced play, and the channel's windows keep time instead.
+
+When the referee is back, it returns the game from forced play on its own with
+`resume_by_referee`: the seats don't need to approve. Its last stamp is then
+stale, so it restarts the clock once without charging anyone for the gap: from
+the last stamp when the due seat's step comes first, or with a `start` after
+the start grace.
+
+A restarted keeper resumes each clock where its last stamp left it, so seats
+aren't charged for the referee's own downtime.
+
+## Referee without a keeper
+
+`Referee` in `@referee/sdk` is what the keeper uses. Run it yourself to referee
+from your own server:
+
+```js
+import { Referee, Session } from '@referee/sdk'
+
+// Keep one Referee per game for as long as the game runs.
+const referee = new Referee(new Session(counter, terms), REFEREE_PRIVATE_KEY)
+
+const started = referee.start()                      // the attested start record: the clock runs from here
+// … send `started` to both seats
+
+const stamped = referee.stamp(signedStepFromASeat)   // throws 'Flag fell' once time is up
+// … send `stamped` to both seats
+
+const deadline = referee.deadline()                  // wall-clock ms when the due seat can be flagged
+setTimeout(() => {
+  const flagged = referee.flag()                     // the attested Flag record, or null if not yet
+  // … send `flagged` to both seats
+}, deadline - Date.now())
+
+// During a dispute: the signature `acknowledge` takes.
+const ack = referee.acknowledgement(channel.epoch, channel.deadline)
+// In forced play: the signature `resume_by_referee` takes.
+const resume = referee.resumeSignature(channel.epoch, channel.anchor.hash)
+```
+
+Anyone may send `acknowledge(game_id, epoch, signature)` and
+`resume_by_referee(game_id, epoch, signature)` to the game's system.
+
+Persist `referee.session` as the games go. A `Referee` built from a stored
+session resumes its clock at the last stamp.
