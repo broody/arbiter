@@ -73,8 +73,8 @@ test('decide follows the channel rules', () => {
     assert.equal(decide(channelOf(session, { status }), session, 0).action, action);
 });
 
-async function watching(chain, entryOptions, archiveOptions = {}) {
-  const archive = await Archive.open(memoryBackend(), { games: [[CHANNEL, counter]], chainId: CHAIN, ...archiveOptions });
+async function watching(chain, entryOptions, archiveOptions = {}, backend = memoryBackend()) {
+  const archive = await Archive.open(backend, { games: [[CHANNEL, counter]], chainId: CHAIN, ...archiveOptions });
   const logs = [];
   const watcher = startWatcher({ archive, chain, entries: new Map([[CHANNEL, entry(entryOptions)]]), intervalMs: 0, log: e => logs.push(e) });
   const round = async () => { await watcher.tick(); await watcher.idle(); };
@@ -302,6 +302,50 @@ test('the referee registers the timed games that join naming its key, from the w
     await round();
     assert.equal(chain.reads.terms, 3);
   } finally { archive.stop(); }
+});
+
+test('the referee retries a join it failed to register each round, across restarts, unless the archive refused it', async () => {
+  const chain = fakeChain();
+  const world = { world: 0x3031dn, namespace: 'counter' }, options = { ...refereeing, maxOpenGames: 1 };
+  const first = await watching(chain, world, options);
+  let again;
+  const registers = logs => logs.filter(l => l.action === 'register').map(l => [l.game, l.outcome, l.error]);
+  try {
+    for (const id of [7n, 8n, 9n]) {
+      chain.termsOf.set(id, timed(id));
+      chain.channels.set(id, channelOf(new Session(counter, timed(id))));
+    }
+    // Game 9 closed here before its join was read.
+    await first.archive.close(first.archive.ids(CHANNEL, 9n), SETTLED);
+    chain.joins.push({ game_id: 7n, block: 10 }, { game_id: 9n, block: 10 });
+    // The node can't read the terms: both joins are kept to retry.
+    chain.failing.add('terms');
+    await first.round();
+    assert.deepEqual(registers(first.logs), [['0xc4a11e1/0x7', 'failed', 'terms failed'], ['0xc4a11e1/0x9', 'failed', 'terms failed']]);
+    // After a restart, with no new block: game 7 registers, and the archive refuses game 9 for good.
+    chain.failing.delete('terms');
+    again = await watching(chain, world, options, first.archive.backend);
+    await again.round();
+    assert.deepEqual(again.archive.open().map(i => i.game_id), [7n]);
+    await again.round();
+    assert.equal(chain.reads.terms, 4);
+    // A join while the keeper is full waits for a free slot.
+    chain.joins.push({ game_id: 8n, block: 11 });
+    chain.block = 11;
+    await again.round();
+    await again.round();
+    await again.archive.close(ids, SETTLED);
+    await again.round();
+    await again.round();
+    assert.deepEqual(again.archive.open().map(i => i.game_id), [8n]);
+    assert.equal(chain.reads.terms, 7);
+    const full = ['0xc4a11e1/0x8', 'failed', 'The keeper is full'];
+    assert.deepEqual(registers(again.logs), [['0xc4a11e1/0x7', 'joined', undefined], ['0xc4a11e1/0x9', 'refused', 'The game is closed here'],
+      full, full, ['0xc4a11e1/0x8', 'joined', undefined]]);
+  } finally {
+    first.archive.stop();
+    again?.archive.stop();
+  }
 });
 
 test('the resolve that settles a game carries its after-settle calls, or is followed by them', async () => {

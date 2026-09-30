@@ -14,10 +14,10 @@
 // a native proof through the game's adapter. Forced play and timeouts
 // otherwise need a player's wallet, so the keeper waits them out.
 import { Session, disputeAnswer, felt, hex, rebase } from '../sdk/src/index.mjs';
-import { gameKey } from './archive.mjs';
+import { KeeperError, gameKey } from './archive.mjs';
 
 export const WAITING = 0, ACTIVE = 1, DISPUTE = 2, FORCED = 3, SETTLED = 4, CANCELLED = 5;
-const CURSOR = 'keeper/cursor/';
+const CURSOR = 'keeper/cursor/', RETRY = 'keeper/retry/';
 
 const replayMax = entry => entry.replay_max_steps ?? entry.max_history_steps ?? 64;
 /** Steps per submission: up to `proof_max_steps` with a prover, else `replay_max_steps`. */
@@ -170,23 +170,40 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
     busy.set(key, run);
   }
 
+  // Register a game that joined on `entry`'s channel if it is timed and names
+  // our referee key. Returns whether to try again next round: after a failure
+  // that may pass, such as an RPC error or a full keeper (503), but not once
+  // the archive refuses the game (its other KeeperErrors, e.g. closed here).
+  async function join(entry, gameId) {
+    const key = gameKey(archive.ids(entry.channel, gameId));
+    if (archive.known.has(key)) return false;
+    try {
+      const terms = await chain.terms(entry, gameId);
+      if (terms.clock == null || felt(terms.clock.referee) !== archive.referee) return false;
+      if ((await archive.register(new Session(entry.game, terms).export())).created)
+        log({ game: key, action: 'register', outcome: 'joined' });
+      return false;
+    } catch (e) {
+      const retry = !(e instanceof KeeperError) || e.status >= 500;
+      log({ game: key, action: 'register', outcome: retry ? 'failed' : 'refused', error: e.message });
+      return retry;
+    }
+  }
+
   // Register the timed games that joined on `entry`'s channel naming our
   // referee key, found in the world's `ChannelUpdated` events: each gets a
-  // referee and a `start` even if neither seat registers it.
+  // referee and a `start` even if neither seat registers it. The joins still
+  // to retry are kept in the store and go first, even with no new blocks.
   async function discover(entry) {
-    const cursor = `${CURSOR}${hex(entry.channel)}`;
+    const cursor = `${CURSOR}${hex(entry.channel)}`, retries = `${RETRY}${hex(entry.channel)}`;
     const from = (await archive.backend.get(cursor)) ?? entry.from_block ?? await chain.blockNumber();
+    const pending = (await archive.backend.get(retries)) ?? [];
     const { games, to } = await chain.joinedGames(entry, from);
-    for (const { game_id } of games) {
-      const ids = archive.ids(entry.channel, game_id), key = gameKey(ids);
-      if (archive.known.has(key)) continue;
-      try {
-        const terms = await chain.terms(entry, game_id);
-        if (terms.clock == null || felt(terms.clock.referee) !== archive.referee) continue;
-        if ((await archive.register(new Session(entry.game, terms).export())).created)
-          log({ game: key, action: 'register', outcome: 'joined' });
-      } catch (e) { log({ game: key, action: 'register', outcome: 'failed', error: e.message }); }
-    }
+    const failed = [];
+    for (const gameId of new Set([...pending, ...games.map(g => g.game_id)]))
+      if (await join(entry, gameId)) failed.push(gameId);
+    // The retries before the cursor: a crash between the two only rescans.
+    if (pending.length || failed.length) await archive.backend.put(retries, failed);
     if (to >= from) await archive.backend.put(cursor, to + 1);
   }
 
