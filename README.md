@@ -1,12 +1,10 @@
 # Referee
 
 Referee lets two players play a turn-based game on Starknet **without a
-transaction per move**, while the chain still enforces the rules and the result.
+transaction per move**. Players exchange signed moves offchain, and the chain
+settles the result, enforcing the rules whenever anyone disputes it.
 
-Players exchange signed moves offchain. Only settling a game and resolving
-disputes touch the chain, and a game opens onchain in the same transaction as
-the first of them. Every game writes its rules once, in Cairo.
-The same code then:
+Every game writes its rules once, in Cairo. The same code then:
 - validates moves in the players' clients;
 - replays disputed history onchain;
 - runs inside the Stwo proof that settles the game.
@@ -24,6 +22,22 @@ can't be done offchain or inside the settlement. That covers a separate
 transaction to open the game, a proof split into several, or a call a player
 has to send. [DESIGN.md](DESIGN.md) records these choices. For example, a game
 opens onchain in the same transaction that settles it (protocol v6).
+
+**The chain judges the rules; a referee witnesses what signatures can't.**
+Signed moves, replay, proofs and dispute windows are enough to play offchain
+and settle onchain. A move that breaks the rules, or a result nobody played,
+can never settle, and a player who stalls can be taken onchain. What
+signatures can't capture is what happens outside the moves themselves:
+- **time:** a signature proves who made a move, never when;
+- **randomness with nobody to reveal it:** for a single player, or a defender
+  who shouldn't have to be online for every roll;
+- **presence:** whether a game is really stalled, or its players are still
+  playing.
+
+A game that needs any of these names a **referee** in its terms: a third key
+that stamps time, supplies rolls and vouches that the game is live. It is
+optional, and trusted only for what it witnesses: it can't forge moves or
+results. 
 
 ## How a game flows
 
