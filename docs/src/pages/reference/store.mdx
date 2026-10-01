@@ -133,7 +133,7 @@ import { SessionStore, indexedDbBackend } from '@referee/sdk/store'
 import { counter } from './counter.mjs' // your game codec
 
 const store = new SessionStore(indexedDbBackend())
-await store.saveKey(sessionKey, { seed }) // once, when joining
+await store.saveKey(sessionKey, { seed }) // once, before signing the terms
 
 const session = await store.open(counter, terms)
 const { privateKey } = await store.keyFor(terms)

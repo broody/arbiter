@@ -111,7 +111,9 @@ dropping or editing any earlier step changes every later message.
 context = poseidon(TAG, 'REFEREE_CHANNEL_V1', PROTOCOL_VERSION, RULES_VERSION, terms…)
 ```
 
-The **terms** are everything both seats accepted by joining:
+The **terms** are everything both seats agreed to: each seat's wallet signs
+them (SNIP-12 typed data over the game and its context), and the channel opens
+the game only on every seat's signature:
 
 | Term | |
 | --- | --- |
@@ -122,7 +124,7 @@ The **terms** are everything both seats accepted by joining:
 | `players`, `keys`, `rng_tips` | Per seat: wallet, session public key, hash-chain tip |
 | `config` | Your game's `Config` |
 
-`PROTOCOL_VERSION` is 5, so signatures made under an older protocol never verify
+`PROTOCOL_VERSION` is 6, so signatures made under an older protocol never verify
 under this one. `RULES_VERSION` does the same for your rules.
 
 ## Domain tags

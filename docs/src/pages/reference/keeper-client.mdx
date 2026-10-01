@@ -25,7 +25,7 @@ Requests and answers are JSON with `BigInt`s as `{ "$n": "<decimal>" }` (`string
 
 | Name | Signature | What it does |
 | --- | --- | --- |
-| `register` | `(session, { authorizations } = {})` | Archives `session` (`POST /games` with `session.export()`), or merges it into the keeper's copy. Returns the keeper's answer. An unanchored game needs `authorizations` the first time. See [register](#register). |
+| `register` | `(session, { authorizations } = {})` | Archives `session` (`POST /games` with `session.export()`), or merges it into the keeper's copy. Returns the keeper's answer. A game no channel holds, not opened yet or unanchored, needs `authorizations` the first time. See [register](#register). |
 | `tip` | `(ids, { config } = {})` | The keeper's randomness tip for a game (`POST …/tip`), as `{ rng_tip, signature }`: the tip of the referee's hash chain and the referee's signature over it. See [tip](#tip). |
 | `send` | `(session, from = session.start.seq)` | Sends `session`'s signed steps from seq `from` to its end (`POST …/steps`). `from` is raised to `session.start.seq` if it is lower. Returns the keeper's answer. |
 | `submit` | `(session, options = {})` | Timed games: sends our steps awaiting a stamp (`session.pending`) to the keeper that referees the game, then pulls them back stamped, with anything after them. See [submit](#submit). |
@@ -40,11 +40,11 @@ Requests and answers are JSON with `BigInt`s as `{ "$n": "<decimal>" }` (`string
 ### register
 
 ```js
-await keeper.register(session)                     // an anchored game
-await keeper.register(session, { authorizations }) // an unanchored game, the first time
+await keeper.register(session, { authorizations }) // a game no channel holds yet: the usual case
+await keeper.register(session)                     // a game a channel already holds
 ```
 
-A keeper entry with `anchored: false` keeps games that no channel holds (see [Keeper](/infra/keeper#unanchored-games)). Such a game is admitted only with each seat's wallet signature over `termsTypedData(game, terms)` from [`@referee/sdk`](/reference/sdk), in seat order, as `authorizations`. The keeper checks each against the seat's account contract and keeps them with the game. Without them it answers 403.
+A game opens onchain only when it first needs the chain, so a game usually registers before any channel holds it (see [Keeper](/infra/keeper#games-no-channel-holds)). Such a game is admitted only with each seat's wallet signature over `termsTypedData(game, terms)` from [`@referee/sdk`](/reference/sdk), in seat order, as `authorizations`: the same signatures `open_game` checks. The keeper checks each against the seat's account contract and keeps them with the game, to open it when it settles it. Without them it answers 403. A game on a real channel must start at its opening. The same holds for a keeper entry with `anchored: false`, whose games never touch the chain.
 
 ### tip
 
@@ -54,8 +54,9 @@ const { rng_tip, signature } = await keeper.tip({ channel: CHANNEL, game_id: gam
 
 Asks a keeper that gives randomness for its tip for one game: `rng_tip`, the tip of the referee's hash chain for that game, and `signature`, the referee's signature over `tipHash(game, chain_id, channel, game_id, rng_tip)` from [`@referee/sdk`](/reference/sdk#hashing-and-signing). The same game always gets the same tip.
 
-- **An anchored game.** Call it once the game is created. The keeper reads the created game from the channel, and answers only if its `clock` names this keeper's referee key with a non-zero `rng_tip`. The last seat passes `rng_tip` and `signature` to `join`, which checks the signature. See [Add a clock](/guide/clocks#take-randomness-from-the-referee).
-- **A game no channel anchors.** Pass its `config`: `keeper.tip(ids, { config })`. The seats put `rng_tip` in the terms (`clock.rng_tip`), and each checks the signature before it signs them:
+Call it before the seats sign the terms, and pass the game's `config`: `keeper.tip(ids, { config })`. No channel holds the game yet, so the keeper can't read the config from one. The seats put `rng_tip` in the terms (`clock.rng_tip`), each checks the signature before its wallet signs them, and `open_game` takes the signature (`openGameCall`'s `refereeSignature`) and checks it again. See [Add a clock](/guide/clocks#take-randomness-from-the-referee).
+
+For a game a channel already holds, `config` is not needed: the keeper reads it from the channel, and answers only if the terms name this keeper's referee key with a non-zero `rng_tip`.
 
 ```js
 import { tipHash, verify } from '@referee/sdk'
@@ -70,9 +71,9 @@ A tip a seat made up would let that seat know every roll, so never take one the 
 | Status | Message | When |
 | --- | --- | --- |
 | `404` | `This keeper gives no randomness` | The keeper has no referee key or no randomness secret. `GET /info` reports `randomness`. |
-| `404` | `No such game onchain` | An anchored game the keeper cannot read from its channel. |
-| `409` | `The game did not ask this referee for randomness` | An anchored game that is untimed, names another referee, or was created with a zero `rng_tip`. |
-| `400` | `Invalid config` | The codec's `maxSteps(config)` fails, for example when an unanchored game sends no `config`. |
+| `502` | `The channel could not be read` | The keeper could not read the game's channel. |
+| `409` | `The game did not ask this referee for randomness` | A game a channel holds that is untimed, names another referee, or has a zero `rng_tip`. |
+| `400` | `Invalid config` | The codec's `maxSteps(config)` fails, for example when a game no channel holds sends no `config`. |
 | `409` | `The game can run to ${n} steps; this keeper keeps at most ${m} per game on channel ${channel}` | The game can run longer than the keeper's `max_steps` for the channel. |
 
 ### pull
@@ -140,7 +141,7 @@ A keeper answer outside 2xx throws an `Error` with:
 | `status` | The HTTP status. |
 | `data` | The keeper's `error.data`, or `undefined`. |
 
-For example, a step that conflicts with the keeper's branch fails with status 409 and `data.equivocation` telling whether the same seat signed both steps, a rejected step fails with status 400, `Step ${seq} rejected: …`, and `data.accepted`, and a full keeper answers 503 or, for a wallet's unanchored games, 429. See [Keeper HTTP API](/reference/keeper-api) for every answer.
+For example, a step that conflicts with the keeper's branch fails with status 409 and `data.equivocation` telling whether the same seat signed both steps, a rejected step fails with status 400, `Step ${seq} rejected: …`, and `data.accepted`, and a full keeper answers 503 or, for a wallet's games that no channel holds, 429. See [Keeper HTTP API](/reference/keeper-api) for every answer.
 
 ## Examples
 
@@ -156,7 +157,7 @@ const keeper = new KeeperClient('https://keeper.example')
 
 const session = await store.open(counter, terms)
 const { seat, privateKey } = await store.keyFor(terms)
-await keeper.register(session) // once, after joining
+await keeper.register(session, { authorizations }) // once: each seat's wallet signature over the terms
 
 while (!session.env.outcome.finished) {
   if (session.due() === seat) {

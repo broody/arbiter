@@ -51,7 +51,7 @@ What a game implements ([`rules.cairo`](https://github.com/broody/referee/blob/m
 
 | Function | Contract |
 | --- | --- |
-| `init(config: @Config) -> State` | The opening state. `open` calls it, and `referee_dojo`'s `create` calls it to reject an invalid config up front. |
+| `init(config: @Config) -> State` | The opening state. `open` calls it, so `referee_dojo`'s `open_game` rejects an invalid config before the game opens. |
 | `load(config: @Config, state: @State, witness: Witness) -> Scratch` | Check `witness` against `config` and `state`, and build scratch memory. Replay calls it once, with the start state. |
 | `apply(config: @Config, ref scratch: Scratch, state: State, seat: u8, action: Action) -> (State, Option<u8>)` | Apply `seat`'s action. Returns the new state and, if the action needs shared randomness, the seat that must reveal before play continues. In a game that takes its randomness from the referee, the referee reveals instead, whichever seat is named. |
 | `resolve(config: @Config, ref scratch: Scratch, state: State, seed: felt252) -> State` | Complete the pending randomness request with the agreed seed. Games that never request randomness can panic here. |
@@ -77,7 +77,7 @@ Defined in [`types.cairo`](https://github.com/broody/referee/blob/main/core/src/
 | `REASON_TIMEOUT` | `u8` | `129` | Finish reason of the referee's `Flag`. |
 | `REASON_ABANDON` | `u8` | `130` | Finish reason of `channel::claim_timeout`: the chain judged that the due seat missed its forced-play window, without any referee. |
 | `REASON_VOID` | `u8` | `131` | Finish reason of `channel::void`: a roll waited too long for a referee that was down, or every seat agreed to stop waiting. No result: not a draw, whatever `winner` says. |
-| `PROTOCOL_VERSION` | `felt252` | `5` | Bound into the context hash. Version 5 added randomness from the referee (`TimeControl.rng_tip`), and referee steps no longer count as signer changes. Version 4 added `Move::Start`, recommits only after a reveal, the transcript cap (`max_steps`) and disputes a live referee returns to offchain play. Version 3 added optional referee clocks; version 2 made steps seat-implicit `Move`s with one final signature per seat. |
+| `PROTOCOL_VERSION` | `felt252` | `6` | Bound into the context hash. Version 6 added the game's first stamp (`Clock.started`), and a channel opens on every seat's signed terms (`open_game`). Version 5 added randomness from the referee (`TimeControl.rng_tip`), and referee steps no longer count as signer changes. Version 4 added `Move::Start`, recommits only after a reveal, the transcript cap (`max_steps`) and disputes a live referee returns to offchain play. Version 3 added optional referee clocks; version 2 made steps seat-implicit `Move`s with one final signature per seat. |
 
 Finish reasons `1..=127` are game-defined; the protocol reserves the rest. `PROTOCOL_VERSION` lives in `protocol`.
 
@@ -117,6 +117,7 @@ A timed game's clock, kept in `Envelope.clock`.
 | `seats` | `Span<felt252>` | Each seat's clocks, as the game's `ClockRules` serialize them (for `StandardTime`, a serialized `StandardClock`). |
 | `used` | `u64` | Time used so far in the current turn, in milliseconds. |
 | `stamp` | `u64` | Referee time of the last stamped step, or `0` while the clock is paused: before the first stamp, and after an unstamped (forced onchain) step. |
+| `started` | `u64` | Referee time of the game's first stamp, whoever's step it is (a seat's step or the referee's `Start`), or `0` until then. Set once and kept through pauses: when the game started, as its referee attests. Part of the attested clock and the state hash. |
 
 ### Envelope
 
@@ -200,6 +201,7 @@ fn reopen_hash<impl R: GameRules>(context: felt252, epoch: u32, state: felt252) 
 fn live_hash<impl R: GameRules>(context: felt252, epoch: u32, deadline: u64) -> felt252;
 fn referee_resume_hash<impl R: GameRules>(context: felt252, epoch: u32, state: felt252) -> felt252;
 fn tip_hash<impl R: GameRules>(chain_id: felt252, channel: felt252, game_id: felt252, tip: felt252) -> felt252;
+fn terms_message<impl R: GameRules>(chain_id: felt252, game_id: felt252, context: felt252, account: felt252) -> felt252;
 fn void_hash<impl R: GameRules>(context: felt252, epoch: u32, state: felt252) -> felt252;
 fn stamp_hash<impl R: GameRules>(context: felt252, seq: u32, transcript: felt252, clock: @Clock) -> felt252;
 ```
@@ -214,7 +216,8 @@ fn stamp_hash<impl R: GameRules>(context: felt252, seq: u32, transcript: felt252
 | `reopen_hash` | `signing_hash` of `TAG, 'REFEREE_REOPEN_V1', context, epoch, state`. | Every seat's approval to leave forced play from the anchor `state`. |
 | `live_hash` | `signing_hash` of `TAG, 'REFEREE_LIVE_V1', context, epoch, deadline`. | A timed game's referee shows it is live during the dispute with this `epoch` and `deadline` (`channel::acknowledge`). |
 | `referee_resume_hash` | `signing_hash` of `TAG, 'REFEREE_RESUME_V1', context, epoch, state`. | A timed game's referee returns it from forced play to offchain play on its own, from the anchor `state` (`channel::resume`). |
-| `tip_hash` | `signing_hash` of `TAG, 'REFEREE_TIP_V1', chain_id, channel, game_id, tip`. | The referee commits its hash-chain tip to one game. It names the game by its ids, since the game's context does not exist yet: the binding checks the signature when the last seat joins. A tip a seat made up would let that seat know every roll. |
+| `tip_hash` | `signing_hash` of `TAG, 'REFEREE_TIP_V1', chain_id, channel, game_id, tip`. | The referee commits its hash-chain tip to one game. It names the game by its ids, since the tip is part of the terms the context hashes: the referee signs it before the seats sign the terms, and `open_game` checks the signature. A tip a seat made up would let that seat know every roll. |
+| `terms_message` | The SNIP-12 (revision 1) message hash of the SDK's `termsTypedData`, as starknet.js computes it for `account`: `poseidon('StarkNet Message', domain, account, message)`, with the domain `StarknetDomain { name: 'referee', version: 1, chainId: chain_id, revision: 1 }` and the message `Game { game: TAG, game_id, context }`. | What each seat's wallet signs to agree to a game. `referee_dojo`'s `open_game` passes it to the seat's account (`is_valid_signature`). Not masked: wallets sign it, not session keys. |
 | `void_hash` | `signing_hash` of `TAG, 'REFEREE_VOID_V1', context, epoch, state`. | Every seat's approval to void a game whose roll waits for a referee that is down, from the anchor `state` (`channel::void`). |
 | `stamp_hash` | `signing_hash` of `TAG, 'REFEREE_STAMP_V1', context, seq, transcript` and the serialized clock. | The referee's attestation after each step. The last one covers every earlier stamp, since the clocks depend on all of them. |
 
@@ -256,7 +259,7 @@ fn actor<impl R: GameRules>(env: @Envelope<R::State>, step: @Move<R::Action>) ->
 
 | Function | Behavior | Panics |
 | --- | --- | --- |
-| `open` | The opening envelope: `seq` 0, `transcript` 0, `support_turn` 0, `last_seat` `NO_SEAT`, no pending request, `rng_heads` set to the tips, every `rng_fresh` `true`, an unfinished outcome and `R::init(config)`. A timed game starts with `Clock { seats: R::Time::open(settings, SEATS), used: 0, stamp: 0 }` and `rng_referee` set to its time control's `rng_tip`. An untimed game has no clock and `rng_referee` 0. | `'Only 2 seats supported'`; `'Wrong tip count'` unless one tip per seat; `'Invalid tip'` for a zero tip; any `check_clock` panic. |
+| `open` | The opening envelope: `seq` 0, `transcript` 0, `support_turn` 0, `last_seat` `NO_SEAT`, no pending request, `rng_heads` set to the tips, every `rng_fresh` `true`, an unfinished outcome and `R::init(config)`. A timed game starts with `Clock { seats: R::Time::open(settings, SEATS), used: 0, stamp: 0, started: 0 }` and `rng_referee` set to its time control's `rng_tip`. An untimed game has no clock and `rng_referee` 0. | `'Only 2 seats supported'`; `'Wrong tip count'` unless one tip per seat; `'Invalid tip'` for a zero tip; any `check_clock` panic. |
 | `due` | The pending seat while a reveal is pending, which is `REFEREE` while the referee owes a roll. Otherwise `R::due`. | |
 | `actor` | The seat a step belongs to: `Resign` names it, `Flag` and `Start` belong to `REFEREE`, `Reveal` to the pending seat (`REFEREE` when the referee owes a roll), every other move to `R::due`. | `'No reveal due'` for a `Reveal` with nothing pending; `'Reveal pending'` for any other seat move while a reveal is pending. |
 
@@ -322,6 +325,7 @@ The clock charge goes to the seat on the clock (the payer, `due` before the step
 
 - An unstamped step pauses the clock (`stamp` becomes 0) and charges no one. A `Flag` or a `Start` needs a stamp: `'Referee step needs a stamp'`. Only a roll may go unstamped among referee steps, which is how `roll` applies it.
 - A stamp of 0 panics with `'Invalid stamp'`.
+- The game's first stamp, whoever's step it is, sets `started`, once. Later stamps never change it.
 - A `Start` sets `stamp` to its stamp, paused or not, and charges no one; `used` stays as it is. Its stamp must not be earlier than the last one (`'Stamp out of order'`).
 - While the referee owes a roll (the payer is `REFEREE`), any stamped step does the same: it sets `stamp`, charges no one and must not be earlier than the last stamp. That covers the roll itself and a seat's `Resign`. The wait is nobody's time.
 - While the clock is paused, the first stamp starts it without charging anyone. A `Flag` there panics with `'Clock not running'`.
@@ -347,7 +351,7 @@ The clock charge goes to the seat on the clock (the payer, `due` before the step
 
 | Function | Contract |
 | --- | --- |
-| `check(settings: Span<felt252>)` | Panic on settings a game could not be played under. `check_clock` calls it, so `open` and `referee_dojo`'s `create` do too. |
+| `check(settings: Span<felt252>)` | Panic on settings a game could not be played under. `check_clock` calls it, so `open` and `referee_dojo`'s `open_game` do too. |
 | `open(settings: Span<felt252>, seats: u8) -> Span<felt252>` | Each seat's clocks when the game opens. |
 | `limit(settings: Span<felt252>, clock: Span<felt252>, seat: u8, state: @S) -> u64` | Time `seat` can use in a turn that starts with `clock`. Past it, the seat has flagged. |
 | `settle(settings: Span<felt252>, clock: Span<felt252>, seat: u8, used: u64, reveal: bool, state: @S) -> Span<felt252>` | End a turn in which `seat` used `used`, or its answer to a reveal (`reveal`), and return the clocks the next turn starts with. |
@@ -404,23 +408,22 @@ let clock = TimeControl {
 
 ## The channel module
 
-`referee::channel` ([`channel.cairo`](https://github.com/broody/referee/blob/main/core/src/channel.cairo)) is the channel state machine as pure functions. Storage, caller authentication, proof checks and signature checks belong to the binding (for example [`referee_dojo`](/reference/dojo)), which passes in the caller's seat, the block time and number, whether a submission carried every seat's approval, and whether the game is timed. See [The channel and disputes](/concepts/channel).
+`referee::channel` ([`channel.cairo`](https://github.com/broody/referee/blob/main/core/src/channel.cairo)) is the channel state machine as pure functions. Storage, caller authentication, proof checks and signature checks belong to the binding (for example [`referee_dojo`](/reference/dojo)), which passes in the caller's seat, the block time and number, whether a submission carried every seat's approval, whether the game is timed, and, when it opens, whether it takes its randomness from its referee. See [The channel and disputes](/concepts/channel).
 
 ### Constants
 
 | Constant | Type | Value |
 | --- | --- | --- |
-| `WAITING` | `u8` | `0` |
+| `UNOPENED` | `u8` | `0` |
 | `ACTIVE` | `u8` | `1` |
 | `DISPUTE` | `u8` | `2` |
 | `FORCED` | `u8` | `3` |
 | `SETTLED` | `u8` | `4` |
-| `CANCELLED` | `u8` | `5` |
 | `MIN_RESPONSE_SECONDS` | `u32` | `300` |
 | `MAX_RESPONSE_SECONDS` | `u32` | `604800` (7 days) |
 | `PAUSE_SECONDS` | `u64` | `259200` (3 days) |
 
-`PAUSE_SECONDS` is how long forced play waits for a referee that owes a roll. After that anyone may end the game void.
+`UNOPENED` is a game id no channel has opened: a binding reads it from empty storage. No transition returns it, since a game opens straight to `ACTIVE` (`open`). `PAUSE_SECONDS` is how long forced play waits for a referee that owes a roll. After that anyone may end the game void.
 
 ### StateRef and Channel
 
@@ -440,12 +443,12 @@ let clock = TimeControl {
 | --- | --- | --- |
 | `status` | `u8` | One of the status constants. |
 | `epoch` | `u32` | Grows by one on every commit (approved `receive`, `resolve`, `forced`, `rolled`) and on `resume`, `void`, `claim_timeout` and `resign`. Transitions that take an `epoch` panic with `'Stale channel epoch'` unless it matches. |
-| `context` | `felt252` | `context_hash` of the terms, set at `join`. |
+| `context` | `felt252` | `context_hash` of the terms, set at `open`. |
 | `response_seconds` | `u32` | Window length. |
 | `anchor` | `StateRef` | The committed state. |
 | `candidate` | `StateRef` | The best dispute candidate; equal to `anchor` outside disputes. |
 | `anchor_block` | `u64` | Block of the last anchor change or `resume`. A proof that starts from the anchor must be based at or after it. |
-| `candidate_block` | `u64` | Block the candidate was set in: by the last commit, `join` or `resume`, or by an unapproved `receive`. A proof that extends the candidate must be based at or after it. |
+| `candidate_block` | `u64` | Block the candidate was set in: by the last commit, `open` or `resume`, or by an unapproved `receive`. A proof that extends the candidate must be based at or after it. |
 | `deadline` | `u64` | End of the current dispute or forced-play window, or of the pause while the referee owes a roll in forced play. Otherwise 0. |
 | `acked_epoch` | `u32` | Epoch of the dispute the referee of a timed game acknowledged (`acknowledge`); 0 until one is. |
 | `acked_deadline` | `u64` | Deadline of that dispute; 0 until one is. |
@@ -454,13 +457,11 @@ let clock = TimeControl {
 
 ### Transitions
 
-Each function takes the channel by value and returns the updated channel. "Commit" below means `anchor` and `candidate` become the new state, `epoch` grows by one, and `anchor_block` and `candidate_block` become `block`. `now` is the block timestamp.
+Each function but `open` takes the channel by value and returns the updated channel; `open` makes a new one. "Commit" below means `anchor` and `candidate` become the new state, `epoch` grows by one, and `anchor_block` and `candidate_block` become `block`. `now` is the block timestamp.
 
 | Function | Requires (panic) | Effect |
 | --- | --- | --- |
-| `create(response_seconds: u32)` | `MIN_RESPONSE_SECONDS <= response_seconds <= MAX_RESPONSE_SECONDS` (`'Invalid response window'`). | A `WAITING` channel at epoch 0 with a zero context, empty anchor and candidate, and every block, deadline and acknowledgement field 0. |
-| `join(channel, context: felt252, anchor: StateRef, block: u64)` | `WAITING` (`'Not waiting'`); non-zero context (`'Invalid context'`); `anchor.seq == 0` and unfinished (`'Invalid opening state'`). | Sets `context`, sets `anchor` and `candidate` to the opening state and `anchor_block` and `candidate_block` to `block`; status `ACTIVE`. The epoch stays 0. |
-| `cancel(channel)` | `WAITING` (`'Not waiting'`). | Status `CANCELLED`. |
+| `open(context: felt252, anchor: StateRef, response_seconds: u32, referee_rng: bool, block: u64)` | `MIN_RESPONSE_SECONDS <= response_seconds <= MAX_RESPONSE_SECONDS` (`'Invalid response window'`); non-zero context (`'Invalid context'`); `anchor.seq == 0` and unfinished (`'Invalid opening state'`). | A new channel, once every seat has signed its terms (the binding checks the signatures): status `ACTIVE` at epoch 0, `anchor` and `candidate` the opening state, `anchor_block` and `candidate_block` set to `block`, and every deadline and acknowledgement field 0. `referee_rng` says whether the game takes its randomness from its referee. |
 | `receive(channel, epoch: u32, end: StateRef, approved: bool, now: u64, block: u64)` | `ACTIVE` or `DISPUTE` (`'Channel not offchain'`); matching epoch (`'Stale channel epoch'`); in a dispute, `now < deadline` (`'Dispute window closed'`); `end.seq > anchor.seq` (`'No channel progress'`). | `end` was proved or replayed from the anchor or from the candidate; the binding checks which. **Approved:** `end.support_turn >= candidate.support_turn` (`'Older than candidate'`). Commits `end` and clears the deadline; status `SETTLED` with `end`'s outcome if finished, otherwise `ACTIVE` (this ends a dispute). **Not approved:** `end` must outrank the candidate, by a higher `support_turn` or an equal one and a higher `seq` (`'Not a newer candidate'`). It becomes the candidate and `candidate_block` becomes `block`. From `ACTIVE` it opens a dispute with `deadline = now + response_seconds`; during a dispute the deadline does not move. Starting from the candidate lets a long transcript arrive in segments within one window. |
 | `open_dispute(channel, epoch: u32, now: u64)` | `ACTIVE` (`'Not active'`); matching epoch. | Status `DISPUTE`, `deadline = now + response_seconds`, candidate reset to the anchor. |
 | `acknowledge(channel, epoch: u32, now: u64)` | `DISPUTE` (`'No dispute'`); matching epoch; `now < deadline` (`'Dispute window closed'`). | Sets `acked_epoch = epoch` and `acked_deadline = deadline`. Status, epoch and deadline are unchanged. The binding checks that the game is timed and verifies the referee's signature over `live_hash`. |
@@ -475,9 +476,7 @@ Each function takes the channel by value and returns the updated channel. "Commi
 
 ```mermaid
 stateDiagram-v2
-  [*] --> WAITING: create
-  WAITING --> ACTIVE: join
-  WAITING --> CANCELLED: cancel
+  [*] --> ACTIVE: open
   ACTIVE --> DISPUTE: open_dispute, unapproved receive
   DISPUTE --> DISPUTE: acknowledge, unapproved receive
   DISPUTE --> ACTIVE: approved receive, acknowledged resolve

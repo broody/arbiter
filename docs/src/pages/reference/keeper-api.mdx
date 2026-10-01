@@ -25,7 +25,7 @@ KEEPER_PRIVATE_KEY=0x... node keeper/server.mjs keeper/config.local.json
 
 Answers about a game carry the archive's bounds: `start` is the seq of the archived transcript's first state, `seq` the seq after its last step, and `transcript` the transcript hash at `seq`.
 
-A game is open until the keeper closes it: the watcher closes a game once its channel is `SETTLED` or `CANCELLED`, and an unanchored game closes once finished or idle (see [Capacity](#capacity)). A closed game leaves memory and stays on disk. `GET /games/:channel/:game`, `…/steps`, `…/events` and `…/evidence` still read it; registering it again or appending to it answers `409 The game is closed here`.
+A game is open until the keeper closes it: the watcher closes a game once its channel is `SETTLED`, a game no channel holds closes when idle, and an unanchored game also once finished (see [Capacity](#capacity)). A closed game leaves memory and stays on disk. `GET /games/:channel/:game`, `…/steps`, `…/events` and `…/evidence` still read it; registering it again or appending to it answers `409 The game is closed here`.
 
 ## Wire format
 
@@ -68,13 +68,14 @@ An error answer has this shape; `data` is present only when the error carries so
 | Status | When |
 | --- | --- |
 | `400` | Invalid JSON; an invalid game id; a bad `from` or `wait`; a malformed body; a record that fails `Session.import`; a rejected step; an invalid `config` for a tip. |
-| `403` | An unanchored game without a valid wallet signature from each seat. |
-| `404` | An unknown path (`Not found`); an unknown game (`Unknown game`); a channel the config does not list; a tip from a keeper that gives no randomness, or for a game its channel does not hold. |
+| `403` | A game no channel holds without a valid wallet signature from each seat. |
+| `404` | An unknown path (`Not found`); an unknown game (`Unknown game`); a channel the config does not list; a tip from a keeper that gives no randomness. |
 | `405` | A method other than `GET` or `POST` on `/games` or `…/steps` (`Method not allowed`). |
-| `409` | Terms that differ from the channel onchain or from the archived game; a randomness tip that is not this referee's; a game that can run longer than the keeper keeps; a closed game; a session that neither overlaps the archive nor starts at the channel's anchor; steps that start outside the archive; a step that conflicts with the archived one; a step during forced play; a tip for a game that did not ask this referee for randomness. |
+| `409` | Terms that differ from the channel onchain or from the archived game; a game no channel has opened that does not start at its opening; a randomness tip that is not this referee's; a game that can run longer than the keeper keeps; a closed game; a session that neither overlaps the archive nor starts at the channel's anchor; steps that start outside the archive; a step that conflicts with the archived one; a step during forced play; a tip for a game that did not ask this referee for randomness. |
 | `413` | A body over `max_body_bytes`; a registered transcript over the entry's `max_steps` steps. |
-| `429` | The client's rate limit (`Too many requests; retry later`); a wallet at `max_open_per_player` unanchored games. |
+| `429` | The client's rate limit (`Too many requests; retry later`); a wallet at `max_open_per_player` games no channel holds. |
 | `503` | The keeper holds `max_open_games` open games, or only reserved slots are left (`The keeper is full`); `max_waiters` clients are waiting (`Too many waiting clients; retry later`). |
+| `502` | A tip for an anchored game whose channel could not be read (`The channel could not be read`). |
 | `500` | Anything else (`Internal error`), for example a failed RPC call. The error is logged. |
 
 ## CORS and limits
@@ -88,21 +89,21 @@ Every answer carries `Access-Control-Allow-Origin: <cors_origin>`, `Access-Contr
 | Waiting clients | `max_waiters` | Long polls and event streams open at once: `503`. |
 | Wait | `max_wait_seconds` | `wait` is capped at this value. |
 | Open games | `max_open_games`, `reserved_games` | `503` for a new game. See [Capacity](#capacity). |
-| Unanchored games per wallet | `max_open_per_player` | `429` for a new game. |
-| Idle unanchored games | `unanchored_ttl_seconds` | Closed after this long without a step. |
+| Games no channel holds, per wallet | `max_open_per_player` | `429` for a new game. |
+| Idle games no channel holds | `unanchored_ttl_seconds` | Closed after this long without a step, unless finished and waiting to open. |
 | Steps | `games[].max_steps` | Steps per archived transcript: `409` at admission for a game that can run longer, `413` at registration, `400` when appending. |
 
 ### Capacity
 
-A new game takes an open slot. At most `max_open_games` games are open at once, and the last `reserved_games` of those slots go only to games that the entry's [`admit` hook](#hooks) ranks above 0. Each wallet plays at most `max_open_per_player` open unanchored games; anchored games have no per-wallet cap. An unanchored game closes once finished, or after `unanchored_ttl_seconds` without a step. The keeper sweeps idle unanchored games every minute, and before it refuses a game for lack of room.
+A new game takes an open slot. At most `max_open_games` games are open at once, and the last `reserved_games` of those slots go only to games that the entry's [`admit` hook](#hooks) ranks above 0. Each wallet plays at most `max_open_per_player` open games that no channel holds: unanchored games, and games on a real channel that nobody has opened yet. A game stops counting once a channel holds it, and an opened game has no per-wallet cap. A game no channel holds closes after `unanchored_ttl_seconds` without a step. An unanchored game also closes once finished, but a finished game waiting to open never closes: the watcher opens it with its settlement. The keeper sweeps idle games every minute, and before it refuses a game for lack of room.
 
 `GET /info` reports the capacity, so a matchmaker can check it before it pairs a game here.
 
 ## `POST /games`
 
-Archive a session, or merge it into the archived copy. Clients call it once, after joining.
+Archive a session, or merge it into the archived copy. Clients call it once, usually before the game opens onchain.
 
-The body is `{ record, authorizations? }`. `record` is `session.export()`: `{ version: 5, terms, start, witness, steps }`, with the start envelope, its witness and the signed steps. `authorizations` is for an unanchored game: each seat's wallet signature over `termsTypedData(game, terms)` ([`@referee/sdk`](/reference/sdk)), in seat order. The keeper checks the body in this order:
+The body is `{ record, authorizations? }`. `record` is `session.export()`: `{ version: 6, terms, start, witness, steps }`, with the start envelope, its witness and the signed steps. `authorizations` is for a game no channel holds, one not opened yet or an unanchored one: each seat's wallet signature over `termsTypedData(game, terms)` ([`@referee/sdk`](/reference/sdk)), in seat order. The keeper opens a game with them when it settles it. The keeper checks the body in this order:
 
 | Status | Message | When |
 | --- | --- | --- |
@@ -130,11 +131,12 @@ A new game is admitted in this order:
 | Status | Message | When |
 | --- | --- | --- |
 | `409` | `The game can run to N steps; this keeper keeps at most M per game on channel 0x…` | The codec's `maxSteps(config) + 1` exceeds the entry's `max_steps`. |
-| `429` | `Wallet 0x… already plays N open unanchored games here` | Unanchored games only: a seat's wallet is at `max_open_per_player`, after closing idle games. |
+| `409` | `The terms differ from the channel onchain` | Anchored games a channel holds, with an RPC node: its context differs. The context binds every term. |
+| `409` | `A game no channel has opened starts at its opening` | Anchored games no channel holds yet, with an RPC node: the record's start is not the terms' opening state. |
+| `403` | `A game no channel holds needs each seat's wallet signature over its terms` | Games no channel holds (unanchored, or not opened yet), with an RPC node: `authorizations` is not an array with one signature per player. |
+| `403` | `Seat N's wallet did not sign these terms` | Games no channel holds, with an RPC node: the seat's account contract does not accept its signature (`isValidSignature` or `is_valid_signature`). |
+| `429` | `Wallet 0x… already plays N open games here that no channel holds` | Games no channel holds: a seat's wallet is at `max_open_per_player`, after closing idle games. |
 | `503` | `The keeper is full` | `max_open_games` games are open, after closing idle games. |
-| `409` | `The terms differ from the channel onchain` | Anchored games, with an RPC node: the channel is not joined, or its context differs. The context binds every term. |
-| `403` | `An unanchored game needs each seat's wallet signature over its terms` | Unanchored games, with an RPC node: `authorizations` is not an array with one signature per player. |
-| `403` | `Seat N's wallet did not sign these terms` | Unanchored games, with an RPC node: the seat's account contract does not accept its signature (`isValidSignature` or `is_valid_signature`). |
 | `409` | `The game's randomness tip is not this referee's` | The terms name this keeper's referee key with a non-zero `clock.rng_tip`, and that tip is not the tip of the keeper's own chain for the game, or the keeper has no randomness secret. It could not roll for the game. |
 | `503` | `The keeper is full: its reserved capacity is for priority games` | Only reserved slots are left, and the entry's `admit` hook ranks the game 0 or less, or the entry has none. |
 
@@ -247,7 +249,7 @@ How the keeper processes the steps:
    - The keeper replays the sent branch from the shared prefix as far as it verifies. If the branch gets past N and outranks the archive as the channel ranks dispute candidates (higher `support_turn`, or equal `support_turn` and higher `seq`), it replaces the archive, and the answer adds `switched: N`, with `accepted` counting the branch's steps from N.
    - Otherwise the keeper answers `409`. `data.archived` is the archived record at N, and `data.equivocation` says whether the same seat signed both steps.
 
-An unanchored game closes as soon as a step finishes it.
+An unanchored game closes as soon as a step finishes it. A game waiting to open does not: it waits for the watcher to open and settle it.
 
 ### Timed games
 
@@ -272,9 +274,9 @@ A keeper that does not referee a timed game takes only stamped steps; an unstamp
 
 ## `POST /games/:channel/:game/tip`
 
-The referee's randomness tip for a game: the tip of the keeper's hash chain for it, and the referee's signature over that tip. The last seat brings both to `join` when the creator asked for the referee's randomness (see [Add a clock](/guide/clocks#take-randomness-from-the-referee)). `KeeperClient.tip` calls it.
+The referee's randomness tip for a game: the tip of the keeper's hash chain for it, and the referee's signature over that tip. Ask for it before the seats sign the terms: the terms carry the tip, each seat checks the signature, and `open_game` takes it and checks it again (see [Add a clock](/guide/clocks#take-randomness-from-the-referee)). `KeeperClient.tip` calls it.
 
-The body is JSON: `{}` for an anchored game, whose config the keeper reads from its channel, or `{ config }` for a game no channel anchors.
+The body is JSON: `{ config }` for a game no channel holds, the usual case since the game is not open yet, or `{}` for a game a channel holds, whose config the keeper reads from its channel.
 
 ```json
 { "rng_tip": { "$n": "1830…" }, "signature": { "r": { "$n": "2957…" }, "s": { "$n": "8841…" } } }
@@ -288,9 +290,9 @@ The keeper checks the request in this order:
 | --- | --- | --- |
 | `404` | `This keeper gives no randomness` | The config has no `referee`, or its `referee` has no `rng_secret_env`. |
 | `404` | `Channel 0x… is not kept here` | The config does not list the channel. |
-| `404` | `No such game onchain` | Anchored games, with an RPC node: the keeper cannot read the game from its channel. |
-| `409` | `The game did not ask this referee for randomness` | Anchored games, with an RPC node: the created game is untimed, names another referee, or has a zero `clock.rng_tip`. |
-| `400` | `Invalid config` | The codec's `maxSteps(config)` throws, or does not return a safe integer `>= 0`: for example when an unanchored game sends no `config`. |
+| `502` | `The channel could not be read` | Anchored games, with an RPC node: reading the channel failed. |
+| `409` | `The game did not ask this referee for randomness` | A game a channel holds, with an RPC node: its terms are untimed, name another referee, or have a zero `clock.rng_tip`. |
+| `400` | `Invalid config` | The codec's `maxSteps(config)` throws, or does not return a safe integer `>= 0`: for example when a game no channel holds sends no `config`. |
 | `409` | `The game can run to N steps; this keeper keeps at most M per game on channel 0x…` | The codec's `maxSteps(config) + 1` exceeds the entry's `max_steps`. The keeper would not admit the game either. |
 
 The request counts against `rate_per_minute`, like every `POST`.
@@ -399,8 +401,8 @@ Answers `200` with the body `ok`, not JSON.
 | `settle` | `true` | Whether the watcher submits finished games whose channel is still `ACTIVE`, and their next segments. With `false` it still answers, acknowledges and resolves disputes, and resumes games from forced play. |
 | `max_open_games` | `10000` | Open games. Formerly `max_games`, which still works. |
 | `reserved_games` | `0` | Open slots kept for games the entry's `admit` hook ranks above 0. |
-| `max_open_per_player` | `4` | Open unanchored games per wallet. |
-| `unanchored_ttl_seconds` | `86400` | An unanchored game closes after this long without a step. |
+| `max_open_per_player` | `4` | Open games per wallet that no channel holds: unanchored ones, and anchored ones nobody opened yet. |
+| `unanchored_ttl_seconds` | `86400` | A game no channel holds closes after this long without a step, unless it is finished and waits to open with its settlement. |
 | `max_steps` | `4096` | Default for `games[].max_steps`. |
 | `max_body_bytes` | `1048576` | `POST` body size in bytes. |
 | `rate_per_minute` | `120` | `POST` requests per client per minute. |
@@ -417,7 +419,7 @@ Answers `200` with the body `ok`, not JSON.
 | `games` | required | One entry per game channel; at least one. |
 
 :::warning
-Without `rpc_url` the keeper archives terms it cannot check: against the channel for an anchored game, or against the wallets' signatures for an unanchored one. It also cannot re-anchor a disjoint session, signs a randomness tip without reading the game's channel, and does not watch. That suits tests only.
+Without `rpc_url` the keeper archives terms it cannot check: against the channel for an opened game, or against the wallets' signatures for one no channel holds. It also cannot re-anchor a disjoint session, signs a randomness tip without reading the game's channel, and does not watch. That suits tests only.
 :::
 
 ### referee
@@ -439,7 +441,7 @@ Without `rng_secret_env`, the keeper gives no randomness: `POST …/tip` answers
 | `private_key_env` | `"KEEPER_PRIVATE_KEY"` | Environment variable that holds the account's private key. It must be set, or loading fails with `Set <name> to the keeper account's private key`. |
 | `max_fee_fri` | none | Fee cap in fri, as a decimal string. The keeper estimates each transaction, multiplies the resource amounts by 1.5, and refuses to send one whose fee bound exceeds the cap. No cap when absent. |
 
-Without `account` the keeper only watches and logs what it would send. It sends one transaction at a time: `submit_history`, `resolve`, the adapter's `settle`, which anyone may send; `acknowledge` and `resume_by_referee`, which carry its referee's signature; and the calls an entry's `afterSettle` hook returns.
+Without `account` the keeper only watches and logs what it would send. It sends one transaction at a time: `submit_history`, `resolve`, the adapter's `settle`, which anyone may send, each after `open_game` with the seats' wallet signatures for a game nobody opened yet; `acknowledge` and `resume_by_referee`, which carry its referee's signature; and the calls an entry's `afterSettle` hook returns.
 
 ### games[]
 
@@ -448,14 +450,14 @@ Without `account` the keeper only watches and logs what it would send. It sends 
 | `channel` | required | The game system's address. For an unanchored entry, any value its games' terms name, such as `0x0`. |
 | `module` | required | The JS module with the game's codec. A path starting with `.` resolves from the config file's directory; anything else is imported as given. |
 | `export` | required | The codec's export name. It must be a codec with a `tag`, or loading fails with `<module> exports no game codec named <export>`, and a `maxSteps` function, or it fails with `<export> has no maxSteps: it predates protocol v4`. |
-| `anchored` | `true` | `false` for games no channel holds: the keeper admits them with the seats' wallet signatures, and the watcher leaves them alone. An unanchored entry takes no `prover`. |
-| `entrypoints` | the names below | Renames the system's calls: `get_channel`, `submit_history`, `resolve`, `acknowledge`, `resume_by_referee` and `terms`, e.g. `{ "resolve": "resolve_dispute" }`. The system must expose `get_channel(game_id) -> ChannelGame`. |
+| `anchored` | `true` | `false` for games that never touch the chain: the keeper admits them with the seats' wallet signatures, and the watcher leaves them alone. An unanchored entry takes no `prover`. |
+| `entrypoints` | the names below | Renames the system's calls: `get_channel`, `open_game`, `submit_history`, `resolve`, `acknowledge`, `resume_by_referee`, `terms`, `force` and `roll`, e.g. `{ "resolve": "resolve_dispute" }`. The system must expose `get_channel(game_id) -> ChannelGame`. |
 | `max_steps` | top-level `max_steps` | Steps per archived transcript. A game whose codec's `maxSteps(config) + 1` exceeds it is refused. |
 | `replay_max_steps` | top-level `replay_max_steps` | A submission of up to this many steps goes through onchain replay (`submit_history`). Formerly `max_history_steps`. |
 | `proof_max_steps` | top-level `proof_max_steps`, else no limit | With a `prover`, a submission holds up to this many steps, and one longer than `replay_max_steps` is proved. |
 | `start_grace_seconds` | top-level `start_grace_seconds` | How long the referee waits for a timed game's first step, or for the first step after forced play, before it appends a `start`. |
 | `answer_margin_seconds` | top-level `answer_margin_seconds` | How long before a dispute's deadline the watcher answers it. |
-| `world` | none | The Dojo world of an anchored entry. With it, a referee registers the timed games that join naming its key, from the world's `ChannelUpdated` events. Ignored for an unanchored entry. |
+| `world` | none | The Dojo world of an anchored entry. With it, a referee registers the timed games that open naming its key, from the world's `ChannelUpdated` events of kind `OPENED`. Ignored for an unanchored entry. |
 | `namespace` | none | The entry's Dojo namespace. Required with `world`, or loading fails with `A game entry with a world needs its namespace`. |
 | `from_block` | the chain's head | The block to scan `world` events from the first time. Later scans resume where the last one stopped. |
 | `prover` | none | `{ url, class_hash }`: the prover service and the adapter class hash the keeper expects. Without it, every submission is an onchain replay of at most `replay_max_steps` steps. |

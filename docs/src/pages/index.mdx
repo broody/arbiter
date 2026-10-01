@@ -4,8 +4,9 @@ Referee lets two players play a turn-based game on Starknet **without a
 transaction per move**, while the chain still enforces the rules and the
 result.
 
-Players exchange signed moves offchain. Only opening a game, settling it and
-resolving disputes touch the chain. A game writes its rules once, in Cairo, and
+Players exchange signed moves offchain. Only settling a game and resolving
+disputes touch the chain, and a game opens onchain in the same transaction as
+the first of them. A game writes its rules once, in Cairo, and
 the same code then:
 
 - validates moves in the players' clients (through a JS mirror of the rules);
@@ -45,15 +46,15 @@ is a complete game, with dice, in about 100 lines of Cairo.
 
 | | |
 | --- | --- |
-| Built and tested | Protocol, optional clocks, randomness from the referee, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS SDK, session store, keeper, counter example |
+| Built and tested | Protocol (v6), optional clocks, randomness from the referee, games opened by their players' signatures, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS SDK, session store, keeper, counter example |
 | Proven on Sepolia | Surround settles full games with one native proof through `referee_adapter` |
-| Tested end to end on Katana | The keeper answering a dispute, settling a finished game, refereeing a timed game, and giving a game its randomness |
+| Tested end to end on Katana | Games opened on wallet signatures, the keeper answering a dispute, opening and settling finished games, refereeing a timed game, and giving a game its randomness |
 | In progress | More than 2 seats |
 | Not yet | PROOF2 large-path proving (network support expected around 2026-10-10) |
 
 ## Where next
 
-- [How it works](/how-it-works) follows a game from creation to settlement,
+- [How it works](/how-it-works) follows a game from its signed terms to settlement,
   including what happens when a player misbehaves.
 - [Quickstart](/guide/quickstart) runs the counter game end to end on your
   machine.

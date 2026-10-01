@@ -12,8 +12,8 @@ what that does to the clocks. The rolls themselves are in
 
 | | Where | What |
 | --- | --- | --- |
-| `TimeControl { referee, settings, rng_tip }` | `Terms.clock` (`Option`) | The referee's public key and the settings of the game's time rules, serialized, both fixed at creation. `rng_tip` is the tip of the referee's hash chain when the game takes its randomness from the referee, fixed at join, and zero otherwise. All three are bound into the context |
-| `Clock { seats, used, stamp }` | `Envelope.clock` (`Option`) | Each seat's clocks as the time rules keep them (serialized), the time the current turn has used, and the referee time of the last stamp |
+| `TimeControl { referee, settings, rng_tip }` | `Terms.clock` (`Option`) | The referee's public key and the settings of the game's time rules, serialized. `rng_tip` is the tip of the referee's hash chain when the game takes its randomness from the referee, signed by the referee for the game, and zero otherwise. All three are in the terms every seat's wallet signs, and bound into the context |
+| `Clock { seats, used, stamp, started }` | `Envelope.clock` (`Option`) | Each seat's clocks as the time rules keep them (serialized), the time the current turn has used, the referee time of the last stamp, and the referee time of the game's first stamp |
 | time rules | `GameRules::Time`, a `ClockRules` | What a seat has, and what a finished turn costs |
 | stamp | Beside each step, as `u64` milliseconds | The referee's time when the step arrived |
 | attestation | Beside each step | The referee's signature over the state the step reached |
@@ -160,6 +160,13 @@ Seats can't send a `Start`: replay authenticates the referee's steps only
 through the attestation, `force` never takes them, and an untimed game refuses
 them (`'Untimed game'`).
 
+The game's first stamp, a seat's step or the referee's `Start`, also sets
+`Clock.started`, once. It stays through pauses, so it is when the game
+started, as its referee attests, and it is part of the attested clock and the
+state hash. Forced play before any stamp leaves it 0 until one comes. A game
+opens onchain only when it first needs the chain, often at its settlement, so
+the chain itself can't tell when a game was played: `started` can.
+
 ## Worked example
 
 Terms: `StandardTime` with `turn_ms` 5000, `bank_ms` 60000, `increment_ms`
@@ -248,7 +255,8 @@ and with randomness in a game that takes its randomness from it.
   which at worst ends void. See
   [Randomness](/concepts/randomness#what-the-referee-can-and-cant-do).
 - **Players opt in** per game: the referee's key is in the terms, with its
-  hash-chain tip when it gives the randomness, and joining accepts both.
+  hash-chain tip when it gives the randomness, and every seat's wallet signs
+  both.
 
 ## Cost
 
@@ -284,9 +292,11 @@ whose terms name that key:
 - **Rolls**, when it also has a randomness secret, for the games that take
   their randomness from it: it signs each game's tip, and reveals its next
   chain value as soon as it stamps a step that asks for randomness.
-- **Registers** the timed games that join onchain naming its key, when its
+- **Registers** the timed games that open onchain naming its key, when its
   config names the game's Dojo `world` and `namespace`, so such a game gets a
-  referee even if neither seat registers it.
+  referee even if neither seat registers it. A game usually opens only to
+  settle or to be disputed, so seats register a timed game with its referee to
+  have it refereed while it is played.
 - **Stops** refereeing a game whose transcript reaches the entry's
   `max_steps`.
 - A keeper that isn't a game's referee archives and forwards only stamped steps.

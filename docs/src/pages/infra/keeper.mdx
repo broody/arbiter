@@ -7,8 +7,8 @@ service over one piece of state, the latest verified transcript of each game:
 | --- | --- |
 | **Archive** | Keeps each game's signed transcript, verified step by step, in a file store |
 | **Transport** | Forwards steps between the seats: clients send theirs and long-poll for the other's, or follow a stream of server-sent events. A player who refreshes, switches device or comes back online restores the game from here |
-| **Watcher** | Reads each open game's channel. It answers disputes once, resolves expired ones and settles finished games, in segments when long, from the keeper's own account |
-| **Referee** (optional) | With a referee key, it registers the timed games that join naming that key, stamps their steps, starts their clocks, flags a seat whose time runs out, acknowledges their disputes and returns them from forced play. With a randomness secret too, it gives the games that ask their randomness |
+| **Watcher** | Reads each open game's channel. It answers disputes once, resolves expired ones and settles finished games, in segments when long, from the keeper's own account. A finished game nobody opened yet opens in the transaction that settles it |
+| **Referee** (optional) | With a referee key, it registers the timed games that open onchain naming that key, stamps their steps, starts their clocks, flags a seat whose time runs out, acknowledges their disputes and returns them from forced play. With a randomness secret too, it gives the games that ask their randomness |
 
 ```mermaid
 flowchart LR
@@ -23,7 +23,7 @@ flowchart LR
   end
   W -- "ChannelUpdated events" --> WD["Dojo world"]
   W -- "get_channel, terms" --> C["Game system"]
-  W -- "submit_history, resolve,<br/>acknowledge, resume_by_referee" --> C
+  W -- "open_game, submit_history, resolve,<br/>acknowledge, resume_by_referee" --> C
   W -- "prove + settle" --> P["Adapter"]
 ```
 
@@ -39,8 +39,9 @@ Clients use it through `@referee/sdk/keeper` (see
 - It can delay or withhold steps. Both players keep their own copies
   (`@referee/sdk/store`), so it's never the only copy.
 - It holds no player keys. Its account pays for `submit_history`, `resolve`
-  and the adapter's `settle`, which anyone may send; for its referee's
-  `acknowledge` and `resume_by_referee`; and for the calls a game's
+  and the adapter's `settle`, which anyone may send, with `open_game` on the
+  seats' own wallet signatures for a game nobody opened yet; for its
+  referee's `acknowledge` and `resume_by_referee`; and for the calls a game's
   `afterSettle` hook adds.
 - As a referee, it's trusted with time in the games that name it (see
   [Clocks and the referee](/concepts/clocks)), and with the rolls of the games
@@ -50,7 +51,7 @@ Clients use it through `@referee/sdk/keeper` (see
 - Anyone can run one, and a game can use several.
 
 It needs no indexer. It watches the games clients register, and, as a referee
-with a `world` configured, the games that join naming its key, which it finds
+with a `world` configured, the games that open naming its key, which it finds
 in the world's events through its RPC node. It reads each open game's current
 state with one `get_channel` call per round. The chain stores hashes, and the
 histories behind them are in the archive.
@@ -58,10 +59,13 @@ histories behind them are in the archive.
 ## Archive
 
 - **Admission.** A registered game must be on a configured channel and chain,
-  and pass `Session.import`. An anchored game's context must also match the
-  one the channel stores onchain, which binds every term, so nobody can squat
-  a game id with other terms. Its codec's `maxSteps(config) + 1`, the longest
-  transcript the protocol allows it, must fit the entry's `max_steps`.
+  and pass `Session.import`. A game a channel holds must match the context
+  the channel stores onchain, which binds every term. A game no channel holds
+  comes with each seat's wallet signature over its terms instead (see
+  [Games no channel holds](#games-no-channel-holds)). Either way nobody can
+  squat a game id with other terms. Its codec's `maxSteps(config) + 1`, the
+  longest transcript the protocol allows it, must fit the entry's
+  `max_steps`.
 - **Branches.** Steps that overlap the archive are checked position by position.
   When a step differs from the stored one, the other branch replaces the
   archive only if it ranks higher, as the channel ranks dispute candidates.
@@ -73,9 +77,10 @@ histories behind them are in the archive.
 - **Re-anchoring.** A session starting at a later anchor inside the stored
   history is merged. A disjoint one, for example after forced play onchain,
   replaces the archive only if it starts at the channel's current anchor.
-- **Closed games.** A game closes when its channel is `SETTLED` or
-  `CANCELLED`, and an unanchored game when it finishes or sits idle. It leaves
-  memory and stays on disk, readable. It takes no more steps.
+- **Closed games.** A game closes when its channel is `SETTLED`. A game no
+  channel holds closes when it sits idle, and an unanchored one also when it
+  finishes. A closed game leaves memory and stays on disk, readable. It takes
+  no more steps.
 
 ## Capacity
 
@@ -88,11 +93,11 @@ for instance, ranks rated games first. A full keeper answers 503.
 free slots a game without priority can use. A matchmaker checks it before it
 pairs a game here.
 
-## Unanchored games
+## Games no channel holds
 
-A game entry with `anchored: false` keeps games that never touch the chain,
-such as free casual ones. No channel holds their terms, and the watcher leaves
-them alone.
+A game opens onchain only when it first needs the chain, usually to settle
+(see [How it works](/how-it-works)). Until then no channel holds it, and the
+keeper admits it on its seats' wallet signatures instead:
 
 1. Each seat's wallet signs the terms: `termsTypedData(game, terms)` in
    [`@referee/sdk`](/reference/sdk), SNIP-12 typed data naming the game and
@@ -104,17 +109,30 @@ them alone.
    and keeps the signatures with the game.
 
 The context binds every term, session keys included, so the signatures bind
-each wallet to its key, as creating and joining a channel do onchain. The
-terms name the entry's `channel` value, which is no real channel, so their
-signatures can never settle anywhere. Clients pick random game ids.
+each wallet to its key, as `open_game` checks onchain. Clients pick random
+game ids. There are two kinds of such games:
 
-These games cost their players nothing, so:
+- **Not opened yet.** A game on a real channel: the usual case. It must start
+  at its opening. The watcher leaves it alone until it is finished, then opens
+  it with these signatures in the transaction that settles it (see
+  [Watcher](#watcher)). A seat that needs the chain sooner, for a dispute,
+  opens the game in its own transaction. Once a channel holds the game, it
+  runs like any other.
+- **Unanchored.** A game entry with `anchored: false` keeps games that never
+  touch the chain, such as free casual ones. The terms name the entry's
+  `channel` value, which is no real channel, so their signatures can never
+  settle anywhere, and the watcher leaves them alone.
 
-- each wallet plays at most `max_open_per_player` open ones here (429 beyond);
-- one closes once finished, or after `unanchored_ttl_seconds` without a step.
+These games cost their players nothing until they open, so:
 
-The per-wallet cap never applies to anchored games, so a staller can't fill it
-to keep the referee off a rated game.
+- each wallet plays at most `max_open_per_player` of them here, of both kinds
+  together (429 beyond);
+- one closes after `unanchored_ttl_seconds` without a step, and an unanchored
+  game also once finished. A finished game waiting to open never closes: it
+  waits to settle.
+
+A game stops counting against the cap once a channel holds it: an open game
+has no per-wallet cap.
 
 ## Referee
 
@@ -123,7 +141,7 @@ that key (`clock.referee`):
 
 | When | Referee |
 | --- | --- |
-| A timed game joins onchain | With `world` and `namespace` on the entry, the watcher finds the join in the world's `ChannelUpdated` events, reads the game's terms (`terms`), and registers it from its opening state if it names this key. The game has a referee even if no seat registers it |
+| A timed game opens onchain | With `world` and `namespace` on the entry, the watcher finds the opening in the world's `ChannelUpdated` events (`OPENED`), reads the game's terms (`terms`), and registers it from its opening state if it names this key. The game has a referee even if no seat registers it. A game usually opens only to settle or to be disputed, though, so a seat or a matchmaker registers a timed game to have it refereed while it is played |
 | A step arrives unstamped | Stamps it, before it is archived and forwarded. A step that arrives after its seat's time ran out is refused (`Flag fell`), and the seat is flagged |
 | No first step within `start_grace_seconds` | Appends a `start`, and the due seat's clock runs from there. A running clock is never restarted |
 | The due seat's time runs out | A timer appends the referee's `flag`. The watcher then settles the game like any finished one |
@@ -149,7 +167,7 @@ See [Randomness](/concepts/randomness#randomness-from-the-referee).
 
 | When | Keeper |
 | --- | --- |
-| A client asks for a game's tip (`POST …/tip`) | Answers `{ rng_tip, signature }`: the tip of its chain for that game, and the referee's signature over it for that game alone. For an anchored game it reads the created game from the channel first, and answers only if the creator asked this referee for randomness. The same game always gets the same tip |
+| A client asks for a game's tip (`POST …/tip`) | Answers `{ rng_tip, signature }`: the tip of its chain for that game, and the referee's signature over it for that game alone. Clients ask before the seats sign the terms, with the game's `config`. For a game a channel already holds, it reads the config from the channel, and answers only if the terms ask this referee for randomness. The same game always gets the same tip |
 | A game registers naming its key and a randomness tip | Refuses it (409) unless the tip is the tip of its own chain for that game: it could not roll for it |
 | It stamps a step that asks for randomness | Appends its roll at once: its next chain value, with the same stamp. The roll charges no one, and no flag falls while a roll is pending |
 | It starts with a roll pending | Answers the roll it owed when it stopped, stamped where the clock stopped |
@@ -167,7 +185,7 @@ its roll has waited 3 days (see
 
 ## Watcher
 
-Every `poll_seconds`, the watcher first registers the timed games that joined
+Every `poll_seconds`, the watcher first registers the timed games that opened
 naming its referee key, on the entries with a `world`. A registration that
 fails for a reason that may pass, such as an RPC error or a full keeper, is
 kept in the store and retried each round until the game registers or the
@@ -175,6 +193,8 @@ archive refuses it. Then, for each open anchored game:
 
 | Channel | Keeper |
 | --- | --- |
+| None yet, stored game finished | Opens the game and submits it in one transaction: `open_game` on the seats' wallet signatures, with its own signature over the tip when it gives the game its randomness, then the first segment from the opening. The game then runs like any other |
+| None yet, unfinished | Waits. The keeper never opens a game to dispute it: a seat does, in its own transaction |
 | `ACTIVE`, stored game finished | Submits it, as the first segment if it is long. Without approvals it becomes the candidate, and is resolved after the window |
 | `DISPUTE`, stored game finished | Submits the next segment, extending the candidate, if any |
 | `DISPUTE`, a timed game it referees, candidate unfinished | Sends `acknowledge` at once, unless the channel holds it already |
@@ -182,7 +202,7 @@ archive refuses it. Then, for each open anchored game:
 | `DISPUTE`, window passed | `resolve`, with the game's `afterSettle` calls when it settles the game |
 | `FORCED`, a timed game it referees | `resume_by_referee`, once, when the archive holds the anchor and the forced-play window is open. While a roll waits for the referee, that window is the 3-day pause. If the archive lacks the anchor, the watcher first follows the forced play from the chain: the `force` and `roll` calls in the transactions' traces, back to a state it holds, replayed and checked against the channel's states. That needs `world` and `namespace` on the entry and `decodeAction` in the game's codec |
 | `FORCED`, other games | Waits: forced moves and timeouts need a player's wallet |
-| `SETTLED`, `CANCELLED` | Closes the game |
+| `SETTLED` | Closes the game |
 
 A referee whose acknowledgement isn't onchain by `answer_margin_seconds`
 before the deadline answers as for other games, so forced play would start
@@ -199,7 +219,9 @@ settles as a chain of segments within one dispute window:
 
 A segment of up to `replay_max_steps` steps goes through `submit_history`, an
 onchain replay. A longer one is proved through the game's `prover` (see
-[Prover](/infra/prover)) and settled with the adapter.
+[Prover](/infra/prover)) and settled with the adapter. For a game nobody
+opened, the first segment goes after `open_game` in the same transaction, and
+a proof of it is proved from the game's terms.
 
 **After settling.** When the keeper's `resolve` settles a game, it adds the
 calls the entry's `afterSettle` hook returns, such as Surround's `rate`, in
@@ -255,16 +277,17 @@ Start from [`keeper/config.example.json`](https://github.com/broody/referee/blob
   JS codec (a relative path resolves from the config file). The codec needs
   `maxSteps`. Set the entry's `max_steps` from it: Go's bound is far below
   Hashfront's.
-- `entrypoints` renames your system's calls (`get_channel`, `submit_history`,
-  `resolve`, `acknowledge`, `resume_by_referee`, `terms`): Surround's are
+- `entrypoints` renames your system's calls (`get_channel`, `open_game`,
+  `submit_history`, `resolve`, `acknowledge`, `resume_by_referee`, `terms`,
+  `force`, `roll`): Surround's are
   `resolve_dispute` and `get_channel`. The system must expose
   `get_channel(game_id) -> ChannelGame`.
-- `anchored: false` makes an entry for [unanchored games](#unanchored-games).
+- `anchored: false` makes an entry for [unanchored games](#games-no-channel-holds).
   Its `channel` is then any value the terms name, `0x0` for instance, and it
   takes no `prover`.
 - `prover` is optional. Without it, every segment is an onchain replay of at
   most `replay_max_steps` steps.
-- `world` and `namespace` let a referee register joined games itself, and
+- `world` and `namespace` let a referee register opened games itself, and
   follow forced play it did not see.
   Scanning starts at `from_block`, or at the chain's head the first time, and
   resumes where it stopped.
@@ -316,7 +339,7 @@ for the transactions it sends, and cap them with `max_fee_fri`.
   give logs `roll` with `outcome: failed`. One line per chain action, as `action`:
   `settle`, `answer`, `acknowledge`, `resume`, `resolve`, `close` and
   `register`, with `outcome` (`sent`, `failed`, `skipped` without an account,
-  `joined`, or `refused`: a registration the archive turned down, which,
+  `opened`, or `refused`: a registration the archive turned down, which,
   unlike a `failed` one, isn't retried) and `tx`.
 - **Store.** A directory of JSON files (`@referee/sdk/store/file`). A `LOCK`
   file allows one process per directory. Closed games stay in it.
@@ -327,10 +350,11 @@ for the transactions it sends, and cap them with `max_fee_fri`.
   from closing an idle stream.
 - **RPC.** Each round costs one `get_channel` call per open anchored game.
   With `world` set, it also scans the world's events from where it stopped,
-  and reads the terms of each game that joined, again each round while its
-  registration is retried. Admitting an unanchored game costs one signature
-  check per seat, a call to its account contract. A tip for an anchored game
-  costs one `get_channel` call. Use a node you control for
+  and reads the terms of each game that opened, again each round while its
+  registration is retried. Admitting a game costs one `get_channel` call on an
+  anchored entry and, for a game no channel holds, one signature check per
+  seat, a call to its account contract. A tip for an anchored game costs one
+  `get_channel` call. Use a node you control for
   many games.
 - **Ports.** The default port, 3200, is also the prover gateway's default worker
   base port. Change one if both run on one host.
@@ -340,16 +364,23 @@ for the transactions it sends, and cap them with `max_fee_fri`.
 - `node --test keeper/test/*.test.mjs`: the archive, the watcher, the referee,
   the step stream and the HTTP API against a fake chain, and the event and
   terms reads against a fake RPC provider. They cover unanchored games
-  filling a wallet's cap, registration from events and its retries, answering
+  filling a wallet's cap, games nobody opened yet (held on their wallets'
+  signatures, left alone until finished, then opened in the transaction that
+  settles them), registration from `OPENED` events and its retries, answering
   a dispute once, the fallback when an acknowledgement doesn't land, starts
-  after a join and after forced play, chained segments, no flag after a
-  step the cap refused, and the referee's tips and rolls.
+  after the start grace and after forced play, chained segments, no flag
+  after a step the cap refused, and the referee's tips and rolls.
 - `node keeper/bench.mjs [STEPS]`: the latency a referee adds, from the SDK
   work per step to a step's trip through a refereeing keeper to the other
   seat's stream, with the memory and the file store.
 - `keeper/katana.sh`: starts Katana, deploys the counter world and runs real
-  transactions. The keeper answers a stale dispute and resolves it into forced
-  play, settles a finished game, referees a timed game through a flag to
-  `SETTLED`, and gives another its randomness: the join carries its signed
-  tip, it rolls for a gamble, and the channel replays the roll. It needs
-  Katana 1.7.1 and Sozo 1.8.0, and takes a minute or two.
+  transactions. Every game opens on the Katana accounts' real SNIP-12
+  signatures. Alice opens a game and disputes it in one transaction, and the
+  keeper answers the stale dispute and resolves it into forced play. The
+  keeper opens and settles three games nobody opened, each in the
+  transaction that submits it: a finished game, a timed game it referees
+  through a flag to `SETTLED`, and one it gives its randomness: the terms
+  carry its signed tip, it rolls for a gamble, and the channel replays the
+  roll. Last, it is stopped while a seat gambles onchain in forced play, and
+  once restarted it follows the forced call, takes the game back and rolls.
+  It needs Katana 1.7.1 and Sozo 1.8.0, and takes a minute or two.

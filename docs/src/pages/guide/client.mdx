@@ -3,18 +3,19 @@
 This page wires the pieces into a game client:
 
 1. make a seat's secrets;
-2. open the game onchain;
+2. agree on the terms, signed by each seat's wallet;
 3. play through a `SessionStore`, with a keeper as the transport;
-4. settle, and watch for disputes.
+4. settle, opening the game onchain in the same transaction, and watch for
+   disputes.
 
 It uses the counter's codec. Substitute yours.
 
 ```js
-import { ec } from 'starknet'
-import { Session, decodeTerms, disputeAnswer, play, playRandom, publicKey, reveal, rngChain, rebase } from '@referee/sdk'
+import { ec, stark } from 'starknet'
+import { disputeAnswer, play, playRandom, publicKey, reveal, rngChain, rebase, termsTypedData } from '@referee/sdk'
 import { SessionStore, indexedDbBackend } from '@referee/sdk/store'
 import { KeeperClient } from '@referee/sdk/keeper'
-import { contractCall, getChannel, historyCall } from '@referee/sdk/proving'
+import { contractCall, getChannel, historyCall, openGameCall, snapshotIfOpen } from '@referee/sdk/proving'
 import { ADD, GAMBLE, counter } from './counter.mjs' // your game codec
 
 const store = new SessionStore(indexedDbBackend('my-game'))
@@ -23,7 +24,7 @@ const keeper = new KeeperClient('https://keeper.example')
 
 ## 1. Make the seat's secrets
 
-Before creating or joining, a client makes two secrets that exist only on this
+Before it agrees to a game, a client makes two secrets that exist only on this
 device:
 
 - a **session key**, which signs this game's moves. It's per game, holds no
@@ -39,7 +40,7 @@ const privateKey = randomKey()
 const seed = randomKey(), length = 64
 const tip = rngChain(seed, length)[length]
 
-// Keep them before anything onchain references them.
+// Keep them before any signed terms reference them.
 await store.saveKey(privateKey, { seed, length })
 ```
 
@@ -50,44 +51,56 @@ which also ends in a loss on time. `saveKey` keeps both. Never put either in a
 transcript, an export or a URL.
 :::
 
-## 2. Open the game onchain
+## 2. Agree on the terms
 
-Seat 0 calls `create` and seat 1 calls `join`, each from their wallet, with the
-session **public** key and the chain tip:
+The seats agree on the game's **terms** offchain, and each seat's wallet signs
+them. Nothing goes onchain yet: the signed terms are the game. It opens onchain
+only when it first needs the chain, in the same transaction: usually its
+settlement (step 4), or a dispute (step 5).
+
+The terms name the chain, your game system, a game id the clients choose, the
+prover adapter, the response window, the time control, each seat's wallet,
+session **public** key and chain tip, and the game's config. Exchange public
+keys and tips through your lobby or matchmaker, so that both seats build the
+same terms:
 
 ```js
-// seat 0
-await wallet.execute(contractCall(CHANNEL, 'create', [
-  20,                  // the counter's config: target
-  opponentAddress,     // or 0 for an open game
-  publicKey(privateKey),
-  tip,
-  ADAPTER_ADDRESS,     // the game's prover
-  3600,                // response window, seconds
-  1,                   // Option<TimeControl>: 1 is None (untimed)
-]))
-
-// seat 1
-await wallet.execute(contractCall(CHANNEL, 'join', [
-  gameId, publicKey(privateKey), tip,
-  0, 0, 0,             // the referee's tip and its signature (r, s): zeros when the seats reveal
-]))
+const gameId = randomKey()               // any felt no game used: clients choose it
+const terms = {
+  chain_id: CHAIN_ID,                    // the network's chain id, as a felt
+  channel: CHANNEL,                      // your game system
+  game_id: gameId,
+  prover: ADAPTER_ADDRESS,               // the game's proof adapter
+  response_seconds: 3600,                // dispute and forced-play window: 300 s to 7 days
+  clock: null,                           // untimed; see Add a clock
+  players: [aliceAddress, bobAddress],   // wallets, in seat order: this device plays Alice
+  keys: [publicKey(privateKey), bobKey], // each seat's session public key
+  rng_tips: [tip, bobTip],               // each seat's chain tip
+  config: { target: 20 },                // the counter's config
+}
 ```
 
-A timed game that takes its randomness from its referee joins with the
-referee's signed tip instead of those zeros: see
-[Add a clock](/guide/clocks#take-randomness-from-the-referee).
-
-Once seat 1 has joined, read the terms back from the chain and open the session
-on them. Never build terms yourself: the context hash has to match the
-channel's.
+Check the terms before you sign them: they are what the channel will enforce.
+Then each seat's wallet signs `termsTypedData(counter, terms)`, SNIP-12 typed
+data whose context hash binds every term, session keys included, so the
+signature binds the wallet to its session key:
 
 ```js
-const terms = decodeTerms(counter, (await provider.callContract(contractCall(CHANNEL, 'terms', [gameId]))).map(BigInt))
+const signature = stark.formatSignature(await wallet.signMessage(termsTypedData(counter, terms)))
+// … exchange signatures: signatures = [seat0, seat1], in seat order
+
 const session = await store.open(counter, terms)
-await keeper.register(session)
+await keeper.register(session, { authorizations: signatures })
 const { seat } = await store.keyFor(terms)   // which seat this device plays
 ```
+
+Keep the terms and both signatures with the session: whoever holds them can
+open the game onchain (`openGameCall`). The keeper keeps them too, and opens
+the game when it settles it. A game id opens once, so pick a random one.
+
+A timed game names its referee in `clock`, and one that takes its randomness
+from its referee carries the referee's signed tip, which you fetch before
+signing: see [Add a clock](/guide/clocks#take-randomness-from-the-referee).
 
 ## 3. Play
 
@@ -174,25 +187,34 @@ any time. Your wallet can also call `resign` onchain.
 ## 4. Settle
 
 When the game finishes, both clients sign a checkpoint of the final state for
-the channel's current epoch, and exchange the approvals:
+the channel's current epoch, and exchange the approvals. A game nobody opened
+yet is at epoch 0:
 
 ```js
-const channel = await getChannel(provider, counter, CHANNEL, gameId)
-const approval = session.checkpointSignature(channel.epoch, privateKey)
+const snapshot = await snapshotIfOpen(provider, counter, CHANNEL, gameId)   // null: no channel holds it yet
+const epoch = snapshot?.epoch ?? 0
+const approval = session.checkpointSignature(epoch, privateKey)
 // … send `approval` to the other seat and collect theirs: acks = [seat0, seat1]
 ```
 
-Anyone then submits the history **from the channel's anchor** with both
-approvals, and the game settles in one transaction:
+Anyone then submits the history with both approvals, and the game settles in
+one transaction. If nobody has opened the game, the same transaction opens it
+first, and the history replays from the opening:
 
 ```js
-const base = rebase(session, channel.anchor.hash)   // the session from the anchor
-await wallet.execute(historyCall(base, channel.epoch, { acks }))
+if (snapshot === null) {
+  await wallet.execute([openGameCall(counter, terms, signatures), historyCall(session, 0, { acks })])
+} else {
+  const base = rebase(session, snapshot.anchor_hash)   // the session from the channel's anchor
+  await wallet.execute(historyCall(base, snapshot.epoch, { acks }))
+}
 ```
 
 For long games, prove instead of replaying onchain: see
 [Add a proof adapter](/guide/adapter). A keeper settles finished games on its
-own, without approvals, by opening a dispute window and resolving it.
+own, without approvals, by opening a dispute window and resolving it. It opens
+a game nobody opened in the same transaction, with the signatures the game
+registered with.
 
 The same flow on an unfinished state is a **checkpoint**. The channel commits
 it as the new anchor and play continues offchain. Every later submission
@@ -202,6 +224,13 @@ starts from that anchor, which `rebase` takes care of.
 
 If the other seat submits an old state or stops responding, the channel moves
 to `DISPUTE` or `FORCED` (see [The channel and disputes](/concepts/channel)).
+To start a dispute yourself in a game nobody opened yet, open it in the same
+transaction, from your wallet:
+
+```js
+await wallet.execute([openGameCall(counter, terms, signatures), contractCall(CHANNEL, 'open_dispute', [gameId, 0])])
+```
+
 You respond with:
 
 | Channel | Your move |

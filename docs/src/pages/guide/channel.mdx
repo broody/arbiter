@@ -42,10 +42,10 @@ on 2.13.
 
 A channel is stored in two models. `ChannelTerms` holds what the channel fixes
 when it opens (seats, session keys, tips, prover, config, time control, context
-and window) and is written at `create` and `join` only. `ChannelState` holds
+and window) and is written once, when `open_game` opens the game. `ChannelState` holds
 the state machine in four felts (the anchor's hash, the candidate's, and two
-packed words) and is written on every transition. A game whose creator asked
-for the referee's randomness has a third, `ChannelRng`, with the referee's
+packed words) and is written on every transition. A game whose terms take the
+referee's randomness has a third, `ChannelRng`, with the referee's
 hash-chain tip; no other game reads or writes it. `get_channel` returns them
 as one `ChannelGame`.
 
@@ -69,15 +69,10 @@ binding.
 ```cairo
 #[starknet::interface]
 pub trait ICounterChannel<T> {
-    fn create(
-        ref self: T, target: u8, invited: ContractAddress, session_key: felt252, rng_tip: felt252,
-        prover: ContractAddress, response_seconds: u32, clock: Option<TimeControl>,
-    ) -> felt252;
-    fn join(
-        ref self: T, game_id: felt252, session_key: felt252, rng_tip: felt252, referee_tip: felt252,
+    fn open_game(
+        ref self: T, terms: Terms<Config>, signatures: Span<Span<felt252>>,
         referee_signature: Signature,
     );
-    fn cancel(ref self: T, game_id: felt252);
     fn accept_verified(
         ref self: T, game_id: felt252, epoch: u32, start_hash: felt252, end: Envelope<Counter>,
         acks: Span<Signature>,
@@ -111,14 +106,12 @@ pub mod channel {
 
     #[abi(embed_v0)]
     impl CounterChannelImpl of super::ICounterChannel<ContractState> {
-        fn join(
-            ref self: ContractState, game_id: felt252, session_key: felt252, rng_tip: felt252,
-            referee_tip: felt252, referee_signature: Signature,
+        fn open_game(
+            ref self: ContractState, terms: Terms<Config>, signatures: Span<Span<felt252>>,
+            referee_signature: Signature,
         ) {
             let mut world = self.world_default();
-            binding::join::<
-                CounterRules,
-            >(ref world, game_id, session_key, rng_tip, referee_tip, referee_signature);
+            binding::open_game::<CounterRules>(ref world, terms, signatures, referee_signature);
         }
 
         fn submit_history(
@@ -153,9 +146,7 @@ A game whose `Witness` isn't `()` adds a `witness` argument to `submit_history`,
 
 | Entrypoint | Caller | What it does |
 | --- | --- | --- |
-| `create` | Seat 0's wallet | Opens a game (`WAITING`) with the config, an optional invited wallet (zero for an open game), seat 0's session key and chain tip, the prover adapter, the response window and an optional `TimeControl`. A non-zero `rng_tip` in the time control asks for the referee's randomness. Returns the game id |
-| `join` | Seat 1's wallet (the invited one, if any) | Takes seat 1 with its session key and chain tip, and with the referee's signed tip when the creator asked for its randomness (zeros otherwise). Fixes the terms and context, and commits the opening state as the anchor (`ACTIVE`) |
-| `cancel` | Seat 0's wallet | Cancels a game nobody joined |
+| `open_game` | Anyone, with every seat's wallet signature over the terms | Opens a game on its terms: chain, channel, a game id the clients chose, prover, response window, an optional `TimeControl`, and each seat's wallet, session key and chain tip, with the game's config. Takes the referee's signature over its tip when the terms take the referee's randomness (zero otherwise). Fixes the context, and commits the opening state as the anchor (`ACTIVE`, epoch 0). Send it in one transaction with the game's first call that needs the chain |
 | `submit_history` | Anyone | Replays a batch of signed steps from the anchor, or from the dispute candidate to extend it. With every seat's checkpoint approval (`acks`) it commits. Without, it becomes the dispute candidate |
 | `accept_verified` | The game's prover adapter only | The proved equivalent of `submit_history`. The adapter's `settle` calls it |
 | `open_dispute` | A seat's wallet | Challenges the other seat to respond within the window (`DISPUTE`) |
@@ -175,32 +166,35 @@ Every submission that changes the channel names the `epoch` it expects. The
 epoch increments whenever the anchor changes, so a stale submission fails with
 `'Stale channel epoch'` instead of landing on a newer state.
 
-## What `create` checks
+## What `open_game` checks
 
-- The session key is a curve point (`'Invalid session key'`), and the chain tip
-  is nonzero.
+- The terms name this chain (`'Wrong chain'`) and this system (`'Wrong
+  channel'`), and a non-zero game id (`'Invalid game id'`) that no game has
+  opened (`'Game already open'`). Clients choose the id, so pick a random one.
+- The config passes your `init`, and each chain tip is non-zero
+  (`'Invalid tip'`).
+- Two distinct, non-zero wallets (`'Invalid players'`). Each session key is a
+  curve point (`'Invalid session key'`), and the seats share no key
+  (`'Shared session key'`) and no tip (`'Invalid tip'`).
 - The prover is a deployed contract whose class is allowlisted
   (`'Untrusted prover class'`).
-- The config passes your `init`.
-- The response window is between 300 seconds and 7 days
-  (`'Invalid response window'`).
 - If `clock` is set, the time control is valid, and its referee key is a curve
   point that neither seat uses (`'Referee is a seat'`). See [Add a clock](/guide/clocks).
+- Each seat's wallet signed the terms: it calls the seat's account's
+  `is_valid_signature` with `terms_message`, the SNIP-12 hash of
+  `termsTypedData(game, terms)` for that account, and accepts `'VALID'` or 1
+  (`'Invalid wallet signature'`). The account must be deployed.
+- The response window is between 300 seconds and 7 days
+  (`'Invalid response window'`).
 
-`join` checks that the joining wallet isn't seat 0, that it was invited if
-anyone was, and that its session key and tip differ from seat 0's.
+`open_game` also checks where the game's randomness comes from:
 
-`join` also settles where the game's randomness comes from:
-
-- If the creator asked for the referee's randomness (a non-zero
-  `clock.rng_tip`), `referee_tip` must be non-zero (`'Referee tip needed'`)
-  and `referee_signature` must be the referee's signature over
-  `tip_hash(chain_id, channel, game_id, referee_tip)`
-  (`'Invalid session signature'`). The tip then replaces the creator's marker
-  in the terms. A tip a seat made up would let that seat know every roll, so
-  only the referee's signed one is taken.
-- Otherwise `referee_tip` must be zero (`'Seats reveal in this game'`), and
-  the signature is ignored: pass zeros.
+- If the terms take the referee's randomness (a non-zero `clock.rng_tip`),
+  `referee_signature` must be the referee's signature over
+  `tip_hash(chain_id, channel, game_id, rng_tip)`
+  (`'Invalid session signature'`). A tip a seat made up would let that seat
+  know every roll, so only the referee's signed one is taken.
+- Otherwise `referee_signature` must be zero (`'Seats reveal in this game'`).
 
 See [Add a clock](/guide/clocks#take-randomness-from-the-referee).
 
@@ -220,7 +214,7 @@ tag, for example `counter-channel`.
 
 ### Allowlist the proof adapter
 
-Games name a prover adapter at creation, and both `create` and `join` refuse an
+Games name a prover adapter in their terms, and `open_game` refuses an
 adapter whose class isn't allowlisted. A namespace owner allowlists it once per
 adapter class:
 
@@ -235,11 +229,13 @@ Declare and deploy the adapter first. See [Add a proof adapter](/guide/adapter).
 ## Watching games
 
 Every entrypoint that changes a game emits `ChannelUpdated`, keyed by
-`game_id`:
+`game_id`. A game appears onchain only when it opens, usually in the
+transaction that settles it, so lobbies and live games come from your keeper
+or matchmaker, not from these events:
 
 | Field | Meaning |
 | --- | --- |
-| `kind` | `CREATED` 0, `JOINED` 1, `CANCELLED` 2, `DISPUTED` 3, `RECEIVED` 4, `RESOLVED` 5, `FORCED` 6, `RESUMED` 7 (either resume), `TIMED_OUT` 8, `RESIGNED` 9, `ACKNOWLEDGED` 10, `ROLLED` 11, `VOIDED` 12 |
+| `kind` | `OPENED` 0, `DISPUTED` 3, `RECEIVED` 4, `RESOLVED` 5, `FORCED` 6, `RESUMED` 7 (either resume), `TIMED_OUT` 8, `RESIGNED` 9, `ACKNOWLEDGED` 10, `ROLLED` 11, `VOIDED` 12 |
 | `epoch`, `status`, `deadline` | The channel after the update |
 | `seq`, `state_hash` | The candidate during a dispute, otherwise the anchor |
 | `winner`, `reason` | The result once settled, otherwise that state's outcome |

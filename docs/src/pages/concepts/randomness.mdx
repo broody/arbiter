@@ -17,7 +17,7 @@ c(k+1) = rng_next(ck) = poseidon('REFEREE_RNG_V1', ck)
 tip = c(len)
 ```
 
-The seat commits only the **tip**, when it creates or joins. Later it reveals
+The seat commits only the **tip**, in the terms its wallet signs. Later it reveals
 values walking back down the chain: `c(len-1)`, then `c(len-2)`, and so on. A
 revealed value is valid when `rng_next(value)` equals the seat's current head,
 which starts at the tip and moves down with each reveal. Nobody can compute the
@@ -60,7 +60,7 @@ sequenceDiagram
   Bob knows until he reveals it, and on Alice's value, which Bob sees only
   after Alice has signed her action.
 - **Neither seat can bias it.** Both values were fixed when the tips were
-  committed at join. Alice can't pick a convenient `a`, and Bob can't pick a
+  committed in the signed terms. Alice can't pick a convenient `a`, and Bob can't pick a
   convenient `b` after seeing `a`: each has exactly one valid next value.
 - **Withholding only stalls.** Bob can refuse to reveal, but that doesn't change
   the roll. It stops the game, and a stall ends in a dispute, forced play
@@ -136,22 +136,19 @@ every roll. So the referee signs its tip for one game:
 message = signing_hash(TAG, 'REFEREE_TIP_V1', chain_id, channel, game_id, tip)
 ```
 
-The message names the game by its ids, because the game's context doesn't
-exist until the last seat joins. The channel checks the signature at `join`:
+The message names the game by its ids, because the tip is part of the terms
+that the context hashes: the referee signs it before the seats sign the terms.
 
-1. The creator asks for the referee's randomness with a non-zero
-   `clock.rng_tip` at `create`. The game id doesn't exist yet, so the real tip
-   can't be given there.
-2. The last seat gets the referee's tip for that game, with its signature, and
-   passes both to `join`. A keeper serves them (`KeeperClient.tip`).
-3. `join` verifies the signature with the referee's key (`tip_hash`) and puts
-   the tip in the terms. A tip signed for another game, or by another key, is
-   refused.
+1. The clients choose the game id, then get the referee's tip for that game,
+   with its signature. A keeper serves them (`KeeperClient.tip`).
+2. The terms carry the tip as `clock.rng_tip`. Each seat checks the signature
+   (`tipHash` in the SDK) before its wallet signs the terms.
+3. `open_game` takes the signature and verifies it with the referee's key
+   (`tip_hash`). A tip signed for another game, or by another key, is refused,
+   and so is a referee signature in a game whose seats reveal.
 
 [Add a clock](/guide/clocks#take-randomness-from-the-referee) walks through
-it. A game that no channel anchors has the tip in the terms its wallets sign,
-and each seat checks the signature before it signs them (`tipHash` in the
-SDK).
+it.
 
 The referee has no `Recommit`: that step belongs to a seat. Its chain must
 last the whole game. A keeper's chain has a value for every roll the game's

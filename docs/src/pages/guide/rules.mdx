@@ -30,7 +30,7 @@ cairo_test = "2.13.1"
 
 ```cairo
 pub trait GameRules {
-    type Config;   // terms fixed at creation (board size, map, target score)
+    type Config;   // part of the signed terms (board size, map, target score)
     type State;
     type Action;
     type Witness;  // extra replay input from calldata (position history, terrain)
@@ -126,7 +126,7 @@ pub impl CounterRules of GameRules {
   changes, so that old signatures can't replay under new rules.
 - `SEATS` must be 2 today. `open` rejects anything else.
 - `Time` names the game's time rules, a `referee::clocks::ClockRules`. They
-  apply only to games created with a clock. `StandardTime` covers per-turn
+  apply only to games whose terms carry a clock. `StandardTime` covers per-turn
   timers, Fischer increments and byo-yomi; a game can write its own (see
   [Add a clock](/guide/clocks#time-rules)).
 
@@ -139,8 +139,8 @@ pub impl CounterRules of GameRules {
     }
 ```
 
-`init` also validates the config. The Dojo binding calls it in `create`, so an
-invalid config never reaches the chain.
+`init` also validates the config. The Dojo binding calls it in `open_game`, so
+a game with an invalid config never opens.
 
 ### `apply`: one action
 

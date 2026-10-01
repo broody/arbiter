@@ -19,6 +19,18 @@ segments and what proofs cost.
 Both end in the same place: the channel's `receive`, with the end state and any
 approvals.
 
+## A game nobody opened yet
+
+A game opens onchain only when it first needs the chain, and that is usually
+its settlement. Then `open_game`, with the terms and every seat's wallet
+signature over them, goes first in the same transaction, and the history
+replays from the opening state at epoch 0. A game that ends cooperatively
+opens and settles in one transaction.
+
+For a proof, the adapter can't read a channel that doesn't exist yet, so its
+`__execute__` takes the game's terms (`opening`) and proves from their opening
+state. `proveSession` does this on its own, and says so with `opening: true`.
+
 ## Approvals
 
 A submission carries `acks`, one signature per seat:
@@ -106,7 +118,9 @@ this adapter, game and epoch. The proof must also:
 - be `PROOF1` or `PROOF2` of the virtual OS program the adapter pinned;
 - be based on a block at or after the block that set its start state: the
   channel's `anchor_block`, or its `candidate_block` for a proof that extends
-  the candidate;
+  the candidate. A proof from the epoch-0 anchor, the opening state, is
+  exempt: the terms fix that state and a game id opens once, so a proof based
+  before the game opened settles in the same transaction as `open_game`;
 - be at most 4000 blocks old.
 
 A proof can't be moved to another game, epoch, adapter or chain, and it can't
@@ -114,7 +128,8 @@ settle a state reached from anything but the anchor or the candidate.
 
 ## Who settles
 
-Anyone. `submit_history` and `resolve` are open to all callers, and so are a
+Anyone. `open_game`, `submit_history` and `resolve` are open to all callers,
+and so are a
 timed game's `acknowledge` and `resume_by_referee`, which carry the referee's
 signature. So are `roll` and `void`, for forced play that waits for the
 referee's roll: `roll` posts the referee's value, and `void` ends the game
@@ -124,4 +139,5 @@ The adapter's
 `settle` checks the proof, not the caller, and the channel accepts
 `accept_verified` only from the game's own adapter. Players settle their own
 games. A [keeper](/infra/keeper) settles finished games that nobody submitted,
-and answers disputes, from its own account.
+opening those nobody opened in the same transaction, and answers disputes,
+from its own account.

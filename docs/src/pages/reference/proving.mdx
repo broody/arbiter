@@ -1,6 +1,6 @@
 # @referee/sdk/proving
 
-Native SNIP-36 proving of a session through a game's `referee_adapter` instance, and the channel calls around it: the adapter's virtual transaction, the prover request and its checks, the `settle` call, and `submit_history` for onchain replay. It works for any referee game, since the game codec comes from the session. Keepers and clients that settle games use it.
+Native SNIP-36 proving of a session through a game's `referee_adapter` instance, and the channel calls around it: the adapter's virtual transaction, the prover request and its checks, the `settle` call, `open_game` for a game no channel has opened yet, and `submit_history` for onchain replay. It works for any referee game, since the game codec comes from the session. Keepers and clients that settle games use it.
 
 ```js
 import { proveSession, historyCall } from '@referee/sdk/proving'
@@ -12,12 +12,12 @@ Source: [`sdk/src/proving.mjs`](https://github.com/broody/referee/blob/main/sdk/
 
 The client builds calls for this layout (`referee_adapter::prover`):
 
-- The adapter's `__execute__(channel, game_id, epoch, start, witness, batch)`, with no `witness` argument for a game whose witness is `()`.
+- The adapter's `__execute__(channel, game_id, epoch, start, witness, batch, opening)`, with no `witness` argument for a game whose witness is `()`. `opening` is an `Option<Terms>`: `None` for a game a channel holds, `Some(terms)` for one no channel has opened yet.
 - The adapter's `settle(channel, game_id, epoch, start_hash, end, acks)`, where `start_hash` is the hash of the state the proof starts from.
 - The adapter's `os_program()`, which `proveSession` reads.
 - The game channel's `snapshot(game_id)` (`referee_dojo::channel::snapshot`).
 
-A proof starts from the channel's anchor, or from its candidate to extend it.
+A proof starts from the channel's anchor, or from its candidate to extend it. A game no channel has opened yet is proved from its terms' opening state at epoch 0, and its `settle` goes after `open_game` ([`openGameCall`](#opengamecall)) in the same transaction.
 
 `acks` are each seat's checkpoint approval of the end state at `epoch` ([`Session.checkpointSignature`](/reference/sdk#other-methods)). Zero signatures, the default, submit without approvals, and the end state becomes a dispute candidate.
 
@@ -38,15 +38,15 @@ proveSession({
 })
 ```
 
-Proves `session`, from the channel's current anchor or candidate to its latest step, with a `starknet_proveTransaction` prover, and checks the result.
+Proves `session`, from the channel's current anchor or candidate to its latest step, with a `starknet_proveTransaction` prover, and checks the result. A game no channel has opened yet is proved from its terms' opening state at epoch 0, and the result says `opening: true`.
 
 | Option | Default | What it is |
 | --- | --- | --- |
 | `rpcUrl` | | A Starknet RPC URL, used when no `provider` is given. |
 | `provider` | `new RpcProvider({ nodeUrl: rpcUrl })` | A starknet.js provider. |
 | `proverUrl` | | The prover's JSON-RPC URL. |
-| `session` | | A session that starts at the channel's anchor or candidate (see [`rebase`](/reference/sdk#rebase)). |
-| `epoch` | | The channel's current epoch. |
+| `session` | | A session that starts at the channel's anchor or candidate (see [`rebase`](/reference/sdk#rebase)), or, for a game nobody opened, at its opening. |
+| `epoch` | | The channel's current epoch, 0 for a game nobody opened. |
 | `blockNumber` | the newest eligible block | The proof's base block. |
 | `expectedClassHash` | required | The allowlisted adapter class. The contract at `terms.prover` must have it. |
 | `l2GasLimit` | `10_000_000_000` | The virtual transaction's L2 gas bound. |
@@ -54,12 +54,12 @@ Proves `session`, from the channel's current anchor or candidate to its latest s
 
 It runs these steps:
 
-1. Reads the channel's `snapshot` and finds the block that set the session's start: `anchor_block` if the start is the anchor, otherwise `candidate_block` if it is the candidate.
+1. Reads the channel's `snapshot` (`snapshotIfOpen`) and finds the block that set the session's start: `anchor_block` if the start is the anchor, otherwise `candidate_block` if it is the candidate. For a game nobody opened, it checks instead that `epoch` is 0 and the session starts at `open(game, terms)`: the terms fix that state, so any block deep enough will do.
 2. Polls the head every 1.5 s, for up to `waitMs`, until that block is `NATIVE_CONFIRMATIONS` blocks deep.
 3. Picks the base block: `blockNumber`, which must lie from that block to 10 blocks behind the head, or else the block 10 behind the head.
-4. At the base block, checks that the channel's epoch is `epoch`, that its terms have the session's context, that its anchor or candidate is the session's start, that the base block is not before the block that set it, and that the contract at `terms.prover` has class `expectedClassHash`.
+4. At the base block, for a game a channel holds, checks that the channel's epoch is `epoch`, that its terms have the session's context, that its anchor or candidate is the session's start, and that the base block is not before the block that set it. For every game, checks that the contract at `terms.prover` has class `expectedClassHash`.
 5. Replays the session with every signature verified (`replay`) and checks that it ends at `session.stateHash()`.
-6. Sends the adapter's virtual transaction (`provingTransaction`, with the adapter's nonce at the base block) to the prover, with a 600 s timeout.
+6. Sends the adapter's virtual transaction (`provingTransaction`, with the adapter's nonce at the base block, and the terms as `opening` for a game nobody opened) to the prover, with a 600 s timeout.
 7. Reads the adapter's `os_program` and checks the response with `validateNativeProof`.
 
 It returns:
@@ -72,20 +72,22 @@ It returns:
 | `end` | The end envelope. |
 | `endHash` | Its state hash. |
 | `wall_seconds` | How long the prover took, in seconds. |
+| `opening` | `true` for a game no channel had opened: send `openGameCall` first, then `call(acks)`, in one transaction. |
 | `call(acks)` | The adapter's `settle` call from the session's start hash to `end` (`settlementCall`). `acks` defaults to two zero signatures. |
 
 | Message | When |
 | --- | --- |
 | `Supply the allowlisted prover class hash` | No `expectedClassHash`. |
 | `Session does not start at the chain anchor or candidate` | Neither the channel's anchor nor its candidate is the session's start, at the latest block or at the base block, or the channel has other terms at the base block. Rebase the session first. |
+| `Session does not start at the opening` | No channel has opened the game, and the session does not start at its terms' opening state. |
 | `Channel anchor is not yet 10 blocks deep; retry proving later` | `waitMs` passed first. The message says anchor for a candidate start too. |
 | `Proof base must follow the anchor and be at least 10 blocks deep` | `blockNumber` is out of that range, measured from the block that set the session's start. |
-| `Stale proving epoch` | The channel is at another epoch. |
+| `Stale proving epoch` | The channel is at another epoch, or `epoch` is not 0 for a game nobody opened. |
 | `Proof base predates anchor` | The base block is before the block that set the session's start. |
 | `Unexpected prover class` | The contract at `terms.prover` does not have class `expectedClassHash`. |
 | `Session output mismatch` | The verified replay ends at another state than the session. |
 
-It also throws the errors of `getSnapshot`, `replay`, `rpc` and `validateNativeProof`.
+It also throws the errors of `snapshotIfOpen`, `replay`, `rpc` and `validateNativeProof`.
 
 ```js
 import { RpcProvider } from 'starknet'
@@ -101,7 +103,41 @@ const proved = await proveSession({ provider, proverUrl, session: base, epoch: s
 await account.execute([proved.call()], proved.options) // a starknet.js Account
 ```
 
+A game nobody opened is proved from its terms, and opens in the transaction that settles it:
+
+```js
+import { openGameCall, proveSession } from '@referee/sdk/proving'
+
+const proved = await proveSession({ provider, proverUrl, session, epoch: 0, expectedClassHash })
+// proved.opening is true: no channel holds the game yet.
+await account.execute([openGameCall(counter, terms, signatures), proved.call(acks)], proved.options)
+```
+
 The keeper sends settlements this way ([`keeper/chain.mjs`](https://github.com/broody/referee/blob/main/keeper/chain.mjs)).
+
+## Opening a game
+
+### openGameCall
+
+```js
+openGameCall(game, terms, signatures, { refereeSignature = ZERO_SIGNATURE, entrypoint = 'open_game' } = {})
+```
+
+The channel's `open_game` call: the encoded terms, each seat's wallet signature over them in seat order, and `refereeSignature`. A wallet signature is the felt array the wallet returns for [`termsTypedData(game, terms)`](/reference/sdk#hashing-and-signing). `refereeSignature` is the referee's signature over its randomness tip (`tipHash`) when the terms take the referee's randomness, as a keeper's [`POST …/tip`](/reference/keeper-api#post-gameschannelgametip) returns it, and zero otherwise. `entrypoint` renames the call.
+
+Anyone may send it. Send it in one transaction with the game's first call that needs the chain: `historyCall`, a proof's `settle`, or a seat's `open_dispute`, `resign` or `claim_timeout`. A game opens once: a second `open_game` reverts with `'Game already open'`.
+
+```js
+import { stark } from 'starknet'
+import { termsTypedData } from '@referee/sdk'
+import { historyCall, openGameCall } from '@referee/sdk/proving'
+
+// Before play, each seat's wallet signs the terms.
+const signatures = await Promise.all([alice, bob].map(async wallet =>
+  stark.formatSignature(await wallet.signMessage(termsTypedData(counter, terms)))))
+// At the end, anyone opens and settles the game in one transaction.
+await account.execute([openGameCall(counter, terms, signatures), historyCall(session, 0, { acks })])
+```
 
 ## Onchain replay
 
@@ -138,9 +174,11 @@ For callers that drive the steps of `proveSession` themselves.
 | --- | --- | --- |
 | `nativeProofBlock` | `(head, anchorBlock)` | The newest block a proof can use as its base, `head - NATIVE_CONFIRMATIONS`, or `null` while that is before `anchorBlock`, the block that set the proof's start state (`proveSession` passes the anchor's or the candidate's). Throws `Invalid block number` unless both are non-negative safe integers. |
 | `getSnapshot` | `(provider, game, channel, gameId, block = 'latest')` | Calls the channel's `snapshot(game_id)` at `block` and decodes it: `{ terms, epoch, anchor_hash, anchor_block, candidate_hash, candidate_block }`. Throws `Snapshot identifies another game` unless the terms name this channel and game, and `Snapshot identifies another chain` unless they name the provider's chain. |
-| `getChannel` | `(provider, game, channel, gameId, { block = 'latest', entrypoint = 'get_channel' } = {})` | Calls the game system's `get_channel(game_id)` and decodes referee_dojo's `ChannelGame` ([`decodeChannelGame`](/reference/sdk#calldata-codecs)). |
-| `provingCalldata` | `(session, epoch)` | The adapter's `__execute__` calldata: the channel, the game id, `epoch`, the start envelope, its witness, and the batch (`batchOf(session.steps)`). |
-| `provingTransaction` | `({ session, epoch, nonce, l2GasLimit = 10_000_000_000 })` | The virtual INVOKE v3 the adapter executes to emit the proved transition: sent from `terms.prover`, with zero fees and no signature. It is never broadcast: a prover runs it against a base block and proves it. |
+| `snapshotIfOpen` | `(provider, game, channel, gameId, block = 'latest')` | `getSnapshot`, or `null` for a game no channel has opened (the channel reverts with `'Unknown channel'`). |
+| `getChannel` | `(provider, game, channel, gameId, { block = 'latest', entrypoint = 'get_channel' } = {})` | Calls the game system's `get_channel(game_id)` and decodes referee_dojo's `ChannelGame` ([`decodeChannelGame`](/reference/sdk#calldata-codecs)). Throws for a game nobody opened. |
+| `reverted` | `(error, reason)` | Whether `error`, from a call into a contract, is the revert `reason`: as the message's text or its felt in hex, whichever the RPC reports. |
+| `provingCalldata` | `(session, epoch, { opening = false } = {})` | The adapter's `__execute__` calldata: the channel, the game id, `epoch`, the start envelope, its witness, the batch (`batchOf(session.steps)`), and `opening`: `None`, or with `opening` true, `Some(terms)` for a game no channel has opened. |
+| `provingTransaction` | `({ session, epoch, nonce, l2GasLimit = 10_000_000_000, opening = false })` | The virtual INVOKE v3 the adapter executes to emit the proved transition: sent from `terms.prover`, with zero fees and no signature. It is never broadcast: a prover runs it against a base block and proves it. |
 | `validateNativeProof` | `(game, response, { classHash, terms, epoch, startHash, endHash, block, osProgram })` | Checks a prover response against the transition asked for, and returns the `{ proof, proofFacts }` transaction options for `settle`. |
 | `settlementCall` | `(game, { prover, channel, gameId, epoch, startHash, end, acks = [ZERO_SIGNATURE, ZERO_SIGNATURE] })` | The adapter's `settle` call: the channel, the game id, `epoch`, `startHash` (the channel's anchor or candidate the proof starts from), the end envelope and the approvals. |
 | `contractCall` | `(contract, entrypoint, calldata = [])` | A starknet.js call object: `{ contractAddress, entrypoint, calldata }`, with the address and calldata as hex strings. |

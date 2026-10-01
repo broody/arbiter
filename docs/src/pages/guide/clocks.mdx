@@ -53,7 +53,7 @@ is charged to nobody.
 
 Each setting is at most 30 days (`MAX_CLOCK_MS`), byo-yomi has 1 to 255
 periods (`MAX_PERIODS`) of a positive length, and `turn_ms`, `bank_ms` or
-byo-yomi must be positive. `create` rejects anything else
+byo-yomi must be positive. `open_game` rejects anything else
 (`'Invalid time control'`, `'Invalid byo-yomi'`).
 
 ### Time rules
@@ -85,9 +85,11 @@ The keeper referees every timed game whose terms name its referee key. It
 stamps steps as they arrive, starts a clock that no step started within the
 entry's `start_grace_seconds`, flags on a timer, and never stamps two steps at
 one seq. `GET /info` shows its referee public key. With the game's Dojo
-`world` and `namespace` in its config, it also finds new timed games that name
-its key from the channel's `JOINED` events, so they get a referee even if no
-seat registers them.
+`world` and `namespace` in its config, it also finds timed games that name its
+key from the channel's `OPENED` events, so they get a referee even if no seat
+registers them. A game opens onchain only when it first needs the chain,
+usually to settle, so register a timed game with its referee's keeper
+yourself to have it refereed while it is played.
 
 `rng_secret_env` is optional. With a randomness secret the keeper also gives
 randomness to the games that ask for it, and `GET /info` shows
@@ -95,31 +97,30 @@ randomness to the games that ask for it, and `GET /info` shows
 
 :::warning
 Use a referee key that is different from the keeper's account key, and from
-every seat's session key. `create` and `join` refuse a referee key that equals a
+every seat's session key. `open_game` refuses a referee key that equals a
 seat's session key (`'Referee is a seat'`).
 :::
 
-## Create a timed game
+## Set up a timed game
 
-Pass the time control as `create`'s last argument, as Cairo `Option` serialization:
-`0` followed by the fields for `Some`, or `1` for an untimed game.
+Put the time control in the terms' `clock` before the seats sign them (see
+[Build the client](/guide/client#2-agree-on-the-terms)):
 
 ```js
-import { encodeTimeControl } from '@referee/sdk'
-
 const clock = { referee: REFEREE_PUBLIC_KEY, settings: { turn_ms: 60000, bank_ms: 0, increment_ms: 0, byoyomi: null } }
-await wallet.execute(contractCall(CHANNEL, 'create', [
-  20, opponentAddress, publicKey(privateKey), tip, ADAPTER_ADDRESS, 3600,
-  0, ...encodeTimeControl(counter, clock),   // Some(TimeControl), encoded with the game's time rules
-]))
+const terms = { ...untimedTerms, clock }   // the same terms, with a clock
 ```
 
-Joining a timed game accepts its referee. The time control is bound into the
-context, like every other term.
+Signing the terms accepts the referee. The time control is bound into the
+context, like every other term, and `open_game` checks it against the game's
+time rules when the game opens.
 
-This `clock` has no `rng_tip`, so the seats reveal randomness to each other.
-`join` then takes zeros for the referee's tip and its signature (see
-[Build the client](/guide/client#2-open-the-game-onchain)).
+Register the game with the keeper that referees it
+(`keeper.register(session, { authorizations })`) before the first move. The
+game isn't onchain yet, so the keeper can't find it there.
+
+This `clock` has no `rng_tip`, so the seats reveal randomness to each other,
+and `open_game` takes a zero referee signature (`openGameCall`'s default).
 
 ## Play a timed game
 
@@ -169,7 +170,9 @@ function render() {
 ```
 
 The clock starts at the first stamp, or at the referee's `start`. Until then,
-and while it's paused, `env.clock.stamp` is 0 and nobody is charged.
+and while it's paused, `env.clock.stamp` is 0 and nobody is charged. The first
+stamp also sets `env.clock.started`, when the game started as the referee
+attests. It is set once and kept through pauses.
 
 ### When time runs out
 
@@ -196,48 +199,51 @@ referee must give randomness: a keeper does when it has a randomness secret.
 
 :::steps
 
-### Ask at create
+### Fetch the referee's signed tip
 
-Pass a non-zero `rng_tip` in the time control. Any non-zero value asks. The
-game id doesn't exist yet, so the referee's real tip comes at join.
+The terms carry the referee's tip, so fetch it before the seats sign them.
+Choose the game id first, then ask the keeper for its tip for this game, with
+the game's config:
 
 ```js
+const { rng_tip, signature } = await keeper.tip({ channel: CHANNEL, game_id: gameId }, { config: { target: 20 } })
+```
+
+The game isn't onchain yet, so the keeper takes the config from the request:
+its chain has a value for every roll the config allows. The same game always
+gets the same tip.
+
+### Check it and put it in the terms
+
+```js
+import { tipHash, verify } from '@referee/sdk'
+
+if (!verify(tipHash(counter, CHAIN_ID, CHANNEL, gameId, rng_tip), signature, REFEREE_PUBLIC_KEY))
+  throw Error('This tip is not the referee\'s')
 const clock = {
   referee: REFEREE_PUBLIC_KEY,
   settings: { turn_ms: 60000, bank_ms: 0, increment_ms: 0, byoyomi: null },
-  rng_tip: 1n,   // ask for the referee's randomness
+  rng_tip,   // the referee's tip: the game takes its randomness from the referee
 }
-await wallet.execute(contractCall(CHANNEL, 'create', [
-  20, opponentAddress, publicKey(privateKey), tip, ADAPTER_ADDRESS, 3600,
-  0, ...encodeTimeControl(counter, clock),
-]))
 ```
 
-### Fetch the referee's signed tip
+Each seat checks the signature before its wallet signs the terms: a tip a seat
+made up would let that seat know every roll. Then the seats sign the terms as
+usual, and keep the referee's signature with them.
 
-The joining seat asks the keeper for its tip for this game:
+### Open with its signature
+
+Whoever opens the game passes the referee's signature to `open_game`:
 
 ```js
-const { rng_tip, signature } = await keeper.tip({ channel: CHANNEL, game_id: gameId })
+openGameCall(counter, terms, signatures, { refereeSignature: signature })
 ```
 
-The keeper reads the created game from the channel. It answers only if the
-game names the keeper's referee key with a non-zero `rng_tip`. The same game
-always gets the same tip.
-
-### Join with it
-
-```js
-await wallet.execute(contractCall(CHANNEL, 'join', [
-  gameId, publicKey(privateKey), tip,
-  rng_tip, signature.r, signature.s,   // the referee's tip and its signature
-]))
-```
-
-`join` checks the signature against the referee's key and puts the tip in the
-terms. It refuses a game that asked without a tip (`'Referee tip needed'`), and
-a tip the referee didn't sign for this game (`'Invalid session signature'`).
-Read the terms back as usual: `terms.clock.rng_tip` is now the referee's tip.
+`open_game` checks it against the referee's key (`tip_hash`). It refuses a tip
+the referee didn't sign for this game (`'Invalid session signature'`), and a
+non-zero referee signature in a game whose seats reveal (`'Seats reveal in
+this game'`). A keeper that gives the game its randomness signs the tip again
+itself when it opens the game with its settlement.
 
 ### Play
 
@@ -267,7 +273,8 @@ goes on offchain, and a staller is flagged there.
 ## If the referee goes down
 
 Nothing can be stamped, so the game stalls. The fallback is the untimed
-channel: a player opens a dispute, the best signed history is submitted, and,
+channel: a player opens a dispute (and the game, in the same transaction, if
+nobody has opened it yet), the best signed history is submitted, and,
 with no acknowledgement from the referee, an unfinished game moves to forced
 play onchain. Forced steps carry no stamps, so the clock **pauses** during
 forced play, and the channel's windows keep time instead.
@@ -332,14 +339,14 @@ const resume = referee.resumeSignature(channel.epoch, channel.anchor.hash)
 Anyone may send `acknowledge(game_id, epoch, signature)` and
 `resume_by_referee(game_id, epoch, signature)` to the game's system.
 
-To give a game its randomness too, keep a hash chain for it, sign its tip for
-the joining seat, and pass the chain as `rng`:
+To give a game its randomness too, keep a hash chain for it, sign its tip
+before the seats sign the terms, and pass the chain as `rng`:
 
 ```js
 import { Referee, RngChain, Session, sign, tipHash } from '@referee/sdk'
 
 const chain = new RngChain(CHAIN_SEED, 256)   // long enough for every roll of the game
-// The joining seat brings chain.tip and this signature to `join`.
+// The terms carry chain.tip, and open_game takes this signature.
 const tipSignature = sign(tipHash(counter, chainId, CHANNEL, gameId, chain.tip), REFEREE_PRIVATE_KEY)
 
 const referee = new Referee(new Session(counter, terms), REFEREE_PRIVATE_KEY, { rng: chain })

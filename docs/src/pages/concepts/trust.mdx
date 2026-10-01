@@ -19,7 +19,11 @@ onchain (`submit_history`) or proved (the adapter). So the chain trusts:
 - **Starknet's proof verification**, for games settled with proofs;
 - **the namespace owner's allowlist of adapter classes.** An allowlisted
   adapter can settle any game that names it. The counter's adapter has no
-  admin, no upgrade path and no custody, and it pins one virtual OS program.
+  admin, no upgrade path and no custody, and it pins one virtual OS program;
+- **each seat's wallet account**, which `open_game` asks whether it signed the
+  game's terms (`is_valid_signature`). A game opens only once every seat's
+  wallet has signed them. Anyone who holds the signed terms can open the game,
+  which only spends their own gas, and a game id opens once.
 
 Signatures alone never commit a state. Two colluding seats can sign anything,
 but they can't make the channel accept a state the rules wouldn't produce from
@@ -54,8 +58,9 @@ only by players who rely on it:
 - **It can delay or withhold steps.** Both players keep their own copies, so
   it's never the only one.
 - **It holds no player keys.** Its account pays only for `submit_history`,
-  `resolve`, the adapter's `settle`, and a referee's `acknowledge` and
-  `resume_by_referee`, which anyone may send.
+  `resolve`, the adapter's `settle`, `open_game` on the seats' own wallet
+  signatures, and a referee's `acknowledge` and `resume_by_referee`, which
+  anyone may send.
 - **An offline player who relies on it to answer disputes** trusts it to be
   up. If it's down, or colluding with the opponent, a stale candidate settles
   after the window. Mitigations: your own client watching, more than one
@@ -81,7 +86,7 @@ with time, and with randomness when the game takes its randomness from it.
   anchor.
 - **It's accountable.** Two attestations at one seq with different transcripts
   are evidence of equivocation.
-- **It's opt-in.** Its key is in the terms, and joining accepts it.
+- **It's opt-in.** Its key is in the terms, which every seat's wallet signs.
 
 With randomness from the referee (see
 [Randomness](/concepts/randomness#randomness-from-the-referee)):

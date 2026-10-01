@@ -15,7 +15,9 @@ The adapter is an **account contract** with two entrypoints:
 
 - **`__execute__` (virtual).** A zero-fee `INVOKE_V3` that is never broadcast.
   It reads the channel's `snapshot`, checks that the batch starts from the
-  anchor or from the dispute candidate, replays it with your rules against the final signatures (and, in a
+  anchor or from the dispute candidate (or, for a game no channel has opened
+  yet, takes the game's terms and starts from their opening state at epoch 0),
+  replays it with your rules against the final signatures (and, in a
   timed game, the referee's attestation), and emits one L2→L1 message: the
   adapter's class, the game's `TAG`, `'REFEREE_PROVED_V1'`, the chain, the
   adapter, the channel, the game, the context, the epoch, and the start and end
@@ -27,7 +29,10 @@ The adapter is an **account contract** with two entrypoints:
     pinned at deployment;
   - its base block is at or after the block that set the start state (the
     channel's `anchor_block`, or its `candidate_block` for a proof that extends
-    the candidate), and at most 4000 blocks old;
+    the candidate), and at most 4000 blocks old. A proof from the epoch-0
+    anchor, the opening state, is exempt from the first rule: the terms fix
+    that state, so a proof based before the game opened settles in the same
+    transaction as `open_game`;
   - it proves exactly one message, the expected transition for this game and
     epoch.
 
@@ -50,7 +55,7 @@ sequenceDiagram
 ```
 
 The channel accepts `accept_verified` only from the game's own prover, the
-adapter address named in `create`. The adapter class must also be allowlisted
+adapter address named in the terms. The adapter class must also be allowlisted
 by a namespace owner.
 
 ## Write it
@@ -80,9 +85,9 @@ The counter's adapter is about 40 lines of forwarding
 ```cairo
 #[starknet::contract(account)]
 pub mod CounterProver {
-    use referee::{Batch, Envelope, Signature};
+    use referee::{Batch, Envelope, Signature, Terms};
     use referee_adapter::prover;
-    use referee_counter::{Action, Counter, CounterRules};
+    use referee_counter::{Action, Config, Counter, CounterRules};
     use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
     use starknet::{ContractAddress, VALIDATED};
 
@@ -119,17 +124,18 @@ pub mod CounterProver {
     impl VirtualImpl of super::IVirtualCounter<ContractState> {
         fn __validate__(
             self: @ContractState, channel: ContractAddress, game_id: felt252, epoch: u32,
-            start: Envelope<Counter>, batch: Batch<Action>,
+            start: Envelope<Counter>, batch: Batch<Action>, opening: Option<Terms<Config>>,
         ) -> felt252 {
             prover::assert_virtual();
             VALIDATED
         }
 
+        // `opening` is the terms of a game no channel has opened yet, `None` otherwise.
         fn __execute__(
             ref self: ContractState, channel: ContractAddress, game_id: felt252, epoch: u32,
-            start: Envelope<Counter>, batch: Batch<Action>,
+            start: Envelope<Counter>, batch: Batch<Action>, opening: Option<Terms<Config>>,
         ) {
-            prover::execute::<CounterRules>(channel, game_id, epoch, start, (), batch);
+            prover::execute::<CounterRules>(channel, game_id, epoch, start, (), batch, opening);
         }
     }
 }
@@ -140,6 +146,9 @@ pub mod CounterProver {
 - A game with a witness adds a `witness` argument after `start` in both
   `__validate__` and `__execute__`, and passes it to `prover::execute`. The JS
   proving client builds calldata in that order.
+- `opening` comes last: `Some(terms)` for a game no channel has opened yet,
+  which the proof replays from `open(terms)` without reading the channel, and
+  `None` otherwise. The terms must name this channel, game, chain and adapter.
 - `settle` takes `start_hash`, the state the proof starts from: the channel's
   anchor, or its candidate for a proof that extends it. The adapter checks it
   against the channel's `snapshot` and passes it to `accept_verified`.
@@ -154,8 +163,8 @@ pub mod CounterProver {
 
 The constructor pins the virtual OS program that proofs must attest. The SDK
 exports the current one as `VIRTUAL_OS_PROGRAM` (Starknet v0.14.4). A network OS
-upgrade needs a new adapter instance, and games created after it name the new
-address.
+upgrade needs a new adapter instance, and games whose terms are signed after it
+name the new address.
 
 ### Allowlist the class in your channel
 
@@ -163,10 +172,10 @@ address.
 sozo execute <namespace>-channel allow_prover <ADAPTER_CLASS_HASH> 1
 ```
 
-### Name the adapter when creating games
+### Name the adapter in the terms
 
-The `prover` argument of `create` is the adapter's address. It becomes part of
-the game's terms, and the channel accepts proofs only from it.
+The terms' `prover` is the adapter's address. The seats sign it with the rest
+of the terms, and the channel accepts proofs only from it.
 
 :::
 
@@ -188,14 +197,24 @@ const acks = [aliceCheckpoint, bobCheckpoint]   // or omit for a dispute candida
 await account.execute(proved.call(acks), { ...proved.options })
 ```
 
+A game nobody opened yet is proved from its terms, at epoch 0, and
+`proveSession` says so with `opening: true`. Open it in the same transaction:
+
+```js
+import { openGameCall, proveSession } from '@referee/sdk/proving'
+
+const proved = await proveSession({ rpcUrl, proverUrl, session, epoch: 0, expectedClassHash: ADAPTER_CLASS_HASH })
+await account.execute([openGameCall(counter, terms, signatures), proved.call(acks)], { ...proved.options })
+```
+
 Before it asks the prover for anything, `proveSession`:
 
 1. waits (up to `waitMs`) until the state the session starts from, the anchor
    or the candidate, was set 10 blocks deep, the minimum depth for a proof's
    base block (`NATIVE_CONFIRMATIONS`);
 2. checks at the base block that the epoch is current, the session starts at
-   the chain's anchor or candidate, and the adapter's class is the one you
-   expect;
+   the chain's anchor or candidate (or, for a game nobody opened, at its
+   terms' opening state), and the adapter's class is the one you expect;
 3. replays the session with every signature verified.
 
 It then sends the adapter's virtual transaction to a `starknet_proveTransaction`

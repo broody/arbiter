@@ -21,6 +21,7 @@ pub struct Channel {
     pub deadline: u64,
     pub acked_epoch: u32,     // the dispute (epoch, deadline) a timed game's referee acknowledged
     pub acked_deadline: u64,
+    pub referee_rng: bool,    // whether the game takes its randomness from its referee
     pub result: Outcome,      // once SETTLED
 }
 
@@ -36,20 +37,22 @@ arrives as calldata and is checked against the hash.
 
 | Status | Meaning |
 | --- | --- |
-| `WAITING` 0 | Created, waiting for seat 1 |
+| `UNOPENED` 0 | No channel holds this game id. A game is played offchain from its signed terms until it first needs the chain |
 | `ACTIVE` 1 | Played offchain. The anchor is the last committed state |
 | `DISPUTE` 2 | A response window is open. The best candidate commits when it closes |
 | `FORCED` 3 | Played onchain: the due seat must move within each window. It pauses while the referee owes a roll: no seat is due then |
 | `SETTLED` 4 | Finished, with `result` recorded |
-| `CANCELLED` 5 | Cancelled before anyone joined |
+
+A game opens straight to `ACTIVE`, once every seat's wallet has signed its
+terms, so no game waits for a seat and there is nothing to cancel. `UNOPENED`
+is what a binding reads for a game id nobody opened: no transition returns
+it.
 
 ## Transitions
 
 | Function | Allowed when | Effect |
 | --- | --- | --- |
-| `create` | | `WAITING`. The response window must be between 300 s and 7 days |
-| `join` | `WAITING` | Records the context and the opening state as anchor and candidate. `ACTIVE` |
-| `cancel` | `WAITING` | `CANCELLED` |
+| `open(context, anchor, window)` | The binding checked every seat's wallet signature over the terms (`open_game`) | `ACTIVE` at epoch 0, with the opening state as anchor and candidate. The response window must be between 300 s and 7 days |
 | `receive(epoch, end, approved)` | `ACTIVE`, or `DISPUTE` before its deadline. `epoch` is current, `end` was replayed or proved from the anchor or the candidate, and `end.seq` is past the anchor | **Approved:** `end` must not rank below the candidate on `support_turn`. It commits as the anchor: `SETTLED` if finished, `ACTIVE` otherwise. **Unapproved:** `end` must outrank the candidate. It becomes the candidate, and an `ACTIVE` channel moves to `DISPUTE` with `deadline = now + window` |
 | `open_dispute(epoch)` | `ACTIVE`, current epoch | `DISPUTE`: the candidate resets to the anchor, and `deadline = now + window` |
 | `acknowledge(epoch)` | `DISPUTE` before its deadline, current epoch, with the referee's signature (timed games) | Records the dispute's epoch and deadline as acknowledged |
@@ -120,7 +123,9 @@ contains his signatures up to seq 40, and a shorter history ranks lower.
 
 ### Stall
 
-Alice opens a dispute from the anchor. If Bob never submits anything, the window
+Alice opens a dispute from the anchor, and opens the game in the same
+transaction if nobody has yet (`open_game`, on both wallets' signatures over
+the terms). If Bob never submits anything, the window
 passes and `resolve` commits the anchor itself. The game is unfinished, so it
 enters **forced play**:
 
@@ -201,7 +206,10 @@ flowchart LR
 The channel keeps the block each candidate was set in (`candidate_block`). A
 proof that extends the candidate must be based at or after that block, as a
 proof from the anchor must be based at or after `anchor_block`. Each segment
-must still outrank the candidate before it.
+must still outrank the candidate before it. One exception: at epoch 0 the
+anchor is the opening state, which the terms fix, so a proof from it may be
+based before the game opened, and settle in the same transaction as
+`open_game`.
 
 ## Why signatures alone never commit
 

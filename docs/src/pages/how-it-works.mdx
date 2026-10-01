@@ -1,7 +1,7 @@
 # How it works
 
-This page follows one game from creation to settlement, then shows what happens
-when a player stops cooperating. Each part links to a page with the details.
+This page follows one game from its signed terms to settlement, then shows
+what happens when a player stops cooperating. Each part links to a page with the details.
 
 ## The pieces
 
@@ -20,9 +20,9 @@ flowchart LR
   A <-- signed steps --> K
   B <-- signed steps --> K
   A -. any transport .- B
-  A -- create, settle, dispute --> C
-  B -- join, settle, dispute --> C
-  K -- "submit_history, resolve,<br/>acknowledge, resume_by_referee" --> C
+  A -- "open_game + settle or dispute" --> C
+  B -- "open_game + settle or dispute" --> C
+  K -- "open_game + submit_history, resolve,<br/>acknowledge, resume_by_referee" --> C
   K -- settle with proof --> P
   P -- accept_verified --> C
   K -. prove .-> G
@@ -47,9 +47,10 @@ sequenceDiagram
   participant A as Alice
   participant B as Bob
   participant C as Game system
-  A->>C: create(config, invited, session key, rng tip, prover, window, clock?)
-  B->>C: join(game_id, session key, rng tip, referee tip?)
-  Note over C: terms and context fixed,<br/>opening anchor committed (ACTIVE)
+  Note over A,B: agree on the terms: game id, session keys,<br/>rng tips, prover, window, clock?, config
+  A->>B: the terms, signed by Alice's wallet
+  B->>A: the terms, signed by Bob's wallet
+  Note over A,B: nothing onchain yet: the opening state is the anchor
   loop offchain, no transactions
     A->>B: step signed over (context, seq, transcript, move)
     Note over B: verify signature, apply rules
@@ -57,23 +58,25 @@ sequenceDiagram
     Note over A: verify signature, apply rules
   end
   Note over A,B: game over: both sign a checkpoint<br/>of the final state
-  A->>C: submit_history or proof, with both approvals
-  Note over C: SETTLED, winner recorded
+  A->>C: one transaction: open_game(terms, both wallet signatures),<br/>then submit_history or a proof, with both approvals
+  Note over C: opened (ACTIVE, epoch 0), then SETTLED, winner recorded
 ```
 
 :::steps
 
-### Open (onchain)
+### Agree (offchain)
 
-Alice creates a game and Bob joins it, each from their wallet. Each registers:
+Alice and Bob agree on the game's **terms**, and each signs them with their
+wallet. For each seat, the terms carry:
 
 - a **session key**, a fresh key that signs moves in this game only;
 - the tip of a **hash chain**, which will supply randomness.
 
-Joining fixes the game's **terms**: chain, contract, game id, prover, response
-window, optional clock, wallets, session keys, chain tips and game config. Their
-hash is the **context**, and every signature in the game includes it. The
-channel commits the opening state as the first **anchor**.
+They also name the chain, the contract, a game id the players choose, the
+prover, the response window, an optional clock, the wallets and the game
+config. Their hash is the **context**, and every signature in the game
+includes it. Nothing goes onchain: the signed terms are the game, and its
+opening state is the first **anchor**.
 
 ### Play (offchain)
 
@@ -90,6 +93,9 @@ a WebSocket or a peer-to-peer link.
 
 When the game ends, both players sign a **checkpoint** approval of the final
 state. Anyone submits the history from the anchor, together with both approvals.
+If nobody has opened the game yet, the same transaction opens it first:
+`open_game` takes the terms and both wallet signatures, asks each wallet's
+account whether it signed them, and commits the opening state.
 Every game ends: your rules bound its length, and the protocol caps every
 transcript at your `max_steps`.
 It goes through one of two paths:
@@ -99,9 +105,9 @@ It goes through one of two paths:
 - **a native proof**: a prover proves the same replay, and the adapter's `settle`
   submits the result.
 
-With both approvals the game settles in one transaction. The same flow with an
-unfinished state is a checkpoint: it becomes the new anchor, and play goes on
-from there.
+With both approvals the game opens and settles in one transaction. The same
+flow with an unfinished state is a checkpoint: it becomes the new anchor, and
+play goes on from there.
 
 :::
 
@@ -110,13 +116,11 @@ from there.
 Signatures alone never commit a state. A state commits only if it was replayed
 or proved from the anchor (or from a dispute candidate that was), so two
 colluding accounts cannot sign a fake result into existence. When approvals are missing, the channel falls back to a
-**dispute window** (5 minutes to 7 days, chosen at creation):
+**dispute window** (5 minutes to 7 days, set in the terms):
 
 ```mermaid
 stateDiagram-v2
-    [*] --> WAITING: create
-    WAITING --> CANCELLED: cancel
-    WAITING --> ACTIVE: join
+    [*] --> ACTIVE: open_game, with the first call that needs the chain
     ACTIVE --> SETTLED: finished history + all approvals
     ACTIVE --> ACTIVE: unfinished history + all approvals (checkpoint)
     ACTIVE --> DISPUTE: unapproved history, or open_dispute
@@ -138,7 +142,7 @@ stateDiagram-v2
 | --- | --- |
 | **Won't approve the result** | Submit the history without approvals. It becomes the *candidate* and opens a dispute. If nobody submits a higher-ranked history before the window closes, anyone calls `resolve` and the game settles. |
 | **Submits an old state** | During the window, the other player (or a keeper) submits the newer history. Candidates rank by `support_turn` (how many times the signing seat changed), then `seq`, so a player can't win by stopping before the opponent's last move. |
-| **Stalls** | In a timed game, the referee flags the staller once its time runs out. Otherwise, open a dispute. If the window passes with the game unfinished, `resolve` moves it to **forced play**: the due seat must move onchain within each window, or the other seat claims the game on timeout. A live referee keeps a timed game's disputes out of forced play. |
+| **Stalls** | In a timed game, the referee flags the staller once its time runs out. Otherwise, open a dispute, opening the game in the same transaction if nobody has. If the window passes with the game unfinished, `resolve` moves it to **forced play**: the due seat must move onchain within each window, or the other seat claims the game on timeout. A live referee keeps a timed game's disputes out of forced play. |
 | **Gives up** | Either player resigns at any time, with a signed `Resign` step or a wallet call. |
 | **The referee is down while a roll waits for it** | Only in a game that takes its randomness from its referee. Forced play pauses for up to 3 days, and nobody can be timed out meanwhile. Anyone can post the referee's value (`roll`). Otherwise the game ends **void**, with no result: at once if both players agree, or by anyone after the pause. |
 
@@ -149,6 +153,7 @@ Details: [The channel and disputes](/concepts/channel).
 | Where | What is verified |
 | --- | --- |
 | Each client (`Session.receive`) | Every signature, every step against the rules, and in a timed game every stamp. Clients never sign from a state they haven't fully verified. |
+| The channel (`open_game`) | Every seat's wallet signature over the terms, asked of its account (`is_valid_signature`), and the terms themselves: this chain and contract, a game id never opened, distinct keys and tips, an allowlisted prover. |
 | The channel (`submit_history`) | A replay from the committed anchor, or from the dispute candidate, against **each seat's final signature**. That signature covers every earlier step through the transcript. |
 | The adapter (`settle`) | Network-verified proof facts: the right virtual OS program, a recent base block, and exactly the expected start → end transition, from the anchor or the candidate. |
 | The keeper | The same as a client, before it stores or forwards anything. |

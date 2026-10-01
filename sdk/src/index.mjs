@@ -118,9 +118,9 @@ export const refereeResumeHash = (game, context, epoch, stateHash) =>
   signingHash([tag(game.tag), tag('ARBITER_RESUME_V1'), felt(context), BigInt(epoch), felt(stateHash)]);
 /**
  * What the referee signs to commit its hash-chain tip to one game (`tip_hash`),
- * which the channel checks when the last seat joins. A seat must check it too
- * before it signs the terms of a game no channel anchors: a tip another seat
- * made up would let that seat know every roll.
+ * which the channel checks when the game opens (`open_game`). A seat must check
+ * it too before it signs the terms: a tip another seat made up would let that
+ * seat know every roll.
  */
 export const tipHash = (game, chainId, channel, gameId, tip) =>
   signingHash([tag(game.tag), tag('ARBITER_TIP_V1'), felt(chainId), felt(channel), felt(gameId), felt(tip)]);
@@ -1133,8 +1133,8 @@ export function decodeChannelGame(game, values) {
   Object.assign(result, {
     status: r.num(), epoch: r.num(), context: r.next(), response_seconds: r.num(),
   });
-  // `referee` is zero for an untimed game. Before the join, `rng_tip` is just
-  // nonzero when the creator asked for the referee's randomness.
+  // `referee` is zero for an untimed game, and `rng_tip` is the referee's
+  // randomness tip when the game takes its randomness from its referee.
   const referee = r.next(), settings = r.span(), rng_tip = r.next();
   result.clock = referee === 0n ? null : { referee, settings: timeOf(game).decodeSettings(new Reader(settings)), rng_tip };
   Object.assign(result, {

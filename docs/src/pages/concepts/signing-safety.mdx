@@ -89,7 +89,7 @@ never leaves.
 | --- | --- | --- |
 | What | The private key that signs this game's moves | The record of the last step that key signed |
 | Secret | Yes | No: it's a step already sent to the other seat |
-| Changes | Written once, before joining (`saveKey`) | On every move, before the signature leaves |
+| Changes | Written once, before signing the terms (`saveKey`) | On every move, before the signature leaves |
 | Needs | Confidentiality | Freshness: it must never go backwards |
 | If lost | You can't move | You can sign something that contradicts what you signed |
 | Stored at | `key/<public key>` | `signed/<context>/<seat>` |
