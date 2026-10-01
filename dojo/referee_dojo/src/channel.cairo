@@ -80,6 +80,9 @@ pub fn open_game<
         },
         Option::None => (0, array![].span(), 0),
     };
+    if referee_tip == 0 {
+        assert(referee_signature == Signature { r: 0, s: 0 }, 'Seats reveal in this game');
+    }
     let context = context_hash::<R>(@terms);
     let mut seat: u32 = 0;
     for player in terms.players {
@@ -88,6 +91,13 @@ pub fn open_game<
         );
         seat += 1;
     }
+    let channel = machine::open(
+        context,
+        state_ref::<R>(@opening),
+        terms.response_seconds,
+        referee_tip != 0,
+        get_block_number(),
+    );
     let mut config = array![];
     terms.config.serialize(ref config);
     world
@@ -112,13 +122,6 @@ pub fn open_game<
     if referee_tip != 0 {
         world.write_model(@ChannelRng { id: game_id, tip: referee_tip });
     }
-    let channel = machine::open(
-        context,
-        state_ref::<R>(@opening),
-        terms.response_seconds,
-        referee_tip != 0,
-        get_block_number(),
-    );
     save(ref world, game_id, channel, OPENED);
 }
 

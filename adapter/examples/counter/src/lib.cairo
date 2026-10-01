@@ -1,8 +1,8 @@
 //! Proof adapter for the counter game: a thin account contract over
 //! `referee_adapter`. Deploy one instance per Starknet OS program and
 //! allowlist its class in the game's channel.
-use referee::{Batch, Envelope, Signature};
-use referee_counter::{Action, Counter};
+use referee::{Batch, Envelope, Signature, Terms};
+use referee_counter::{Action, Config, Counter};
 use starknet::ContractAddress;
 
 #[starknet::interface]
@@ -29,7 +29,10 @@ pub trait IVirtualCounter<T> {
         epoch: u32,
         start: Envelope<Counter>,
         batch: Batch<Action>,
+        opening: Option<Terms<Config>>,
     ) -> felt252;
+    /// `opening` is the terms of a game no channel has opened yet, `None`
+    /// otherwise: the proof then starts from their opening state.
     fn __execute__(
         ref self: T,
         channel: ContractAddress,
@@ -37,14 +40,15 @@ pub trait IVirtualCounter<T> {
         epoch: u32,
         start: Envelope<Counter>,
         batch: Batch<Action>,
+        opening: Option<Terms<Config>>,
     );
 }
 
 #[starknet::contract(account)]
 pub mod CounterProver {
-    use referee::{Batch, Envelope, Signature};
+    use referee::{Batch, Envelope, Signature, Terms};
     use referee_adapter::prover;
-    use referee_counter::{Action, Counter, CounterRules};
+    use referee_counter::{Action, Config, Counter, CounterRules};
     use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
     use starknet::{ContractAddress, VALIDATED};
 
@@ -91,6 +95,7 @@ pub mod CounterProver {
             epoch: u32,
             start: Envelope<Counter>,
             batch: Batch<Action>,
+            opening: Option<Terms<Config>>,
         ) -> felt252 {
             prover::assert_virtual();
             VALIDATED
@@ -103,8 +108,9 @@ pub mod CounterProver {
             epoch: u32,
             start: Envelope<Counter>,
             batch: Batch<Action>,
+            opening: Option<Terms<Config>>,
         ) {
-            prover::execute::<CounterRules>(channel, game_id, epoch, start, (), batch);
+            prover::execute::<CounterRules>(channel, game_id, epoch, start, (), batch, opening);
         }
     }
 }

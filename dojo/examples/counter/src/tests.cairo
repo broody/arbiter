@@ -885,6 +885,19 @@ fn a_referee_tip_needs_the_referees_signature() {
 }
 
 #[test]
+#[should_panic(expected: ('Seats reveal in this game', 'ENTRYPOINT_FAILED'))]
+fn a_referee_signature_without_its_tip_is_refused() {
+    // The seats reveal: a signed tip has no place in these terms.
+    let game = trusting();
+    let terms = terms_for(game, blitz());
+    let tip = chain_value(SEED_REF, RNG_LEN);
+    let signature = sign(
+        tip_hash::<CounterRules>(terms.chain_id, terms.channel, GAME_ID, tip), PK_REF,
+    );
+    game.open_game(terms, signed_by_both(@terms), signature);
+}
+
+#[test]
 fn a_forced_gamble_pauses_for_the_referee() {
     let (_, world, id, waiting) = paused();
     let channel = stored(@world, id);

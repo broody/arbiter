@@ -1,6 +1,6 @@
 // JS mirror of referee/core/src/protocol.cairo. Every hash here must match the
 // Cairo byte for byte; the counter example's fixtures test that.
-import { ec, shortString } from 'starknet';
+import { ec, shortString, typedData } from 'starknet';
 import { poseidonHashMany } from './poseidon.mjs';
 
 export const PROTOCOL_VERSION = 6n;
@@ -136,12 +136,13 @@ export const stampHash = (game, context, env) =>
   signingHash([tag(game.tag), tag('REFEREE_STAMP_V1'), felt(context), BigInt(env.seq), felt(env.transcript), ...encodeClock(game, env.clock)]);
 
 /**
- * What each seat's wallet signs to play a game that no channel anchors
- * onchain: SNIP-12 typed data naming the game and its terms' context hash.
- * The context binds every term, so the signature binds the wallet
- * (`terms.players[seat]`) to its session key (`terms.keys[seat]`), as creating
- * and joining a channel does onchain. Sign it with the wallet
- * (`account.signMessage`); a keeper checks it against the account contract.
+ * What each seat's wallet signs to agree to a game: SNIP-12 typed data naming
+ * the game and its terms' context hash. The context binds every term, so the
+ * signature binds the wallet (`terms.players[seat]`) to its session key
+ * (`terms.keys[seat]`). Sign it with the wallet (`account.signMessage`). The
+ * channel opens the game on every seat's signature (`open_game`, which asks
+ * each account's `is_valid_signature`), and a keeper checks them the same way
+ * before it holds a game that isn't open yet.
  */
 export function termsTypedData(game, terms) {
   return {
@@ -157,6 +158,14 @@ export function termsTypedData(game, terms) {
     message: { game: game.tag, game_id: hex(terms.game_id), context: hex(contextHash(game, terms)) },
   };
 }
+
+/**
+ * The SNIP-12 message hash the wallet at `account` signs over
+ * `termsTypedData(game, terms)`: what the channel checks with the account's
+ * `is_valid_signature` before it opens the game (`terms_message` in Cairo).
+ */
+export const termsMessageHash = (game, terms, account) =>
+  BigInt(typedData.getMessageHash(termsTypedData(game, terms), hex(account)));
 
 /**
  * A timed game's clock (`Clock`): `{ seats, used, stamp, started }`, each

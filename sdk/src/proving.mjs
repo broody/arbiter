@@ -4,14 +4,17 @@
 // comes from the session. Import as `@referee/sdk/proving`.
 //
 // Adapter convention (referee_adapter::prover): `__execute__(channel, game_id,
-// epoch, start, witness, batch)`, with no witness argument for a game whose
-// witness is `()`, and `settle(channel, game_id, epoch, start_hash, end, acks)`.
-// The game's channel exposes `snapshot(game_id)` (referee_dojo::channel::snapshot).
-// A proof starts from the channel's anchor, or from its candidate to extend it.
+// epoch, start, witness, batch, opening)`, with no witness argument for a game
+// whose witness is `()`, and `settle(channel, game_id, epoch, start_hash, end,
+// acks)`. The game's channel exposes `snapshot(game_id)`
+// (referee_dojo::channel::snapshot). A proof starts from the channel's anchor,
+// or from its candidate to extend it. For a game no channel has opened yet,
+// `opening` carries its terms and the proof starts from their opening state;
+// its `settle` then goes in one transaction with `open_game`.
 import { RpcProvider } from 'starknet';
 import {
-  ZERO_SIGNATURE, batchOf, contextHash, decodeChannelGame, decodeSnapshot, encodeBatch, encodeEnvelope, encodeSignatures,
-  encodeWitness, felt, hex, proofMessageHash, proofPayload, replay, stateHash, tag,
+  ZERO_SIGNATURE, batchOf, contextHash, decodeChannelGame, decodeSnapshot, encodeBatch, encodeEnvelope, encodeSignature,
+  encodeSignatures, encodeTerms, encodeWitness, felt, hex, open, proofMessageHash, proofPayload, replay, stateHash, tag,
 } from './index.mjs';
 
 const check = (condition, message) => { if (!condition) throw Error(message); };
@@ -49,6 +52,16 @@ export async function rpc(url, method, params = {}, timeout = 30000) {
 }
 
 /**
+ * Whether `error`, from a call into a contract, is the revert `reason`: as the
+ * message's text or its felt in hex, whichever the RPC reports.
+ */
+export function reverted(error, reason) {
+  const text = `${error?.message ?? ''} ${JSON.stringify(error?.baseError ?? error?.rpcError ?? {})}`;
+  const encoded = [...reason].map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
+  return text.includes(reason) || text.toLowerCase().includes(encoded);
+}
+
+/**
  * The channel's `snapshot(game_id)`: terms, epoch, and the anchor's and the
  * candidate's hash and block, checked to identify this game on this chain.
  */
@@ -59,21 +72,34 @@ export async function getSnapshot(provider, game, channel, gameId, block = 'late
   return result;
 }
 
-/** The adapter's `__execute__` calldata: replay `session` from its start. */
-export function provingCalldata(session, epoch) {
+/**
+ * `snapshot(game_id)` as `getSnapshot` reads it, or null for a game no channel
+ * has opened (the channel reverts 'Unknown channel').
+ */
+export async function snapshotIfOpen(provider, game, channel, gameId, block = 'latest') {
+  try { return await getSnapshot(provider, game, channel, gameId, block); }
+  catch (e) { if (reverted(e, 'Unknown channel')) return null; throw e; }
+}
+
+/**
+ * The adapter's `__execute__` calldata: replay `session` from its start. With
+ * `opening`, the game isn't open yet, and its terms come along.
+ */
+export function provingCalldata(session, epoch, { opening = false } = {}) {
   const { game, terms } = session;
   return [felt(terms.channel), felt(terms.game_id), BigInt(epoch), ...encodeEnvelope(game, session.start),
-    ...encodeWitness(game, session.startWitness), ...encodeBatch(game, batchOf(session.steps))];
+    ...encodeWitness(game, session.startWitness), ...encodeBatch(game, batchOf(session.steps)),
+    ...(opening ? [0n, ...encodeTerms(game, terms)] : [1n])];
 }
 
 /**
  * The virtual INVOKE_V3 the adapter executes to emit the proved transition. It
  * is never broadcast: a prover runs it against a base block and proves it.
  */
-export function provingTransaction({ session, epoch, nonce, l2GasLimit = 10_000_000_000 }) {
+export function provingTransaction({ session, epoch, nonce, l2GasLimit = 10_000_000_000, opening = false }) {
   const zero = { max_amount: '0x1', max_price_per_unit: '0x0' };
   return { type: 'INVOKE', version: '0x3', sender_address: hex(session.terms.prover),
-    calldata: provingCalldata(session, epoch).map(hex), signature: [], nonce: hex(nonce),
+    calldata: provingCalldata(session, epoch, { opening }).map(hex), signature: [], nonce: hex(nonce),
     resource_bounds: { l1_gas: zero, l1_data_gas: zero, l2_gas: { max_amount: hex(l2GasLimit), max_price_per_unit: '0x0' } },
     tip: '0x0', paymaster_data: [], account_deployment_data: [], nonce_data_availability_mode: 'L1', fee_data_availability_mode: 'L1' };
 }
@@ -89,6 +115,16 @@ export const historyCall = (session, epoch, { acks = NO_ACKS, entrypoint = 'subm
   return contractCall(terms.channel, entrypoint, [terms.game_id, epoch, ...encodeEnvelope(game, session.start),
     ...encodeWitness(game, session.startWitness), ...encodeBatch(game, batchOf(session.steps)), ...encodeSignatures(acks)]);
 };
+
+/**
+ * The channel's `open_game` call: open the game on its `terms` and every
+ * seat's wallet signature over them (`termsTypedData`), each the array its
+ * wallet returns. `refereeSignature` is the referee's over its randomness tip
+ * (`tipHash`) when the terms take the referee's randomness.
+ */
+export const openGameCall = (game, terms, signatures, { refereeSignature = ZERO_SIGNATURE, entrypoint = 'open_game' } = {}) =>
+  contractCall(terms.channel, entrypoint, [...encodeTerms(game, terms), BigInt(signatures.length),
+    ...signatures.flatMap(signature => [BigInt(signature.length), ...signature.map(felt)]), ...encodeSignature(refereeSignature)]);
 
 /** A game's `get_channel(game_id)`: referee_dojo's `ChannelGame` model, decoded. */
 export async function getChannel(provider, game, channel, gameId, { block = 'latest', entrypoint = 'get_channel' } = {}) {
@@ -127,10 +163,12 @@ export function validateNativeProof(game, response, { classHash, terms, epoch, s
  * Prove `session` (from the channel's current anchor, or its candidate, to its
  * latest step) with a `starknet_proveTransaction` prover, and check the
  * result. Waits up to `waitMs` for that state to be NATIVE_CONFIRMATIONS
- * blocks deep.
+ * blocks deep. A game no channel has opened yet is proved from its terms'
+ * opening state at epoch 0, and `opening` is true in the result: send its
+ * `settle` in one transaction after `openGameCall`.
  *
- * Returns { response, options, block, end, endHash, wall_seconds, call(acks) },
- * where `call(acks)` is the `settle` call to send with `options`.
+ * Returns { response, options, block, end, endHash, wall_seconds, opening,
+ * call(acks) }, where `call(acks)` is the `settle` call to send with `options`.
  */
 export async function proveSession({ rpcUrl, provider = new RpcProvider({ nodeUrl: rpcUrl }), proverUrl, session, epoch,
   blockNumber, expectedClassHash, l2GasLimit = 10_000_000_000, waitMs = 120_000 }) {
@@ -139,8 +177,14 @@ export async function proveSession({ rpcUrl, provider = new RpcProvider({ nodeUr
   const startHash = stateHash(game, session.start);
   // The block that set the state the session starts from: the anchor's, or the candidate's.
   const baseOf = snap => (snap.anchor_hash === startHash ? snap.anchor_block : snap.candidate_hash === startHash ? snap.candidate_block : null);
-  const latest = await getSnapshot(provider, game, terms.channel, terms.game_id);
-  const since = baseOf(latest);
+  const latest = await snapshotIfOpen(provider, game, terms.channel, terms.game_id);
+  const opening = latest === null;
+  if (opening) {
+    check(epoch === 0, 'Stale proving epoch');
+    check(startHash === stateHash(game, open(game, terms)), 'Session does not start at the opening');
+  }
+  // An unopened game's opening state is fixed by its terms: any deep enough block will do.
+  const since = opening ? 0 : baseOf(latest);
   check(since !== null, 'Session does not start at the chain anchor or candidate');
   let eligible = null;
   for (const deadline = Date.now() + waitMs; ;) {
@@ -152,25 +196,27 @@ export async function proveSession({ rpcUrl, provider = new RpcProvider({ nodeUr
   check(blockNumber === undefined || (Number.isSafeInteger(blockNumber) && blockNumber >= since && blockNumber <= eligible),
     `Proof base must follow the anchor and be at least ${NATIVE_CONFIRMATIONS} blocks deep`);
   const block = await provider.getBlockWithTxHashes(blockNumber ?? eligible);
-  const current = await getSnapshot(provider, game, terms.channel, terms.game_id, block.block_hash);
-  check(current.epoch === epoch, 'Stale proving epoch');
-  const base = baseOf(current);
-  check(contextHash(game, current.terms) === contextHash(game, terms) && base !== null,
-    'Session does not start at the chain anchor or candidate');
-  check(block.block_number >= base, 'Proof base predates anchor');
+  if (!opening) {
+    const current = await getSnapshot(provider, game, terms.channel, terms.game_id, block.block_hash);
+    check(current.epoch === epoch, 'Stale proving epoch');
+    const base = baseOf(current);
+    check(contextHash(game, current.terms) === contextHash(game, terms) && base !== null,
+      'Session does not start at the chain anchor or candidate');
+    check(block.block_number >= base, 'Proof base predates anchor');
+  }
   const classHash = await provider.getClassHashAt(hex(terms.prover), block.block_hash);
   check(BigInt(classHash) === BigInt(expectedClassHash), 'Unexpected prover class');
   // Replay with every signature verified, as the adapter's final-signature replay would accept it.
   const end = replay(game, terms, session.start, session.startWitness, session.steps).env;
   const endHash = stateHash(game, end);
   check(endHash === session.stateHash(), 'Session output mismatch');
-  const transaction = provingTransaction({ session, epoch, l2GasLimit,
+  const transaction = provingTransaction({ session, epoch, l2GasLimit, opening,
     nonce: await provider.getNonceForAddress(hex(terms.prover), block.block_hash) });
   const started = Date.now();
   const response = await rpc(proverUrl, 'starknet_proveTransaction', { block_id: { block_hash: block.block_hash }, transaction }, 600000);
   const wall_seconds = (Date.now() - started) / 1000;
   const osProgram = BigInt((await provider.callContract(contractCall(terms.prover, 'os_program'), block.block_hash))[0]);
   const options = validateNativeProof(game, response, { classHash, terms, epoch, startHash, endHash, block, osProgram });
-  return { response, options, block, end, endHash, wall_seconds,
+  return { response, options, block, end, endHash, wall_seconds, opening,
     call: (acks = NO_ACKS) => settlementCall(game, { prover: terms.prover, channel: terms.channel, gameId: terms.game_id, epoch, startHash, end, acks }) };
 }

@@ -71,6 +71,10 @@ trait IMockChannel<T> {
     fn configure(ref self: T, prover: ContractAddress);
     fn set_timed(ref self: T, timed: bool);
     fn set_candidate(ref self: T, hash: felt252, block: u64);
+    /// No game is open yet: `snapshot` reverts, as a channel's does.
+    fn set_unopened(ref self: T, unopened: bool);
+    /// The epoch, and the block the anchor (still the opening) was set in.
+    fn set_anchor(ref self: T, epoch: u32, block: u64);
     fn snapshot(self: @T, game_id: felt252) -> (Terms<Config>, u32, felt252, u64, felt252, u64);
     fn accept_verified(
         ref self: T,
@@ -85,7 +89,7 @@ trait IMockChannel<T> {
 
 /// Stands in for a referee_dojo game system: epoch 0, anchored at the opening
 /// state in block 10, and the same candidate unless `set_candidate` says
-/// otherwise.
+/// otherwise, or no game at all (`set_unopened`).
 #[starknet::contract]
 mod MockChannel {
     use referee::{Envelope, Signature, Terms, state_hash};
@@ -100,6 +104,9 @@ mod MockChannel {
         accepted: felt252,
         candidate: felt252,
         candidate_block: u64,
+        unopened: bool,
+        epoch: u32,
+        anchor_block: u64,
     }
 
     #[abi(embed_v0)]
@@ -117,17 +124,33 @@ mod MockChannel {
             self.candidate_block.write(block);
         }
 
+        fn set_unopened(ref self: ContractState, unopened: bool) {
+            self.unopened.write(unopened);
+        }
+
+        fn set_anchor(ref self: ContractState, epoch: u32, block: u64) {
+            self.epoch.write(epoch);
+            self.anchor_block.write(block);
+        }
+
         fn snapshot(
             self: @ContractState, game_id: felt252,
         ) -> (Terms<Config>, u32, felt252, u64, felt252, u64) {
+            assert(!self.unopened.read(), 'Unknown channel');
             let terms = super::terms_for(
                 get_contract_address(), game_id, self.prover.read(), self.timed.read(),
             );
             let anchor = state_hash::<CounterRules>(@super::opening(@terms));
-            if self.candidate.read() == 0 {
-                (terms, 0, anchor, 10, anchor, 10)
+            let (epoch, block) = (self.epoch.read(), self.anchor_block.read());
+            let block = if block == 0 {
+                10
             } else {
-                (terms, 0, anchor, 10, self.candidate.read(), self.candidate_block.read())
+                block
+            };
+            if self.candidate.read() == 0 {
+                (terms, epoch, anchor, block, anchor, block)
+            } else {
+                (terms, epoch, anchor, block, self.candidate.read(), self.candidate_block.read())
             }
         }
 
@@ -225,6 +248,19 @@ fn execute_virtual(
     start: Envelope<Counter>,
     batch: Batch<Action>,
 ) {
+    execute_opening(prover, channel, 0, start, batch, Option::None);
+}
+
+/// `execute_virtual` at `epoch`, for a game that isn't open yet when `opening`
+/// carries its terms.
+fn execute_opening(
+    prover: ContractAddress,
+    channel: ContractAddress,
+    epoch: u32,
+    start: Envelope<Counter>,
+    batch: Batch<Action>,
+    opening: Option<Terms<Config>>,
+) {
     start_cheat_caller_address(prover, 0.try_into().unwrap());
     start_cheat_transaction_version(prover, 3);
     let free = array![
@@ -234,7 +270,7 @@ fn execute_virtual(
     ];
     cheat_resource_bounds(prover, free.span(), CheatSpan::TargetCalls(1));
     IVirtualCounterDispatcher { contract_address: prover }
-        .__execute__(channel, GAME, 0, start, batch);
+        .__execute__(channel, GAME, epoch, start, batch, opening);
 }
 
 fn transition(
@@ -346,7 +382,7 @@ fn execute_is_only_for_virtual_invokes() {
     let terms = terms(mock.contract_address, GAME, prover.contract_address);
     let (batch, _) = signed_game(@terms);
     let virtual = IVirtualCounterDispatcher { contract_address: prover.contract_address };
-    virtual.__execute__(mock.contract_address, GAME, 0, opening(@terms), batch);
+    virtual.__execute__(mock.contract_address, GAME, 0, opening(@terms), batch, Option::None);
 }
 
 #[test]
@@ -603,4 +639,125 @@ fn a_proof_must_start_from_the_anchor_or_candidate() {
     let (prover, mock) = setup();
     let end = end_state(prover.contract_address, mock.contract_address);
     prover.settle(mock.contract_address, GAME, 0, 0xbad, end, no_acks());
+}
+
+// ---- A game no channel has opened yet ----
+
+#[test]
+fn an_unopened_game_is_proved_from_its_terms_and_opened_with_its_settlement() {
+    let (prover, mock) = setup();
+    let (channel, address) = (mock.contract_address, prover.contract_address);
+    let terms = terms(channel, GAME, address);
+    let (batch, end) = signed_game(@terms);
+    mock.set_unopened(true);
+    let mut spy = spy_messages_to_l1();
+    execute_opening(address, channel, 0, opening(@terms), batch, Option::Some(terms));
+    // The same transition as a game the channel had opened.
+    let expected = transition(address, channel, @end);
+    spy
+        .assert_sent(
+            @array![
+                (
+                    address,
+                    MessageToL1 { to_address: 0.try_into().unwrap(), payload: expected.clone() },
+                ),
+            ],
+        );
+    // The transaction opens the game in block 30, then settles it with a proof
+    // based in block 20, before the game existed.
+    mock.set_unopened(false);
+    mock.set_anchor(0, 30);
+    inject(address, facts(message_hash(address.into(), expected.span())));
+    prover.settle(channel, GAME, 0, start(prover, mock), end, no_acks());
+    assert(mock.accepted() == state_hash::<CounterRules>(@end), 'Wrong callback state');
+}
+
+#[test]
+#[should_panic(expected: ('Unknown channel', 'ENTRYPOINT_FAILED', 'ENTRYPOINT_FAILED'))]
+fn an_unopened_game_needs_its_terms_to_be_proved() {
+    let (prover, mock) = setup();
+    let terms = terms(mock.contract_address, GAME, prover.contract_address);
+    let (batch, _) = signed_game(@terms);
+    mock.set_unopened(true);
+    execute_virtual(prover.contract_address, mock.contract_address, opening(@terms), batch);
+}
+
+#[test]
+#[should_panic(expected: 'Wrong channel terms')]
+fn opening_terms_name_this_game() {
+    let (prover, mock) = setup();
+    let other = terms(mock.contract_address, GAME + 1, prover.contract_address);
+    let (batch, _) = signed_game(@other);
+    execute_opening(
+        prover.contract_address,
+        mock.contract_address,
+        0,
+        opening(@other),
+        batch,
+        Option::Some(other),
+    );
+}
+
+#[test]
+#[should_panic(expected: 'Wrong game prover')]
+fn opening_terms_name_this_prover() {
+    let (prover, mock) = setup();
+    let terms = terms(mock.contract_address, GAME, mock.contract_address);
+    let (batch, _) = signed_game(@terms);
+    execute_opening(
+        prover.contract_address,
+        mock.contract_address,
+        0,
+        opening(@terms),
+        batch,
+        Option::Some(terms),
+    );
+}
+
+#[test]
+#[should_panic(expected: 'Stale proof epoch')]
+fn opening_terms_prove_epoch_0_only() {
+    let (prover, mock) = setup();
+    let terms = terms(mock.contract_address, GAME, prover.contract_address);
+    let (batch, _) = signed_game(@terms);
+    execute_opening(
+        prover.contract_address,
+        mock.contract_address,
+        1,
+        opening(@terms),
+        batch,
+        Option::Some(terms),
+    );
+}
+
+#[test]
+#[should_panic(expected: 'Wrong proof anchor')]
+fn opening_terms_prove_from_their_opening_state() {
+    let (prover, mock) = setup();
+    let terms = terms(mock.contract_address, GAME, prover.contract_address);
+    let (middle, rest, _) = split_game(prover, mock, 15);
+    execute_opening(
+        prover.contract_address, mock.contract_address, 0, middle, rest, Option::Some(terms),
+    );
+}
+
+#[test]
+#[should_panic(expected: ('Stale proof epoch', 'ENTRYPOINT_FAILED'))]
+fn a_proof_from_the_opening_is_refused_once_the_game_moved() {
+    let (prover, mock) = setup();
+    let end = end_state(prover.contract_address, mock.contract_address);
+    mock.set_anchor(1, 25);
+    prover.settle(mock.contract_address, GAME, 0, start(prover, mock), end, no_acks());
+}
+
+#[test]
+#[should_panic(expected: ('Proof predates anchor', 'ENTRYPOINT_FAILED'))]
+fn after_epoch_0_a_proof_from_the_anchor_keeps_its_base_block() {
+    let (prover, mock) = setup();
+    let (channel, address) = (mock.contract_address, prover.contract_address);
+    let end = end_state(address, channel);
+    // The anchor was set in block 25, after the proof's base block 20.
+    mock.set_anchor(1, 25);
+    inject(address, facts(message_hash(address.into(), transition(address, channel, @end).span())));
+    prover.settle(channel, GAME, 1, start(prover, mock), end, no_acks());
 }

@@ -246,24 +246,6 @@ pub fn game_of(terms: @ChannelTerms, channel: Channel, referee_tip: felt252) -> 
     )
 }
 
-pub fn terms_of(game: @ChannelGame) -> ChannelTerms {
-    ChannelTerms {
-        id: *game.id,
-        player_0: *game.player_0,
-        player_1: *game.player_1,
-        key_0: *game.key_0,
-        key_1: *game.key_1,
-        tip_0: *game.tip_0,
-        tip_1: *game.tip_1,
-        prover: *game.prover,
-        config: *game.config,
-        context: *game.context,
-        response_seconds: *game.response_seconds,
-        referee: *game.referee,
-        clock_settings: *game.clock_settings,
-    }
-}
-
 // Packing. `times`, low 128 bits: status (8), epoch (32), deadline (40),
 // anchor block (40); high: candidate block (40), acknowledged epoch (32) and
 // deadline (40), and whether the referee gives the randomness (1). `refs`, low: the anchor's

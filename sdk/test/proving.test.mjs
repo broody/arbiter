@@ -4,13 +4,14 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
+import { ec, typedData } from 'starknet';
 import {
   Session, ZERO_SIGNATURE, contextHash, encodeEnvelope, encodeSignatures, encodeSteps, encodeTerms, encodeWitness,
-  hex, play, proofMessageHash, proofPayload, publicKey, stateHash, tag,
+  hex, play, proofMessageHash, proofPayload, publicKey, sign, stateHash, tag, termsMessageHash, termsTypedData,
 } from '../src/index.mjs';
 import {
-  VIRTUAL_OS_PROGRAM, getChannel, getSnapshot, historyCall, nativeProofBlock, proveSession, provingCalldata,
-  provingTransaction, settlementCall, validateNativeProof,
+  VIRTUAL_OS_PROGRAM, getChannel, getSnapshot, historyCall, nativeProofBlock, openGameCall, proveSession, provingCalldata,
+  provingTransaction, reverted, settlementCall, snapshotIfOpen, validateNativeProof,
 } from '../src/proving.mjs';
 import { ADD, counter } from '../examples/counter.mjs';
 
@@ -58,12 +59,38 @@ test('proving calldata is the adapter __execute__ layout with final signatures o
   const signatures = [session.steps[2].signature, session.steps[1].signature];
   // An untimed batch: no stamps, the final signatures and a zero attestation.
   assert.deepEqual(calldata, [terms.channel, terms.game_id, 2n, ...envelope,
-    ...encodeSteps(counter, session.steps.map(s => s.step)), 0n, ...encodeSignatures(signatures), 0n, 0n]);
+    ...encodeSteps(counter, session.steps.map(s => s.step)), 0n, ...encodeSignatures(signatures), 0n, 0n, 1n]);
   const tx = provingTransaction({ session, epoch: 2, nonce: 5 });
   assert.deepEqual(tx.calldata, calldata.map(hex));
   assert.equal(BigInt(tx.sender_address), terms.prover);
   assert.equal(tx.nonce, '0x5');
   assert.equal(tx.resource_bounds.l2_gas.max_price_per_unit, '0x0');
+  // `None` for a game the channel holds; `Some(terms)` for one it hasn't opened.
+  assert.deepEqual(calldata.slice(-1), [1n]);
+  const opening = provingCalldata(session, 0, { opening: true });
+  assert.deepEqual(opening.slice(calldata.length - 1), [0n, ...encodeTerms(counter, terms)]);
+});
+
+test('open_game takes the terms, every wallet signature and the referee\'s', () => {
+  const signatures = [[1n, 2n], [3n, 4n, 5n]];
+  const call = openGameCall(counter, terms, signatures);
+  assert.equal(BigInt(call.contractAddress), terms.channel);
+  assert.equal(call.entrypoint, 'open_game');
+  assert.deepEqual(call.calldata.map(BigInt), [...encodeTerms(counter, terms), 2n, 2n, 1n, 2n, 3n, 3n, 4n, 5n, 0n, 0n]);
+  const tipped = openGameCall(counter, terms, signatures, { refereeSignature: { r: 7n, s: 8n }, entrypoint: 'open' });
+  assert.deepEqual([tipped.entrypoint, ...tipped.calldata.slice(-2).map(BigInt)], ['open', 7n, 8n]);
+});
+
+test('a wallet signs the terms message the channel checks', () => {
+  const key = '0x5eed1', account = 0xa11cen;
+  const hash = termsMessageHash(counter, terms, account);
+  assert.equal(hash, BigInt(typedData.getMessageHash(termsTypedData(counter, terms), hex(account))));
+  // Another account, game or set of terms signs another message.
+  assert.notEqual(termsMessageHash(counter, terms, 0xb0bn), hash);
+  assert.notEqual(termsMessageHash(counter, { ...terms, game_id: 8n }, account), hash);
+  assert.notEqual(termsMessageHash(counter, { ...terms, config: { target: 21 } }, account), hash);
+  const signature = ec.starkCurve.sign(hex(hash), key);
+  assert(ec.starkCurve.verify(signature, hex(hash), ec.starkCurve.getPublicKey(key)));
 });
 
 test('submit_history replays from the start against final signatures', async () => {
@@ -123,7 +150,7 @@ test('native responses must carry exactly the requested transition', () => {
 // A provider for one channel whose anchor is the session start at block 100,
 // and whose candidate is the anchor unless given.
 function fakeProvider({ head = 140, anchorBlock = 100, epoch = 0, chain = CHAIN, snapshotTerms = terms, anchorHash = startHash,
-  candidateHash = anchorHash, candidateBlock = anchorBlock } = {}) {
+  candidateHash = anchorHash, candidateBlock = anchorBlock, unopened = false } = {}) {
   const blocks = n => ({ block_number: n, block_hash: hex(0xb000n + BigInt(n)) });
   return {
     getChainId: async () => hex(chain),
@@ -134,6 +161,9 @@ function fakeProvider({ head = 140, anchorBlock = 100, epoch = 0, chain = CHAIN,
     callContract: async call => {
       if (call.entrypoint === 'os_program') return [hex(OS)];
       assert.equal(call.entrypoint, 'snapshot');
+      // How an RPC reports the channel's revert for a game nobody opened.
+      if (unopened) throw Object.assign(Error('RPC: starknet_call with params ... Contract error'),
+        { baseError: { code: 40, message: 'Contract error', data: { revert_error: 'Execution failed: 0x556e6b6e6f776e206368616e6e656c (\'Unknown channel\')' } } });
       return [...encodeTerms(counter, snapshotTerms), BigInt(epoch), anchorHash, BigInt(anchorBlock),
         candidateHash, BigInt(candidateBlock)].map(hex);
     },
@@ -203,6 +233,31 @@ test('proveSession refuses stale or foreign sessions before calling the prover',
     await assert.rejects(prove(fakeProvider(), { blockNumber: 99 }), /Proof base must follow the anchor/);
     await assert.rejects(prove(fakeProvider(), { expectedClassHash: undefined }), /allowlisted prover class/);
     assert.equal(requests.length, 0);
+  });
+});
+
+test('a game nobody opened yet is proved from its terms', async () => {
+  const base = { block_number: 130, block_hash: hex(0xb000n + 130n) };
+  assert.equal(await snapshotIfOpen(fakeProvider({ unopened: true }), counter, terms.channel, terms.game_id), null);
+  assert(reverted(Error('x'), 'x') && !reverted(Error('timeout'), 'Unknown channel'));
+  await withProver(() => ({ result: response({ block: base }) }), async (proverUrl, requests) => {
+    const provider = fakeProvider({ unopened: true });
+    const proved = await proveSession({ provider, proverUrl, session, epoch: 0, expectedClassHash: CLASS });
+    assert.equal(proved.opening, true);
+    assert.deepEqual(requests[0].params.transaction, provingTransaction({ session, epoch: 0, nonce: 3, opening: true }));
+    // Any block 10 deep: the terms fix the opening state.
+    assert.equal(proved.block.block_number, 130);
+    assert.deepEqual(proved.call(), settlementCall(counter, { prover: terms.prover, channel: terms.channel,
+      gameId: terms.game_id, epoch: 0, startHash, end: session.env }));
+    const prove = extra => proveSession({ provider, proverUrl, session, expectedClassHash: CLASS, waitMs: 0, epoch: 0, ...extra });
+    await assert.rejects(prove({ epoch: 1 }), /Stale proving epoch/);
+    const later = new Session(counter, terms, { start: session.env, witness: session.witness() });
+    await assert.rejects(prove({ session: later }), /does not start at the opening/);
+    assert.equal(requests.length, 1);
+    // An open game proves as before, with no terms in the calldata.
+    const open = await proveSession({ provider: fakeProvider(), proverUrl, session, epoch: 0, expectedClassHash: CLASS });
+    assert.equal(open.opening, false);
+    assert.deepEqual(requests[1].params.transaction.calldata.slice(-1), ['0x1']);
   });
 });
 
