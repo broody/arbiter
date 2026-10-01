@@ -12,7 +12,7 @@ It uses the counter's codec. Substitute yours.
 
 ```js
 import { ec, stark } from 'starknet'
-import { disputeAnswer, play, playRandom, publicKey, reveal, rngChain, rebase, termsTypedData } from '@arbiter/sdk'
+import { disputeAnswer, gameIdOf, play, playRandom, publicKey, reveal, rngChain, rebase, termsTypedData } from '@arbiter/sdk'
 import { SessionStore, indexedDbBackend } from '@arbiter/sdk/store'
 import { KeeperClient } from '@arbiter/sdk/keeper'
 import { contractCall, getChannel, historyCall, openGameCall, snapshotIfOpen } from '@arbiter/sdk/proving'
@@ -58,14 +58,15 @@ them. Nothing goes onchain yet: the signed terms are the game. It opens onchain
 only when it first needs the chain, in the same transaction: usually its
 settlement (step 4), or a dispute (step 5).
 
-The terms name the chain, your game system, a game id the clients choose, the
+The terms name the chain, your game system, the game's id (its seats', below), the
 prover adapter, the response window, the time control, each seat's wallet,
 session **public** key and chain tip, and the game's config. Exchange public
 keys and tips through your lobby or matchmaker, so that both seats build the
 same terms:
 
 ```js
-const gameId = randomKey()               // any felt no game used: clients choose it
+const players = [aliceAddress, bobAddress], keys = [publicKey(privateKey), bobKey]
+const gameId = gameIdOf(players, keys)   // the seats' wallets and session keys: the only id open_game takes
 const terms = {
   chain_id: CHAIN_ID,                    // the network's chain id, as a felt
   channel: CHANNEL,                      // your game system
@@ -73,8 +74,8 @@ const terms = {
   prover: ADAPTER_ADDRESS,               // the game's proof adapter
   response_seconds: 3600,                // dispute and forced-play window: 300 s to 7 days
   clock: null,                           // untimed; see Add a clock
-  players: [aliceAddress, bobAddress],   // wallets, in seat order: this device plays Alice
-  keys: [publicKey(privateKey), bobKey], // each seat's session public key
+  players,                               // wallets, in seat order: this device plays Alice
+  keys,                                  // each seat's session public key
   rng_tips: [tip, bobTip],               // each seat's chain tip
   config: { target: 20 },                // the counter's config
 }
@@ -96,7 +97,9 @@ const { seat } = await store.keyFor(terms)   // which seat this device plays
 
 Keep the terms and both signatures with the session: whoever holds them can
 open the game onchain (`openGameCall`). The keeper keeps them too, and opens
-the game when it settles it. A game id opens once, so pick a random one.
+the game when it settles it. A game id opens once, and it is the seats': only
+terms both wallets signed can take it. Use fresh session keys for every game,
+so two games between the same wallets get different ids.
 
 A timed game names its referee in `clock`, and one that takes its randomness
 from its referee carries the referee's signed tip, which you fetch before

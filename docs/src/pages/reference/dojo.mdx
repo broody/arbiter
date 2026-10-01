@@ -19,7 +19,7 @@ One arbiter channel: its terms and its state together. Derives `Copy`, `Drop`, `
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `id` | `felt252` | Game id, chosen by the clients and named in the terms. |
+| `id` | `felt252` | Game id, named in the terms: the seats' (`game_id_of(players, keys)`). |
 | `player_0`, `player_1` | `ContractAddress` | Each seat's wallet. |
 | `key_0`, `key_1` | `felt252` | Session public keys. |
 | `tip_0`, `tip_1` | `felt252` | Committed hash-chain tips. |
@@ -193,7 +193,7 @@ fn open_game<impl R: GameRules>(
 `open_game` opens a game on its seats' signed terms. Anyone may send it, usually in one transaction with the first call that needs the chain: a settlement (`submit_history`, or the adapter's `settle`), or a player's dispute, resignation or timeout claim. `signatures` holds each seat's wallet signature over the terms, in seat order, each the felt array its wallet returned. `referee_signature` is the referee's over its randomness tip when the terms take the referee's randomness, otherwise zero. It checks, in order (panic):
 
 1. `terms.chain_id` is the transaction's chain id (`'Wrong chain'`), and `terms.channel` is the game system's own address (`'Wrong channel'`).
-2. `terms.game_id` is non-zero (`'Invalid game id'`) and no channel holds it yet (`'Game already open'`). Clients choose the id.
+2. No channel holds `terms.game_id` yet (`'Game already open'`), and it is the seats': `game_id_of(players, keys)`, a Poseidon hash of `'ARBITER_GAME_ID_V1'`, the wallets and the session keys (`'Invalid game id'`), so only terms both wallets signed can take it.
 3. `open(terms)` builds the opening state (any [`open` panic](/reference/cairo#envelope-and-seats): `'Wrong tip count'`, `'Invalid tip'` for a zero tip, `'Invalid referee'` and any panic of the game's `ClockRules::check`, such as `StandardTime`'s `'Invalid time control'`, and any `R::init` panic for an invalid config).
 4. Two players and two keys (`'Wrong seat count'`), and two signatures (`'Wrong signature count'`).
 5. The players are non-zero and differ (`'Invalid players'`).

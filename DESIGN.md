@@ -610,7 +610,8 @@ randomness instead. It helps 2-seat games, so it came before more than 2 seats
 - **The tip is the referee's.** A seat that made the tip up would know every
   roll, so the referee signs it for the one game (`tip_hash`:
   `'ARBITER_TIP_V1'`, chain id, channel, game id, tip) and the channel checks
-  that signature. Clients choose the game id, so the referee signs the tip
+  that signature. The game id is known before anyone signs (it is the seats'
+  wallets' and session keys', `game_id_of`), so the referee signs the tip
   before anyone signs the terms (a keeper serves it, `POST …/tip`). The tip is
   in the terms every wallet signs, and each seat checks the signature first.
   `open_game` takes the signature (`referee_signature`) and checks it again;
@@ -703,9 +704,14 @@ channel, so they can never settle.
 referee_signature)`; `open(terms)` stays the core's opening state). It checks:
 - the terms' chain id is the transaction's (`'Wrong chain'`) and their channel
   is this contract (`'Wrong channel'`);
-- the game id is nonzero (`'Invalid game id'`) and unused (`'Game already
-  open'`). Clients choose it, since the terms must name it before anyone
-  signs: a random felt, as unanchored games do;
+- the game id is unused (`'Game already open'`) and is its seats': `game_id_of(players,
+  keys)`, a Poseidon hash of `'ARBITER_GAME_ID_V1'`, the wallets and the
+  session keys (`'Invalid game id'`; the SDK's `gameIdOf`). Whoever opens an
+  id first holds it, so a free choice would let anyone who knew a game's id,
+  a losing seat above all, open another game under it with their own wallets
+  and keep the real one from ever opening or settling. Only terms both
+  wallets signed can open a game under their id. Two games between the same
+  wallets need fresh session keys, as every game should;
 - the opening state (`open(terms)`, which checks the tips, the time control
   and the config), 2 seats and 2 signatures;
 - the wallets and keys as `join` did: nonzero, distinct wallets (`'Invalid
@@ -726,7 +732,7 @@ as anchor and candidate (`channel::open`), and `ChannelUpdated` of kind OPENED
 (0) is emitted.
 
 `open_game` replaced `create`, `join` and `cancel`, and WAITING and CANCELLED
-went with them (decided), so game ids are only ever the ones clients choose.
+went with them (decided), so game ids are only ever their seats' (`game_id_of`).
 Status 0 is now UNOPENED, a game id nobody opened. The event kinds JOINED (1)
 and CANCELLED (2) are retired, and OPENED took CREATED's 0.
 

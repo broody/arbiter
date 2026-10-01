@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { dirname } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { Session, hex, termsTypedData } from '../../sdk/src/index.mjs';
+import { Session, gameIdOf, hex, publicKey, termsTypedData } from '../../sdk/src/index.mjs';
 import { KeeperClient } from '../../sdk/src/keeper.mjs';
 import { SessionStore, memoryBackend, parse, stringify } from '../../sdk/src/store.mjs';
 import { loadConfig, startKeeper } from '../server.mjs';
@@ -15,6 +15,14 @@ import {
 const base = dirname(fileURLToPath(import.meta.url));
 const GAME = { channel: hex(CHANNEL), module: '../../sdk/examples/counter.mjs', export: 'counter' };
 const ids = { channel: CHANNEL, game_id: 7n };
+/**
+ * Terms `t` under their seats' game id, the only one a channel opens them
+ * under; with `salt`, another game between the same wallets (fresh session keys).
+ */
+const own = (t, salt = 0n) => {
+  const sessionKeys = salt ? [publicKey(0x100n + salt), publicKey(0x200n + salt)] : t.keys;
+  return { ...t, keys: sessionKeys, game_id: gameIdOf(t.players, sessionKeys) };
+};
 
 async function keeper(overrides = {}, chain = fakeChain(), env = {}) {
   chain.channels.set(7n, channelOf(played([])));
@@ -100,7 +108,7 @@ test('an unanchored game needs each seat\'s wallet to sign its terms', async () 
   const CASUAL = { ...GAME, channel: '0x0', anchored: false };
   const k = await keeper({ games: [GAME, CASUAL] });
   try {
-    const casual = { ...terms(9n), channel: 0n, players: wallets.map(walletAddress) };
+    const casual = own({ ...terms(), channel: 0n, players: wallets.map(walletAddress) });
     const session = new Session(counter, casual);
     session.move(add(3), keys[0]);
     const message = termsTypedData(counter, casual);
@@ -108,12 +116,12 @@ test('an unanchored game needs each seat\'s wallet to sign its terms', async () 
     await assert.rejects(k.client.register(session), /each seat's wallet signature over its terms/);
     await assert.rejects(k.client.register(session, { authorizations: [alice, alice] }), /Seat 1's wallet did not sign/);
     // Signatures over other terms do not carry over.
-    const other = termsTypedData(counter, { ...casual, game_id: 10n });
+    const other = termsTypedData(counter, own(casual, 1n));
     await assert.rejects(k.client.register(session, { authorizations: [walletSign(wallets[0], other), bob] }),
       /Seat 0's wallet did not sign/);
-    // No channel onchain is read: the fake chain knows none for game 9.
+    // No channel onchain is read: the fake chain knows none for this game.
     assert.equal((await k.client.register(session, { authorizations: [alice, bob] })).created, true);
-    const kept = parse(await (await fetch(`${k.url}/games/0x0/${hex(9n)}`)).text());
+    const kept = parse(await (await fetch(`${k.url}/games/0x0/${hex(casual.game_id)}`)).text());
     assert.deepEqual(kept.authorizations, [alice, bob]);
     assert.equal(kept.seq, 1);
     const info = await (await fetch(`${k.url}/info`)).json();
@@ -124,11 +132,15 @@ test('an unanchored game needs each seat\'s wallet to sign its terms', async () 
 test('a game no channel has opened yet is held on its wallets\' signatures', async () => {
   const k = await keeper({ max_open_per_player: 1 });
   try {
-    // Game 9 is on the real channel, but the fake chain holds no channel for it.
-    const unopened = { ...terms(9n), players: wallets.map(walletAddress) };
+    // The game is on the real channel, but the fake chain holds no channel for it.
+    const unopened = own({ ...terms(), players: wallets.map(walletAddress) });
     const session = new Session(counter, unopened);
     session.move(add(3), keys[0]);
     const [alice, bob] = wallets.map(key => walletSign(key, termsTypedData(counter, unopened)));
+    // An id that isn't its seats' could never open, even signed by both.
+    const free = { ...unopened, game_id: 9n };
+    await assert.rejects(k.client.register(new Session(counter, free),
+      { authorizations: wallets.map(key => walletSign(key, termsTypedData(counter, free))) }), /game id is not its seats/);
     await assert.rejects(k.client.register(session), /each seat's wallet signature over its terms/);
     await assert.rejects(k.client.register(session, { authorizations: [alice, alice] }), /Seat 1's wallet did not sign/);
     // It must start where its terms open: there is no anchor to start from.
@@ -136,11 +148,11 @@ test('a game no channel has opened yet is held on its wallets\' signatures', asy
     await assert.rejects(k.client.register(later, { authorizations: [alice, bob] }), /starts at its opening/);
     // What the game's own opening needs comes along, for the game module's openCall.
     assert.equal((await k.client.register(session, { authorizations: [alice, bob], extras: { ticket: '0x9' } })).created, true);
-    const kept = parse(await (await fetch(`${k.url}/games/${hex(CHANNEL)}/${hex(9n)}`)).text());
+    const kept = parse(await (await fetch(`${k.url}/games/${hex(CHANNEL)}/${hex(unopened.game_id)}`)).text());
     assert.deepEqual(kept.authorizations, [alice, bob]);
-    assert.deepEqual(await k.archive.extras(k.archive.ids(CHANNEL, 9n)), { ticket: '0x9' });
+    assert.deepEqual(await k.archive.extras(k.archive.ids(CHANNEL, unopened.game_id)), { ticket: '0x9' });
     // Until it opens, it counts against its wallets' caps.
-    const another = { ...unopened, game_id: 10n };
+    const another = own(unopened, 1n);
     const signed = wallets.map(key => walletSign(key, termsTypedData(counter, another)));
     await assert.rejects(k.client.register(new Session(counter, another), { authorizations: signed }),
       e => e.status === 429 && /already plays 1 open games/.test(e.message));
@@ -183,13 +195,13 @@ test('a wallet that fills its unanchored games can\'t keep the referee off an an
     { REFEREE: hex(REFEREE_KEY) });
   try {
     const players = wallets.map(walletAddress);
-    const casual = id => {
-      const casualTerms = { ...terms(id), channel: 0n, players };
+    const casual = salt => {
+      const casualTerms = own({ ...terms(), channel: 0n, players }, salt);
       const message = termsTypedData(counter, casualTerms);
       return [new Session(counter, casualTerms), { authorizations: wallets.map(key => walletSign(key, message)) }];
     };
-    for (const id of [11n, 12n]) assert.equal((await k.client.register(...casual(id))).created, true);
-    await assert.rejects(k.client.register(...casual(13n)), e => e.status === 429 && /already plays 2 open games/.test(e.message));
+    for (const salt of [1n, 2n]) assert.equal((await k.client.register(...casual(salt))).created, true);
+    await assert.rejects(k.client.register(...casual(3n)), e => e.status === 429 && /already plays 2 open games/.test(e.message));
     // The anchored, joined game that names the keeper's referee key is admitted, and refereed.
     const rated = new Session(counter, { ...timed(7n), players });
     chain.channels.set(7n, channelOf(rated));

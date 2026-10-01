@@ -89,6 +89,14 @@ export function encodeTerms(game, t) {
 export const contextHash = (game, terms) =>
   poseidon([tag(game.tag), tag('ARBITER_CHANNEL_V1'), PROTOCOL_VERSION, BigInt(game.rulesVersion), ...encodeTerms(game, terms)]);
 
+/**
+ * A game's id: a hash of its seats' wallets and session keys (`game_id_of` in
+ * Cairo), which the channel requires when it opens the game. Only terms both
+ * wallets signed can then open it, so nobody else can take its id first. Two
+ * games between the same wallets need fresh session keys, as every game should.
+ */
+export const gameIdOf = (players, keys) => poseidon([tag('ARBITER_GAME_ID_V1'), ...players.map(felt), ...keys.map(felt)]);
+
 /** Cairo `Move<A>` Serde: variant index, then payload. */
 export function encodeStep(game, step) {
   switch (step.kind) {

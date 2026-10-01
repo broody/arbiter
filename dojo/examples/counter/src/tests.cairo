@@ -2,9 +2,9 @@ use arbiter::channel::{ACTIVE, DISPUTE, FORCED, PAUSE_SECONDS, SETTLED};
 use arbiter::clocks::{Standard, encode};
 use arbiter::{
     Batch, Envelope, Move, REASON_ABANDON, REASON_TIMEOUT, REASON_VOID, REFEREE, Signature, Terms,
-    TimeControl, action_hash, actor, apply_steps, checkpoint_hash, context_hash, force, live_hash,
-    open, referee_resume_hash, reopen_hash, roll, stamp_hash, state_hash, terms_message, tip_hash,
-    void_hash,
+    TimeControl, action_hash, actor, apply_steps, checkpoint_hash, context_hash, force, game_id_of,
+    live_hash, open, referee_resume_hash, reopen_hash, roll, stamp_hash, state_hash, terms_message,
+    tip_hash, void_hash,
 };
 use arbiter_counter::{ADD, Action, Config, Counter, CounterRules, GAMBLE};
 use arbiter_dojo::channel::read;
@@ -36,8 +36,6 @@ const SEED_REF: felt252 = 0x5eed7e;
 const RNG_LEN: u32 = 16;
 const WINDOW: u32 = 3600;
 const TARGET: u8 = 20;
-/// Clients choose a game's id before its seats sign the terms.
-const GAME_ID: felt252 = 0x6a3e;
 /// The wallets' own keys, apart from the per-game session keys.
 const WALLET_A: felt252 = 0xa11ce5;
 const WALLET_B: felt252 = 0xb0b5;
@@ -142,12 +140,20 @@ fn no_tip() -> Signature {
     Signature { r: 0, s: 0 }
 }
 
+/// The id of Alice's and Bob's game: their wallets' and session keys'.
+fn GAME_ID() -> felt252 {
+    game_id_of(
+        array![ALICE().into(), BOB().into()].span(),
+        array![public_key(PK_A), public_key(PK_B)].span(),
+    )
+}
+
 /// Alice (seat 0) and Bob (seat 1) under `clock`, on `game`'s channel.
 fn terms_for(game: ICounterChannelDispatcher, clock: Option<TimeControl>) -> Terms<Config> {
     Terms {
         chain_id: get_tx_info().chain_id,
         channel: game.contract_address.into(),
-        game_id: GAME_ID,
+        game_id: GAME_ID(),
         prover: game.contract_address.into(),
         response_seconds: WINDOW,
         clock,
@@ -189,7 +195,7 @@ fn tip_signature(terms: @Terms<Config>, id: felt252, key: felt252) -> Signature 
 /// Open `terms` with both wallets' signatures, sent by Carol: anyone may.
 fn open_as_carol(game: ICounterChannelDispatcher, terms: Terms<Config>) {
     caller(CAROL());
-    game.open_game(terms, signed_by_both(@terms), tip_signature(@terms, GAME_ID, PK_REF));
+    game.open_game(terms, signed_by_both(@terms), tip_signature(@terms, GAME_ID(), PK_REF));
 }
 
 /// Standard settings that allow `turn_ms` per turn, refereed by `referee`.
@@ -203,7 +209,7 @@ fn started_with(clock: Option<TimeControl>) -> (ICounterChannelDispatcher, World
     game.allow_prover(channel::TEST_CLASS_HASH.try_into().unwrap(), true);
     open_as_carol(game, terms_for(game, clock));
     caller(BOB());
-    (game, world, GAME_ID)
+    (game, world, GAME_ID())
 }
 
 /// A world that trusts the channel system as its prover, before any game.
@@ -316,9 +322,9 @@ fn a_game_opens_on_its_seats_signed_terms_alone() {
     // Either seat, or anyone, can send it: here Alice, who signed too.
     caller(ALICE());
     game.open_game(terms, signed_by_both(@terms), no_tip());
-    let channel = game.get_channel(GAME_ID);
+    let channel = game.get_channel(GAME_ID());
     assert_eq!((channel.status, channel.epoch), (ACTIVE, 0));
-    assert_eq!(game.terms(GAME_ID), terms);
+    assert_eq!(game.terms(GAME_ID()), terms);
 }
 
 #[test]
@@ -367,10 +373,22 @@ fn terms_for_another_chain_do_not_open_here() {
 
 #[test]
 #[should_panic(expected: ('Invalid game id', 'ENTRYPOINT_FAILED'))]
-fn a_game_id_is_never_zero() {
+fn a_game_id_is_its_seats() {
     let game = trusting();
-    let terms = Terms { game_id: 0, ..terms_for(game, Option::None) };
+    let terms = Terms { game_id: GAME_ID() + 1, ..terms_for(game, Option::None) };
     game.open_game(terms, signed_by_both(@terms), no_tip());
+}
+
+#[test]
+#[should_panic(expected: ('Invalid game id', 'ENTRYPOINT_FAILED'))]
+fn other_wallets_cannot_take_a_games_id() {
+    // Bob and Carol, both willing, still can't open a game under the id of
+    // Alice's and Bob's, even with Bob's session key: the id is Alice's too.
+    let game = trusting();
+    let players = array![CAROL().into(), BOB().into()].span();
+    let terms = Terms { players, ..terms_for(game, Option::None) };
+    let bob = wallet_signature(@terms, 1, WALLET_B);
+    game.open_game(terms, array![bob, bob].span(), no_tip());
 }
 
 #[test]
@@ -378,7 +396,8 @@ fn a_game_id_is_never_zero() {
 fn seats_do_not_share_a_session_key() {
     let game = trusting();
     let keys = array![public_key(PK_A), public_key(PK_A)].span();
-    let terms = Terms { keys, ..terms_for(game, Option::None) };
+    let base = terms_for(game, Option::None);
+    let terms = Terms { keys, game_id: game_id_of(base.players, keys), ..base };
     game.open_game(terms, signed_by_both(@terms), no_tip());
 }
 
@@ -396,7 +415,8 @@ fn seats_do_not_share_a_randomness_tip() {
 fn one_wallet_takes_one_seat() {
     let game = trusting();
     let players = array![ALICE().into(), ALICE().into()].span();
-    let terms = Terms { players, ..terms_for(game, Option::None) };
+    let base = terms_for(game, Option::None);
+    let terms = Terms { players, game_id: game_id_of(players, base.keys), ..base };
     let signatures = array![
         wallet_signature(@terms, 0, WALLET_A), wallet_signature(@terms, 1, WALLET_A),
     ];
@@ -407,7 +427,7 @@ fn one_wallet_takes_one_seat() {
 #[should_panic(expected: ('Unknown channel', 'ENTRYPOINT_FAILED'))]
 fn an_unopened_game_has_no_channel() {
     let game = trusting();
-    game.get_channel(GAME_ID);
+    game.get_channel(GAME_ID());
 }
 
 #[test]
@@ -912,7 +932,7 @@ fn a_tip_the_referee_did_not_sign_is_refused() {
     let game = trusting();
     let terms = terms_for(game, rolled_blitz());
     caller(BOB());
-    game.open_game(terms, signed_by_both(@terms), tip_signature(@terms, GAME_ID, PK_B));
+    game.open_game(terms, signed_by_both(@terms), tip_signature(@terms, GAME_ID(), PK_B));
 }
 
 #[test]
@@ -920,7 +940,7 @@ fn a_tip_the_referee_did_not_sign_is_refused() {
 fn a_tip_signed_for_another_game_is_refused() {
     let game = trusting();
     let terms = terms_for(game, rolled_blitz());
-    game.open_game(terms, signed_by_both(@terms), tip_signature(@terms, GAME_ID + 1, PK_REF));
+    game.open_game(terms, signed_by_both(@terms), tip_signature(@terms, GAME_ID() + 1, PK_REF));
 }
 
 #[test]
@@ -939,7 +959,7 @@ fn a_referee_signature_without_its_tip_is_refused() {
     let terms = terms_for(game, blitz());
     let tip = chain_value(SEED_REF, RNG_LEN);
     let signature = sign(
-        tip_hash::<CounterRules>(terms.chain_id, terms.channel, GAME_ID, tip), PK_REF,
+        tip_hash::<CounterRules>(terms.chain_id, terms.channel, GAME_ID(), tip), PK_REF,
     );
     game.open_game(terms, signed_by_both(@terms), signature);
 }

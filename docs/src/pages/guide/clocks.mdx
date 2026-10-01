@@ -202,7 +202,7 @@ referee must give randomness: a keeper does when it has a randomness secret.
 ### Fetch the referee's signed tip
 
 The terms carry the referee's tip, so fetch it before the seats sign them.
-Choose the game id first, then ask the keeper for its tip for this game, with
+Work out the game id first (`gameIdOf(players, keys)`), then ask the keeper for its tip for this game, with
 the game's config:
 
 ```js

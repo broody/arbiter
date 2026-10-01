@@ -16,7 +16,7 @@ import { randomBytes } from 'node:crypto';
 import { Account, RpcProvider, stark } from 'starknet';
 import { ADD, GAMBLE, counter } from '../sdk/examples/counter.mjs';
 import {
-  MOVE_REVEAL, REASON_TIMEOUT, REFEREE, Session, ZERO_SIGNATURE, applySteps, encodeEnvelope, encodeSteps, hex, play,
+  MOVE_REVEAL, REASON_TIMEOUT, REFEREE, Session, ZERO_SIGNATURE, applySteps, encodeEnvelope, encodeSteps, gameIdOf, hex, play,
   playRandom, publicKey, rngChain, termsTypedData,
 } from '../sdk/src/index.mjs';
 import { KeeperClient } from '../sdk/src/keeper.mjs';
@@ -30,7 +30,6 @@ if (!RPC || !CHANNEL || !WORLD) { console.error('usage: node keeper/katana.mjs R
 const provider = new RpcProvider({ nodeUrl: RPC });
 // Katana's funded dev accounts: the world owner, two players and the keeper.
 const [owner, alice, bob, keeperAccount] = await rpc(RPC, 'dev_predeployedAccounts', []);
-const sessionKeys = [0x1a2b3cn, 0x4d5e6fn];
 const REFEREE_KEY = 0x7e7e7en;
 const WINDOW = 300;
 
@@ -70,22 +69,25 @@ const CHAIN = BigInt(await provider.getChainId());
  * `open_game` call.
  */
 async function newGame(seed, clock = null) {
-  const id = BigInt(`0x${randomBytes(16).toString('hex')}`), ids = { channel: CHANNEL, game_id: id };
+  // Fresh session keys for each game; its id is its seats' wallets' and keys'.
+  const keys = [BigInt(`0x${randomBytes(16).toString('hex')}`), BigInt(`0x${randomBytes(16).toString('hex')}`)];
+  const players = [BigInt(alice.address), BigInt(bob.address)];
+  const id = gameIdOf(players, keys.map(publicKey)), ids = { channel: CHANNEL, game_id: id };
   const tip = clock?.rng_tip ? await client.tip(ids, { config: { target: 20 } }) : null;
   const terms = {
     chain_id: CHAIN, channel: BigInt(CHANNEL), game_id: id, prover: BigInt(owner.address), response_seconds: WINDOW,
     clock: clock && { ...clock, rng_tip: tip?.rng_tip ?? 0n },
-    players: [BigInt(alice.address), BigInt(bob.address)], keys: sessionKeys.map(publicKey),
+    players, keys: keys.map(publicKey),
     rng_tips: [rngChain(seed, 8)[8], rngChain(seed + 1n, 8)[8]], config: { target: 20 },
   };
   const authorizations = await Promise.all([alice, bob].map(async a =>
     stark.formatSignature(await wallet(a).signMessage(termsTypedData(counter, terms)))));
   const open = openGameCall(counter, terms, authorizations, { refereeSignature: tip?.signature ?? ZERO_SIGNATURE });
-  return { id, session: new Session(counter, terms), authorizations, open };
+  return { id, keys, session: new Session(counter, terms), authorizations, open };
 }
 const register = game => client.register(game.session, { authorizations: game.authorizations });
-const playTo = (session, amounts) => {
-  for (const amount of amounts) session.move(play({ kind: ADD, amount }), sessionKeys[session.due()]);
+const playTo = ({ session, keys }, amounts) => {
+  for (const amount of amounts) session.move(play({ kind: ADD, amount }), keys[session.due()]);
 };
 
 // Any deployed contract can stand in for the prover here: proofs are not used.
@@ -107,7 +109,7 @@ try {
   // A stale dispute: after four signed steps, Alice opens the game and
   // disputes it from the opening anchor, in one transaction.
   const a = await newGame(0x5eed0n);
-  playTo(a.session, [3, 2, 1, 2]);
+  playTo(a, [3, 2, 1, 2]);
   await register(a);
   await sendCalls(alice, [a.open, contractCall(CHANNEL, 'open_dispute', [a.id, 0])]);
   const answered = await until('the keeper to answer', channelWhere(a.id, c => c.status === DISPUTE && c.candidate.seq === 4));
@@ -120,7 +122,7 @@ try {
   // A finished game nobody opened: the keeper opens it in the transaction that
   // submits it and, after the window, resolves it.
   const b = await newGame(0x5eed8n);
-  playTo(b.session, [3, 3, 3, 3, 3, 3, 2]);
+  playTo(b, [3, 3, 3, 3, 3, 3, 2]);
   await register(b);
   const candidate = await until('the keeper to settle', channelWhere(b.id, c => c.status === DISPUTE && c.candidate.seq === 7));
   assert.equal(candidate.candidate.hash, b.session.stateHash());
@@ -135,7 +137,7 @@ try {
   const c = await newGame(0x5eedcn, { referee: publicKey(REFEREE_KEY),
     settings: { turn_ms: 2000, bank_ms: 0, increment_ms: 0, byoyomi: null } });
   await register(c);
-  c.session.sign(play({ kind: ADD, amount: 3 }), sessionKeys[0]);
+  c.session.sign(play({ kind: ADD, amount: 3 }), c.keys[0]);
   await client.submit(c.session);
   assert.ok(c.session.steps[0].stamp > 0);
   const flagged = await until('the keeper to flag and submit', channelWhere(c.id, x => x.status === DISPUTE && x.candidate.seq === 2));
@@ -156,7 +158,7 @@ try {
   assert.ok(d.session.terms.clock.rng_tip > 1n);
   await register(d);
   const move = async step => {
-    d.session.sign(step, sessionKeys[d.session.due()]);
+    d.session.sign(step, d.keys[d.session.due()]);
     await client.submit(d.session);
   };
   await move(play({ kind: ADD, amount: 3 }));

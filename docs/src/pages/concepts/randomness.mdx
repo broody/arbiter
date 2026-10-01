@@ -139,8 +139,8 @@ message = signing_hash(TAG, 'ARBITER_TIP_V1', chain_id, channel, game_id, tip)
 The message names the game by its ids, because the tip is part of the terms
 that the context hashes: the referee signs it before the seats sign the terms.
 
-1. The clients choose the game id, then get the referee's tip for that game,
-   with its signature. A keeper serves them (`KeeperClient.tip`).
+1. The clients work out the game id (their wallets' and session keys',
+   `gameIdOf`), then get the referee's tip for that game, with its signature. A keeper serves them (`KeeperClient.tip`).
 2. The terms carry the tip as `clock.rng_tip`. Each seat checks the signature
    (`tipHash` in the SDK) before its wallet signs the terms.
 3. `open_game` takes the signature and verifies it with the referee's key

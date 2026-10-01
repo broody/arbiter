@@ -78,6 +78,17 @@ pub fn referee_resume_hash<impl R: GameRules>(
     signing_hash(array![R::TAG, 'ARBITER_RESUME_V1', context, epoch.into(), state].span())
 }
 
+/// A game's id: a hash of its seats' wallets and session keys. Only terms both
+/// wallets signed can open a game, so nobody else can take its id first, as a
+/// losing seat could with its own wallets if ids were a free choice. Two games
+/// between the same wallets need fresh session keys, as every game should.
+pub fn game_id_of(players: Span<felt252>, keys: Span<felt252>) -> felt252 {
+    let mut fields = array!['ARBITER_GAME_ID_V1'];
+    fields.append_span(players);
+    fields.append_span(keys);
+    poseidon_hash_span(fields.span())
+}
+
 /// Message the referee signs to commit its hash-chain tip to one game, before
 /// the seats sign its terms: the binding checks it when the game opens. A tip
 /// a seat made up would let that seat know every roll.

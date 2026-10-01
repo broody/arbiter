@@ -4,8 +4,8 @@
 //! entrypoint, e.g. `arbiter_dojo::channel::open_game::<MyRules>(ref world, ...)`.
 use arbiter::{
     Batch, Channel, Envelope, GameRules, Move, Outcome, Signature, Terms, TimeControl, approve_all,
-    channel as machine, checkpoint_hash, context_hash, live_hash, open, referee_resume_hash,
-    reopen_hash, replay, state_ref, terms_message, tip_hash, verify, void_hash,
+    channel as machine, checkpoint_hash, context_hash, game_id_of, live_hash, open,
+    referee_resume_hash, reopen_hash, replay, state_ref, terms_message, tip_hash, verify, void_hash,
 };
 use core::ec::EcPointTrait;
 use core::num::traits::Zero;
@@ -44,13 +44,14 @@ pub fn open_game<
     let chain_id = get_tx_info().chain_id;
     assert(terms.chain_id == chain_id, 'Wrong chain');
     assert(terms.channel == get_contract_address().into(), 'Wrong channel');
-    assert(game_id != 0, 'Invalid game id');
     let stored: ContractAddress = world
         .read_member(Model::<ChannelTerms>::ptr_from_keys(game_id), selector!("player_0"));
     assert(stored.is_zero(), 'Game already open');
     // Checks the seat count, the tips, the time control and the config.
     let opening = open::<R>(@terms);
     assert(terms.players.len() == 2 && terms.keys.len() == 2, 'Wrong seat count');
+    // The id is the seats': no one but these two wallets can take it.
+    assert(game_id == game_id_of(terms.players, terms.keys), 'Invalid game id');
     assert(signatures.len() == 2, 'Wrong signature count');
     let player_0 = address(*terms.players.at(0));
     let player_1 = address(*terms.players.at(1));

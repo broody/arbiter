@@ -79,7 +79,8 @@ await keeper.submit(session, { store });                 // every pending step, 
   account contract (`is_valid_signature`, through `rpc_url`; without one it
   checks nothing) and keeps them with the game. The terms' context binds
   every term, session keys included, so the signatures bind each wallet to
-  its key, as `open_game` checks onchain. Clients pick random game ids. Such
+  its key, as `open_game` checks onchain. A game's id must be its seats'
+  (`gameIdOf(players, keys)`, as `open_game` requires; 403 otherwise). Such
   games cost their players nothing, so each wallet plays at most
   `max_open_per_player` of them here (429 beyond), and one closes after
   `unanchored_ttl_seconds` without a step. There are two kinds:

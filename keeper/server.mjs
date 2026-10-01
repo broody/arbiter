@@ -43,7 +43,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { felt, hex, open, stateHash, tag, termsTypedData } from '../sdk/src/index.mjs';
+import { felt, gameIdOf, hex, open, stateHash, tag, termsTypedData } from '../sdk/src/index.mjs';
 import { parse, stringify } from '../sdk/src/store.mjs';
 import { fileBackend } from '../sdk/src/store-file.mjs';
 import { Archive, KeeperError, fail } from './archive.mjs';
@@ -125,6 +125,8 @@ export async function loadConfig(raw, { base = process.cwd(), env = process.env 
 async function verifyAuthorizations(chain, game, terms, authorizations) {
   if (!Array.isArray(authorizations) || authorizations.length !== terms.players.length)
     fail(403, 'A game no channel holds needs each seat\'s wallet signature over its terms');
+  // The channel opens a game only under its seats' id: hold no game it never could.
+  if (felt(terms.game_id) !== gameIdOf(terms.players, terms.keys)) fail(403, 'The game id is not its seats\' (gameIdOf)');
   const typedData = termsTypedData(game, terms);
   for (const [seat, player] of terms.players.entries()) {
     let valid = false;

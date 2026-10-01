@@ -146,7 +146,7 @@ A game whose `Witness` isn't `()` adds a `witness` argument to `submit_history`,
 
 | Entrypoint | Caller | What it does |
 | --- | --- | --- |
-| `open_game` | Anyone, with every seat's wallet signature over the terms | Opens a game on its terms: chain, channel, a game id the clients chose, prover, response window, an optional `TimeControl`, and each seat's wallet, session key and chain tip, with the game's config. Takes the referee's signature over its tip when the terms take the referee's randomness (zero otherwise). Fixes the context, and commits the opening state as the anchor (`ACTIVE`, epoch 0). Send it in one transaction with the game's first call that needs the chain |
+| `open_game` | Anyone, with every seat's wallet signature over the terms | Opens a game on its terms: chain, channel, the seats' game id (`gameIdOf`), prover, response window, an optional `TimeControl`, and each seat's wallet, session key and chain tip, with the game's config. Takes the referee's signature over its tip when the terms take the referee's randomness (zero otherwise). Fixes the context, and commits the opening state as the anchor (`ACTIVE`, epoch 0). Send it in one transaction with the game's first call that needs the chain |
 | `submit_history` | Anyone | Replays a batch of signed steps from the anchor, or from the dispute candidate to extend it. With every seat's checkpoint approval (`acks`) it commits. Without, it becomes the dispute candidate |
 | `accept_verified` | The game's prover adapter only | The proved equivalent of `submit_history`. The adapter's `settle` calls it |
 | `open_dispute` | A seat's wallet | Challenges the other seat to respond within the window (`DISPUTE`) |
@@ -169,8 +169,10 @@ epoch increments whenever the anchor changes, so a stale submission fails with
 ## What `open_game` checks
 
 - The terms name this chain (`'Wrong chain'`) and this system (`'Wrong
-  channel'`), and a non-zero game id (`'Invalid game id'`) that no game has
-  opened (`'Game already open'`). Clients choose the id, so pick a random one.
+  channel'`), and a game id that no game has opened (`'Game already open'`)
+  and that is the seats': `gameIdOf(players, keys)`, a hash of the wallets and
+  session keys (`'Invalid game id'`). Whoever opens an id first holds it, so
+  only terms both wallets signed can take it.
 - The config passes your `init`, and each chain tip is non-zero
   (`'Invalid tip'`).
 - Two distinct, non-zero wallets (`'Invalid players'`). Each session key is a
