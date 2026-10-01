@@ -121,6 +121,30 @@ test('an unanchored game needs each seat\'s wallet to sign its terms', async () 
   } finally { await k.close(); }
 });
 
+test('a game no channel has opened yet is held on its wallets\' signatures', async () => {
+  const k = await keeper({ max_open_per_player: 1 });
+  try {
+    // Game 9 is on the real channel, but the fake chain holds no channel for it.
+    const unopened = { ...terms(9n), players: wallets.map(walletAddress) };
+    const session = new Session(counter, unopened);
+    session.move(add(3), keys[0]);
+    const [alice, bob] = wallets.map(key => walletSign(key, termsTypedData(counter, unopened)));
+    await assert.rejects(k.client.register(session), /each seat's wallet signature over its terms/);
+    await assert.rejects(k.client.register(session, { authorizations: [alice, alice] }), /Seat 1's wallet did not sign/);
+    // It must start where its terms open: there is no anchor to start from.
+    const later = new Session(counter, unopened, { start: session.env, witness: session.witness() });
+    await assert.rejects(k.client.register(later, { authorizations: [alice, bob] }), /starts at its opening/);
+    assert.equal((await k.client.register(session, { authorizations: [alice, bob] })).created, true);
+    const kept = parse(await (await fetch(`${k.url}/games/${hex(CHANNEL)}/${hex(9n)}`)).text());
+    assert.deepEqual(kept.authorizations, [alice, bob]);
+    // Until it opens, it counts against its wallets' caps.
+    const another = { ...unopened, game_id: 10n };
+    const signed = wallets.map(key => walletSign(key, termsTypedData(counter, another)));
+    await assert.rejects(k.client.register(new Session(counter, another), { authorizations: signed }),
+      e => e.status === 429 && /already plays 1 open games/.test(e.message));
+  } finally { await k.close(); }
+});
+
 test('config loads game codecs and needs the account key from the environment', async () => {
   const config = await loadConfig({ chain_id: '0x534e5f54455354', games: [{ ...GAME, entrypoints: { resolve: 'resolve_dispute' },
     prover: { url: 'http://prover', class_hash: '0x5' } }] }, { base });
@@ -163,7 +187,7 @@ test('a wallet that fills its unanchored games can\'t keep the referee off an an
       return [new Session(counter, casualTerms), { authorizations: wallets.map(key => walletSign(key, message)) }];
     };
     for (const id of [11n, 12n]) assert.equal((await k.client.register(...casual(id))).created, true);
-    await assert.rejects(k.client.register(...casual(13n)), e => e.status === 429 && /already plays 2 open unanchored games/.test(e.message));
+    await assert.rejects(k.client.register(...casual(13n)), e => e.status === 429 && /already plays 2 open games/.test(e.message));
     // The anchored, joined game that names the keeper's referee key is admitted, and refereed.
     const rated = new Session(counter, { ...timed(7n), players });
     chain.channels.set(7n, channelOf(rated));

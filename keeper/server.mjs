@@ -1,11 +1,13 @@
 // referee keeper: archives and forwards each game's signed steps, and watches
 // the channel to answer disputes, resolve them and settle finished games.
 //
-// A game entry is anchored (the default) when its games open on a channel
-// onchain: the keeper checks their terms against it and watches it. An
-// unanchored entry keeps games that never touch the chain, such as casual
-// ones; each seat's wallet instead signs the terms (`termsTypedData`), which
-// the keeper checks against the seat's account contract.
+// A game entry is anchored (the default) when its games settle on a channel
+// onchain: the keeper checks the terms of an opened game against it, and
+// watches it. A game no channel has opened yet comes with each seat's wallet
+// signature over its terms (`termsTypedData`), which the keeper checks
+// against the seat's account contract and later uses to open the game, in
+// the transaction that settles it. An unanchored entry keeps games that never
+// touch the chain, such as casual ones, on the same signatures.
 //
 // Its trust model is the prover gateway's: it accepts only steps that verify,
 // so it cannot forge a move, and both players keep their own copies, so it can
@@ -13,7 +15,7 @@
 // account only pays for calls anyone may send. With a referee key it also
 // referees the timed games that name that key: it stamps their steps, starts
 // their clocks and flags a seat whose time runs out, which players trust it to
-// do on time. It registers such games itself when they join onchain. With a
+// do on time. It registers such games itself when they open onchain. With a
 // randomness secret it also gives those games their randomness, which players
 // trust it not to leak.
 //
@@ -38,12 +40,12 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { felt, hex, tag, termsTypedData } from '../sdk/src/index.mjs';
+import { felt, hex, open, stateHash, tag, termsTypedData } from '../sdk/src/index.mjs';
 import { parse, stringify } from '../sdk/src/store.mjs';
 import { fileBackend } from '../sdk/src/store-file.mjs';
 import { Archive, KeeperError, fail } from './archive.mjs';
 import { ENTRYPOINTS, starknetChain } from './chain.mjs';
-import { WAITING, startWatcher } from './watch.mjs';
+import { startWatcher } from './watch.mjs';
 
 const DEFAULTS = {
   host: '127.0.0.1', port: 3200, store: 'keeper-data', poll_seconds: 15, settle: true,
@@ -114,12 +116,12 @@ export async function loadConfig(raw, { base = process.cwd(), env = process.env 
 }
 
 /**
- * Check that each seat's wallet signed an unanchored game's terms: one
- * signature per player, in seat order, valid for `termsTypedData`.
+ * Check that each seat's wallet signed the terms of a game no channel holds:
+ * one signature per player, in seat order, valid for `termsTypedData`.
  */
 async function verifyAuthorizations(chain, game, terms, authorizations) {
   if (!Array.isArray(authorizations) || authorizations.length !== terms.players.length)
-    fail(403, 'An unanchored game needs each seat\'s wallet signature over its terms');
+    fail(403, 'A game no channel holds needs each seat\'s wallet signature over its terms');
   const typedData = termsTypedData(game, terms);
   for (const [seat, player] of terms.players.entries()) {
     let valid = false;
@@ -155,18 +157,26 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
     referee: config.referee ?? null, now, log,
     verify: chain && (async (session, authorizations) => {
       const entry = entries.get(felt(session.terms.channel));
-      if (!entry.anchored) return verifyAuthorizations(chain, entry.game, session.terms, authorizations);
-      const channel = await chain.channel(entry, session.terms.game_id);
-      if (channel.status === WAITING || felt(channel.context) !== session.context) fail(409, 'The terms differ from the channel onchain');
+      const channel = entry.anchored ? await chain.channel(entry, session.terms.game_id) : null;
+      if (channel === null) {
+        // A game no channel holds yet starts at its opening, on its wallets' signatures.
+        if (entry.anchored && stateHash(entry.game, session.start) !== stateHash(entry.game, open(entry.game, session.terms)))
+          fail(409, 'A game no channel has opened starts at its opening');
+        await verifyAuthorizations(chain, entry.game, session.terms, authorizations);
+        return { opened: false };
+      }
+      if (felt(channel.context) !== session.context) fail(409, 'The terms differ from the channel onchain');
+      return { opened: true };
     }),
     anchorHash: chain && (async ids => {
       const entry = entries.get(ids.channel);
-      return entry.anchored ? (await chain.channel(entry, ids.game_id)).anchor.hash : null;
+      return entry.anchored ? (await chain.channel(entry, ids.game_id))?.anchor.hash ?? null : null;
     }),
+    // Null for a game no channel has opened yet.
     created: chain && (async ids => {
       let channel;
-      try { channel = await chain.channel(entries.get(ids.channel), ids.game_id); } catch { fail(404, 'No such game onchain'); }
-      return { config: channel.config, clock: channel.clock };
+      try { channel = await chain.channel(entries.get(ids.channel), ids.game_id); } catch { fail(502, 'The channel could not be read'); }
+      return channel === null ? null : { config: channel.config, clock: channel.clock };
     }),
   });
   const watcher = chain && config.poll_seconds > 0

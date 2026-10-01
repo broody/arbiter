@@ -62,18 +62,19 @@ export function walletSign(key, message) {
  * The watcher's chain interface over settable channels, recording every send.
  * `failing` names the sends that throw, and `terms` for the terms reads;
  * `bundles` is whether a resolve's after-settle calls simulate with it;
- * `joins` (`{ game_id, block }`) and `termsOf` (game id -> terms) stand in for
- * the world's events and the system's `terms`, up to block `block`.
+ * `openings` (`{ game_id, block }`) and `termsOf` (game id -> terms) stand in
+ * for the world's events and the system's `terms`, up to block `block`. A game
+ * without a channel reads as one nobody opened (null).
  */
 export function fakeChain({ canSend = true } = {}) {
-  const channels = new Map(), sent = [], failing = new Set(), joins = [], termsOf = new Map();
+  const channels = new Map(), sent = [], failing = new Set(), openings = [], termsOf = new Map();
   const accounts = new Map(wallets.map(key => [walletAddress(key), ec.starkCurve.getPublicKey(keyHex(key))]));
   const record = (via, entry) => {
     if (failing.has(via)) throw Error(`${via} failed`);
     sent.push({ via, ...entry });
   };
   return {
-    channels, sent, failing, joins, termsOf, time: 1000, block: 10, bundles: true, reads: { terms: 0 }, canSend,
+    channels, sent, failing, openings, termsOf, time: 1000, block: 10, bundles: true, reads: { terms: 0 }, canSend,
     async verifyMessage(address, message, [r, s]) {
       const key = accounts.get(BigInt(address));
       return Boolean(key) && ec.starkCurve.verify(new ec.starkCurve.Signature(BigInt(r), BigInt(s)),
@@ -81,13 +82,13 @@ export function fakeChain({ canSend = true } = {}) {
     },
     async now() { return this.time; },
     async channel(entry, gameId) {
+      if (failing.has('channel')) throw Error('channel failed');
       const channel = channels.get(BigInt(gameId));
-      if (!channel) throw Error('Unknown channel');
-      return structuredClone(channel);
+      return channel ? structuredClone(channel) : null;
     },
     async blockNumber() { return this.block; },
-    async joinedGames(entry, from) {
-      return { games: joins.filter(j => j.block >= from && j.block <= this.block), to: this.block };
+    async openedGames(entry, from) {
+      return { games: openings.filter(j => j.block >= from && j.block <= this.block), to: this.block };
     },
     async terms(entry, gameId) {
       this.reads.terms += 1;
@@ -95,7 +96,7 @@ export function fakeChain({ canSend = true } = {}) {
       if (!termsOf.has(BigInt(gameId))) throw Error('Unknown channel');
       return structuredClone(termsOf.get(BigInt(gameId)));
     },
-    async submitHistory(entry, session, epoch) { record('history', { session, epoch }); return '0x1'; },
+    async submitHistory(entry, session, epoch, { open = null } = {}) { record('history', { session, epoch, ...(open ? { open } : {}) }); return '0x1'; },
     async resolve(entry, gameId, epoch, { after = [] } = {}) {
       if (!after.length) { record('resolve', { gameId, epoch }); return { tx: '0x2' }; }
       if (this.bundles) { record('resolve', { gameId, epoch, after }); return { tx: '0x2', bundled: true }; }
@@ -103,7 +104,7 @@ export function fakeChain({ canSend = true } = {}) {
       record('calls', { calls: after });
       return { tx: '0x2', bundled: false, after_tx: '0x6' };
     },
-    async settle(entry, session, epoch) { record('proof', { session, epoch }); return '0x3'; },
+    async settle(entry, session, epoch, { open = null } = {}) { record('proof', { session, epoch, ...(open ? { open } : {}) }); return '0x3'; },
     async acknowledge(entry, gameId, epoch, signature) { record('acknowledge', { gameId, epoch, signature }); return '0x4'; },
     async resumeByReferee(entry, gameId, epoch, signature) { record('resume', { gameId, epoch, signature }); return '0x5'; },
   };

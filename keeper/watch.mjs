@@ -1,8 +1,9 @@
 // The keeper's chain loop. Each round, it registers the timed games that
-// joined onchain naming its referee key, then reads the channel of every open
+// opened onchain naming its referee key, then reads the channel of every open
 // game and:
 // - settles a finished game that is still active, in chained segments when its
-//   transcript is long (see `disputeAnswer`);
+//   transcript is long (see `disputeAnswer`). A game no channel has opened yet
+//   opens in the same transaction, on its seats' wallet signatures;
 // - as the referee of a timed game, acknowledges a dispute at once, so that
 //   the game returns to play after the window instead of forced play, and
 //   returns a game from forced play itself, first reading back from the chain
@@ -14,10 +15,12 @@
 // It submits a segment by onchain replay (`submit_history`) when short, or by
 // a native proof through the game's adapter. Forced play and timeouts
 // otherwise need a player's wallet, so the keeper waits them out.
-import { Session, disputeAnswer, felt, hex, rebase } from '../sdk/src/index.mjs';
+import { Session, disputeAnswer, due, felt, hex, open, rebase, stateHash } from '../sdk/src/index.mjs';
+import { openGameCall } from '../sdk/src/proving.mjs';
 import { KeeperError, gameKey } from './archive.mjs';
 
-export const WAITING = 0, ACTIVE = 1, DISPUTE = 2, FORCED = 3, SETTLED = 4, CANCELLED = 5;
+/** Channel statuses (referee::channel). A game id no channel has opened reads as UNOPENED. */
+export const UNOPENED = 0, ACTIVE = 1, DISPUTE = 2, FORCED = 3, SETTLED = 4;
 const CURSOR = 'keeper/cursor/', RETRY = 'keeper/retry/';
 
 const replayMax = entry => entry.replay_max_steps ?? entry.max_history_steps ?? 64;
@@ -43,8 +46,7 @@ export function decide(channel, session, now, { settle = true, referee = false, 
   answer = c => disputeAnswer(session, c, { maxSteps }), holds = hash => rebase(session, hash) !== null } = {}) {
   const wait = reason => (reason ? { action: 'wait', reason } : { action: 'wait' });
   switch (channel.status) {
-    case SETTLED: case CANCELLED: return { action: 'close' };
-    case WAITING: return wait('not joined');
+    case SETTLED: return { action: 'close' };
     case FORCED:
       if (!referee) return wait(`forced play: seat ${channel.anchor.due} is due`);
       if (sent.resumed === channel.epoch) return wait('resumed');
@@ -58,8 +60,8 @@ export function decide(channel, session, now, { settle = true, referee = false, 
     const base = answer(channel);
     return base ? { action, base } : null;
   };
-  if (channel.status === ACTIVE) {
-    if (!settling) return wait();
+  if (channel.status === ACTIVE || channel.status === UNOPENED) {
+    if (!settling) return wait(channel.status === UNOPENED ? 'not open' : undefined);
     return answered ? wait('submitted') : submit('settle') ?? wait('nothing past the anchor');
   }
   // A dispute, window open. The referee's acknowledgement returns an
@@ -78,6 +80,18 @@ export function decide(channel, session, now, { settle = true, referee = false, 
   if (answered) return wait('answered');
   if (referee && acked) return wait('acknowledged');
   return wait(late ? 'the candidate is current' : 'answering near the deadline');
+}
+
+/**
+ * What the watcher reads for a game no channel has opened yet: epoch 0, with
+ * its terms' opening state as anchor and candidate, so the game's whole
+ * transcript is what it would submit.
+ */
+export function unopened(session) {
+  const { game, terms } = session, opening = open(game, terms);
+  const ref = { hash: stateHash(game, opening), seq: 0, support_turn: 0, due: due(game, opening), outcome: opening.outcome };
+  return { id: terms.game_id, status: UNOPENED, epoch: 0, context: session.context, anchor: ref, candidate: ref,
+    anchor_block: 0, candidate_block: 0, deadline: 0, acked_epoch: 0, acked_deadline: 0 };
 }
 
 /**
@@ -132,11 +146,33 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
         return { tx };
       }
     }
+    // A game no channel holds yet opens in the same transaction.
+    const opening = channel.status === UNOPENED ? { open: await openCall(entry, ids, base.terms) } : {};
     const via = base.steps.length <= replayMax(entry) ? 'history' : 'proof';
-    const tx = via === 'history' ? await chain.submitHistory(entry, base, channel.epoch) : await chain.settle(entry, base, channel.epoch);
+    const tx = via === 'history' ? await chain.submitHistory(entry, base, channel.epoch, opening)
+      : await chain.settle(entry, base, channel.epoch, opening);
     sent.against.add(felt(channel.candidate.hash));
     sent.ours.add(felt(base.stateHash()));
     return { tx, via, from: base.start.seq, steps: base.steps.length };
+  }
+
+  // A game's `open_game` call, from the wallet signatures it was registered
+  // with and, when it takes its randomness from this keeper's referee, the
+  // referee's signature over its tip.
+  async function openCall(entry, ids, terms) {
+    const authorizations = await archive.authorizations(ids);
+    if (!authorizations) throw Error('No wallet signatures to open the game with');
+    let refereeSignature;
+    const tip = terms.clock?.rng_tip ?? 0n;
+    if (felt(tip) !== 0n) {
+      if (archive.referee === null || felt(terms.clock.referee) !== archive.referee)
+        throw Error('The game takes another referee\'s randomness: a seat opens it');
+      const signed = await archive.tip(ids, terms.config);
+      if (felt(tip) !== signed.rng_tip) throw Error('The game\'s randomness tip is not this referee\'s');
+      refereeSignature = signed.signature;
+    }
+    const signatures = authorizations.map(a => (Array.isArray(a) ? a : [a.r, a.s]));
+    return openGameCall(entry.game, terms, signatures, { refereeSignature, entrypoint: entry.entrypoints?.open_game });
   }
 
   async function visit(ids, now) {
@@ -145,7 +181,10 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
     if (!entry || entry.anchored === false) return;
     let session = await archive.session(ids);
     if (!session) return;
-    const channel = await chain.channel(entry, ids.game_id);
+    const onchain = await chain.channel(entry, ids.game_id);
+    // Once a channel holds the game, its wallets' caps no longer count it.
+    if (onchain !== null) await archive.opened(ids);
+    const channel = onchain ?? unopened(session);
     // The referee's clock stops for forced play, and restarts after it.
     if (archive.referees(ids)) {
       if (channel.status === FORCED) await archive.forced(ids, channel.epoch);
@@ -187,18 +226,18 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
     busy.set(key, run);
   }
 
-  // Register a game that joined on `entry`'s channel if it is timed and names
+  // Register a game that opened on `entry`'s channel if it is timed and names
   // our referee key. Returns whether to try again next round: after a failure
   // that may pass, such as an RPC error or a full keeper (503), but not once
   // the archive refuses the game (its other KeeperErrors, e.g. closed here).
-  async function join(entry, gameId) {
+  async function found(entry, gameId) {
     const key = gameKey(archive.ids(entry.channel, gameId));
     if (archive.known.has(key)) return false;
     try {
       const terms = await chain.terms(entry, gameId);
       if (terms.clock == null || felt(terms.clock.referee) !== archive.referee) return false;
       if ((await archive.register(new Session(entry.game, terms).export())).created)
-        log({ game: key, action: 'register', outcome: 'joined' });
+        log({ game: key, action: 'register', outcome: 'opened' });
       return false;
     } catch (e) {
       const retry = !(e instanceof KeeperError) || e.status >= 500;
@@ -207,25 +246,25 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
     }
   }
 
-  // Register the timed games that joined on `entry`'s channel naming our
+  // Register the timed games that opened on `entry`'s channel naming our
   // referee key, found in the world's `ChannelUpdated` events: each gets a
-  // referee and a `start` even if neither seat registers it. The joins still
+  // referee and a `start` even if neither seat registers it. The games still
   // to retry are kept in the store and go first, even with no new blocks.
   async function discover(entry) {
     const cursor = `${CURSOR}${hex(entry.channel)}`, retries = `${RETRY}${hex(entry.channel)}`;
     const from = (await archive.backend.get(cursor)) ?? entry.from_block ?? await chain.blockNumber();
     const pending = (await archive.backend.get(retries)) ?? [];
-    const { games, to } = await chain.joinedGames(entry, from);
+    const { games, to } = await chain.openedGames(entry, from);
     const failed = [];
     for (const gameId of new Set([...pending, ...games.map(g => g.game_id)]))
-      if (await join(entry, gameId)) failed.push(gameId);
+      if (await found(entry, gameId)) failed.push(gameId);
     // The retries before the cursor: a crash between the two only rescans.
     if (pending.length || failed.length) await archive.backend.put(retries, failed);
     if (to >= from) await archive.backend.put(cursor, to + 1);
   }
 
   async function tick() {
-    if (archive.referee !== null && chain.joinedGames) {
+    if (archive.referee !== null && chain.openedGames) {
       for (const entry of entries.values()) {
         if (!entry.world || entry.anchored === false) continue;
         try { await discover(entry); } catch (e) {

@@ -47,14 +47,18 @@ const position = session => ({ seq: session.start.seq, transcript: session.start
  *   `reservedGames` of capacity.
  *
  * `verify(session, authorizations)` checks a new game's terms against its
- * channel; `anchorHash(ids)` reads the channel's anchor; `created(ids)` reads
- * the `{ config, clock }` a channel was created with. Each throws a
- * KeeperError to refuse. `referee` (`{ privateKey, rngSecret }`) makes the
- * archive the referee of the timed games that name its key, and with
- * `rngSecret` the source of their randomness; `now()` is its wall clock in
- * milliseconds. At most `maxOpenGames` games are open at once, and each wallet
- * plays at most `maxOpenPerPlayer` unanchored ones, which close once finished
- * or after `unanchoredTtlMs` without a step.
+ * channel, or its seats' wallet signatures (`authorizations`) when no channel
+ * holds it, and returns `{ opened }`; `anchorHash(ids)` reads the channel's
+ * anchor; `created(ids)` reads the `{ config, clock }` a channel holds, or
+ * null for a game no channel has opened. Each throws a KeeperError to refuse.
+ * `referee` (`{ privateKey, rngSecret }`) makes the archive the referee of the
+ * timed games that name its key, and with `rngSecret` the source of their
+ * randomness; `now()` is its wall clock in milliseconds. At most
+ * `maxOpenGames` games are open at once, and each wallet plays at most
+ * `maxOpenPerPlayer` games that no channel holds: unanchored ones, which close
+ * once finished, and ones not opened yet, until they open. Either closes
+ * after `unanchoredTtlMs` without a step, unless it is finished and waits to
+ * settle.
  */
 export class Archive {
   #loaded = new Map(); // key -> Session
@@ -94,12 +98,12 @@ export class Archive {
       const key = gameKey(ids);
       if (ids.chain_id === archive.chainId && archive.games.has(ids.channel) && !closed.has(key)) archive.known.set(key, ids);
     }
-    // Open unanchored games count against their wallets' caps.
+    // Open games no channel holds count against their wallets' caps.
     for (const [key, ids] of archive.known) {
-      if (archive.#entry(ids.channel).anchored) continue;
-      const players = (await backend.get(`${ADMITTED}${key}`))?.players
-        ?? (await archive.store.load(archive.gameFor(ids.channel), ids))?.terms.players ?? [];
-      archive.#track(key, players.map(felt));
+      const anchored = archive.#entry(ids.channel).anchored, admitted = await backend.get(`${ADMITTED}${key}`);
+      if (anchored && !admitted?.unopened) continue;
+      const players = admitted?.players ?? (await archive.store.load(archive.gameFor(ids.channel), ids))?.terms.players ?? [];
+      archive.#track(key, players.map(felt), anchored);
     }
     // A referee resumes the clocks of the games it referees.
     if (archive.referee !== null) for (const ids of archive.open()) await archive.session(ids);
@@ -130,13 +134,14 @@ export class Archive {
     return { ...summary(session), steps: session.steps.slice(Math.max(0, from - session.start.seq)) };
   }
 
-  /** The wallet signatures an unanchored game was admitted with, or null. */
+  /** The wallet signatures a game was admitted with, or null. */
   async authorizations(ids) { return (await this.backend.get(`${AUTHORIZED}${gameKey(ids)}`)) ?? null; }
 
   /**
    * Archive an exported session, or merge it into the archived copy. A new
    * game's terms must pass `verify`, with `authorizations` for a game no
-   * channel anchors, which are kept with it.
+   * channel holds (unanchored, or not opened yet), which are kept with it: the
+   * keeper opens a game with them when it settles it.
    */
   async register(record, authorizations) {
     if (!record?.terms || !Array.isArray(record.steps)) fail(400, 'Expected { record: session.export() }');
@@ -240,16 +245,16 @@ export class Archive {
 
   /**
    * The tip of the referee's hash chain for the game `ids`, with the referee's
-   * signature over it (`tipHash`): what the last seat brings to `join` when
-   * the creator asked for the referee's randomness. The same game always gets
+   * signature over it (`tipHash`): what a game's terms carry, and `open_game`
+   * checks, when it takes the referee's randomness. The same game always gets
    * the same tip. The chain covers every roll the game's config allows: an
-   * anchored game's config is read from its channel, another's is `config`.
+   * opened game's config is read from its channel, another's is `config`.
    */
   async tip(ids, config) {
     if (this.referee === null || this.rngSecret === null) fail(404, 'This keeper gives no randomness');
     const entry = this.#entry(ids.channel);
-    if (entry.anchored && this.created) {
-      const created = await this.created(ids);
+    const created = entry.anchored && this.created ? await this.created(ids) : null;
+    if (created) {
       const clock = created.clock;
       if (clock == null || felt(clock.referee) !== this.referee || felt(clock.rng_tip ?? 0) === 0n)
         fail(409, 'The game did not ask this referee for randomness');
@@ -320,14 +325,26 @@ export class Archive {
     });
   }
 
-  /** Close the unanchored games without a step for longer than `unanchoredTtlMs`. Returns how many. */
+  /**
+   * Close the games no channel holds that went without a step for longer than
+   * `unanchoredTtlMs`, but not a finished one waiting to settle. Returns how many.
+   */
   async sweep() {
     const cutoff = this.now() - this.unanchoredTtlMs;
-    const idle = [...this.#casual].filter(([, casual]) => casual.touched < cutoff).map(([key]) => key);
+    const settling = key => this.#casual.get(key).anchored && this.#loaded.get(key)?.env.outcome.finished;
+    const idle = [...this.#casual].filter(([key, casual]) => casual.touched < cutoff && !settling(key)).map(([key]) => key);
     for (const key of idle) this.#forget(key);
     await Promise.all(idle.map(key => this.backend.put(`${CLOSED}${key}`, { status: 'idle' })));
     for (const key of idle) this.log({ game: key, event: 'evicted', reason: 'idle' });
     return idle.length;
+  }
+
+  /** A channel now holds the game `ids`: its wallets' caps stop counting it. */
+  async opened(ids) {
+    const key = gameKey(ids);
+    if (!this.#casual.get(key)?.anchored) return;
+    this.#untrack(key);
+    await this.backend.put(`${ADMITTED}${key}`, null);
   }
 
   /** Cancel every timer. */
@@ -391,26 +408,30 @@ export class Archive {
     return this.store.load(this.gameFor(ids.channel), ids);
   }
 
-  // Admit a new game: within its entry's step cap, its wallets' caps if it is
-  // unanchored, and the keeper's capacity, whose reserved slots only go to
-  // games that `admit` ranks above 0.
+  // Admit a new game: within its entry's step cap, its wallets' caps if no
+  // channel holds it, and the keeper's capacity, whose reserved slots only go
+  // to games that `admit` ranks above 0.
   async #admit(key, ids, entry, session, authorizations) {
     const { terms } = session;
     const needs = entry.game.maxSteps(terms.config) + 1;
     if (needs > entry.maxSteps)
       fail(409, `The game can run to ${needs} steps; this keeper keeps at most ${entry.maxSteps} per game on channel ${hex(ids.channel)}`);
-    const players = entry.anchored ? [] : terms.players.map(felt);
+    // The terms against the channel, or the wallets' signatures when no
+    // channel holds the game: an unopened one counts against their caps until
+    // it opens.
+    const verified = await this.verifyTerms?.(session, authorizations);
+    const unopened = entry.anchored && verified?.opened === false;
+    const players = entry.anchored && !unopened ? [] : terms.players.map(felt);
     const busy = () => players.find(player => (this.#players.get(player) ?? 0) >= this.maxOpenPerPlayer);
     if (busy() !== undefined) await this.sweep();
     const player = busy();
-    if (player !== undefined) fail(429, `Wallet ${hex(player)} already plays ${this.maxOpenPerPlayer} open unanchored games here`);
+    if (player !== undefined) fail(429, `Wallet ${hex(player)} already plays ${this.maxOpenPerPlayer} open games here that no channel holds`);
     const room = priority => {
       const free = this.maxOpenGames - this.known.size;
       return free > 0 && (free > this.reservedGames || priority > 0);
     };
     if (!room(0)) await this.sweep();
     if (this.known.size >= this.maxOpenGames) fail(503, 'The keeper is full');
-    await this.verifyTerms?.(session, authorizations);
     // We can roll only from our own chain for this game.
     const clock = terms.clock;
     if (this.referee !== null && clock != null && felt(clock.referee) === this.referee && felt(clock.rng_tip ?? 0) !== 0n
@@ -421,10 +442,10 @@ export class Archive {
       ? 'The keeper is full: its reserved capacity is for priority games' : 'The keeper is full');
     // Take the slot before writing, so concurrent registrations can't overfill.
     this.known.set(key, ids);
-    if (!entry.anchored) this.#track(key, players);
+    if (players.length) this.#track(key, players, entry.anchored);
     try {
       if (authorizations) await this.backend.put(`${AUTHORIZED}${key}`, authorizations);
-      if (!entry.anchored) await this.backend.put(`${ADMITTED}${key}`, { players });
+      if (players.length) await this.backend.put(`${ADMITTED}${key}`, { players, ...(unopened ? { unopened } : {}) });
       await this.store.save(session);
     } catch (e) {
       this.#forget(key);
@@ -437,15 +458,14 @@ export class Archive {
     return { ...summary(session), created: true };
   }
 
-  #track(key, players) {
-    this.#casual.set(key, { players, touched: this.now() });
+  // Count a game no channel holds against its wallets' caps. `anchored`: it
+  // waits to open on its entry's channel, so it settles there once finished.
+  #track(key, players, anchored = false) {
+    this.#casual.set(key, { players, anchored, touched: this.now() });
     for (const player of new Set(players)) this.#players.set(player, (this.#players.get(player) ?? 0) + 1);
   }
 
-  // Drop an open game from memory.
-  #forget(key) {
-    this.#disarm(key);
-    for (const map of [this.#referees, this.#chains, this.#loaded, this.#clocks, this.#graces, this.known]) map.delete(key);
+  #untrack(key) {
     const casual = this.#casual.get(key);
     if (!casual) return;
     this.#casual.delete(key);
@@ -456,18 +476,25 @@ export class Archive {
     }
   }
 
+  // Drop an open game from memory.
+  #forget(key) {
+    this.#disarm(key);
+    for (const map of [this.#referees, this.#chains, this.#loaded, this.#clocks, this.#graces, this.known]) map.delete(key);
+    this.#untrack(key);
+  }
+
   async #close(key, status) {
     await this.backend.put(`${CLOSED}${key}`, { status });
     this.#forget(key);
   }
 
-  // Note a step in an unanchored game, which closes once finished: no channel
-  // will settle it.
+  // Note a step in a game no channel holds. An unanchored one closes once
+  // finished: no channel will settle it. One waiting to open settles there.
   async #settled(key, session) {
     const casual = this.#casual.get(key);
     if (!casual) return;
     casual.touched = this.now();
-    if (!session.env.outcome.finished) return;
+    if (!session.env.outcome.finished || casual.anchored) return;
     await this.#close(key, 'finished');
     this.log({ game: key, event: 'evicted', reason: 'finished' });
   }

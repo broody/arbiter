@@ -1,19 +1,22 @@
-// The keeper's Starknet side: read channels, terms, the joins in a world's
-// events and the calls of forced play it did not see, and send
+// The keeper's Starknet side: read channels, terms, the games opened in a
+// world's events and the calls of forced play it did not see, and send
 // `submit_history`, `resolve`, proved `settle`, `acknowledge` and
-// `resume_by_referee` transactions from the keeper's own account. The
-// keeper holds no player keys; the calls it sends are open to anyone, and the
-// only signatures it adds are its referee's.
+// `resume_by_referee` transactions from the keeper's own account, opening a
+// game in the same transaction when no channel holds it yet (`open_game`,
+// with its seats' wallet signatures). The keeper holds no player keys; the
+// calls it sends are open to anyone, and the only signatures it adds are its
+// referee's.
 import { Account, RpcProvider, hash } from 'starknet';
 import { decodeTerms, felt, hex, poseidon } from '../sdk/src/index.mjs';
-import { contractCall, getChannel, historyCall, proveSession } from '../sdk/src/proving.mjs';
+import { contractCall, getChannel, historyCall, proveSession, reverted } from '../sdk/src/proving.mjs';
 
 /** Default entrypoint names: referee_dojo's (e.g. the counter's system). */
 export const ENTRYPOINTS = { get_channel: 'get_channel', submit_history: 'submit_history', resolve: 'resolve',
-  acknowledge: 'acknowledge', resume_by_referee: 'resume_by_referee', terms: 'terms', force: 'force', roll: 'roll' };
+  acknowledge: 'acknowledge', resume_by_referee: 'resume_by_referee', terms: 'terms', force: 'force', roll: 'roll',
+  open_game: 'open_game' };
 
-/** `ChannelUpdated.kind` values (referee_dojo::models). */
-export const UPDATES = { CREATED: 0, JOINED: 1, CANCELLED: 2, DISPUTED: 3, RECEIVED: 4, RESOLVED: 5, FORCED: 6, RESUMED: 7,
+/** `ChannelUpdated.kind` values (referee_dojo::models). 1 and 2, a join and a cancel, are retired. */
+export const UPDATES = { OPENED: 0, DISPUTED: 3, RECEIVED: 4, RESOLVED: 5, FORCED: 6, RESUMED: 7,
   TIMED_OUT: 8, RESIGNED: 9, ACKNOWLEDGED: 10, ROLLED: 11, VOIDED: 12 };
 
 // A Dojo 1.8 world emits every game event as its own `EventEmitted`.
@@ -101,15 +104,19 @@ export function starknetChain({ rpcUrl, provider = new RpcProvider({ nodeUrl: rp
     async chainId() { return BigInt(await provider.getChainId()); },
     async now() { return Number((await provider.getBlockWithTxHashes('latest')).timestamp); },
     blockNumber: () => provider.getBlockNumber(),
-    channel: (entry, gameId) => getChannel(provider, entry.game, entry.channel, gameId, { entrypoint: names(entry).get_channel }),
+    /** A game's `ChannelGame`, or null when no channel has opened it ('Unknown channel'). */
+    async channel(entry, gameId) {
+      try { return await getChannel(provider, entry.game, entry.channel, gameId, { entrypoint: names(entry).get_channel }); }
+      catch (e) { if (reverted(e, 'Unknown channel')) return null; throw e; }
+    },
     /** A game's terms, from its system's `terms(game_id)`. */
     async terms(entry, gameId) { return decodeTerms(entry.game, (await provider.callContract(call(entry, 'terms', [gameId]))).map(BigInt)); },
     /**
-     * The games that joined on `entry`'s channel from block `from` on
-     * (`ChannelUpdated` of kind JOINED in its `world`, under its `namespace`),
+     * The games that opened on `entry`'s channel from block `from` on
+     * (`ChannelUpdated` of kind OPENED in its `world`, under its `namespace`),
      * and the block scanned to.
      */
-    async joinedGames(entry, from) {
+    async openedGames(entry, from) {
       const to = await provider.getBlockNumber(), games = [];
       if (from > to) return { games, to: from - 1 };
       const keys = [[hex(EVENT_EMITTED)], [hex(dojoSelector(entry.namespace, 'ChannelUpdated'))], [hex(entry.channel)]];
@@ -119,7 +126,7 @@ export function starknetChain({ rpcUrl, provider = new RpcProvider({ nodeUrl: rp
           to_block: { block_number: to }, keys, chunk_size: 100, ...(continuation_token ? { continuation_token } : {}) });
         for (const event of page.events) {
           const update = channelUpdate(event.data);
-          if (update.kind === UPDATES.JOINED) games.push({ ...update, block: event.block_number });
+          if (update.kind === UPDATES.OPENED) games.push({ ...update, block: event.block_number });
         }
         continuation_token = page.continuation_token;
       } while (continuation_token);
@@ -179,7 +186,9 @@ export function starknetChain({ rpcUrl, provider = new RpcProvider({ nodeUrl: rp
     },
     /** Whether `address`'s account contract accepts `signature` over SNIP-12 `typedData`. */
     verifyMessage: (address, typedData, sig) => provider.verifyMessageInStarknet(typedData, sig, address),
-    submitHistory: (entry, session, epoch) => send([historyCall(session, epoch, { entrypoint: names(entry).submit_history })]),
+    /** `submit_history`, after `open`, the game's `open_game` call, when no channel holds it yet. */
+    submitHistory: (entry, session, epoch, { open = null } = {}) =>
+      send([...(open ? [open] : []), historyCall(session, epoch, { entrypoint: names(entry).submit_history })]),
     acknowledge: (entry, gameId, epoch, sig) => send([call(entry, 'acknowledge', [gameId, epoch, ...signature(sig)])]),
     resumeByReferee: (entry, gameId, epoch, sig) => send([call(entry, 'resume_by_referee', [gameId, epoch, ...signature(sig)])]),
     /**
@@ -194,10 +203,12 @@ export function starknetChain({ rpcUrl, provider = new RpcProvider({ nodeUrl: rp
       const tx = await send(calls);
       try { return { tx, bundled: false, after_tx: await send(after) }; } catch (e) { return { tx, bundled: false, after_error: e.message }; }
     },
-    async settle(entry, session, epoch) {
+    /** A native proof's `settle`, after `open` when no channel holds the game yet. */
+    async settle(entry, session, epoch, { open = null } = {}) {
       const proved = await proveSession({ provider, proverUrl: entry.prover.url, session, epoch,
         expectedClassHash: entry.prover.class_hash, waitMs: proveWaitMs });
-      return send([proved.call()], proved.options);
+      if (proved.opening && !open) throw Error('The game is not open: settling it needs its open_game call');
+      return send([...(proved.opening ? [open] : []), proved.call()], proved.options);
     },
   };
 }

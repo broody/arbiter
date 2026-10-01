@@ -172,7 +172,7 @@ test('unanchored games: capped per wallet, closed once finished or idle', async 
   await archive.register(casual(1n).export());
   await archive.register(casual(2n, 0xda7en).export());
   // Alice plays two open unanchored games: a third is refused, whoever she plays.
-  await rejects(archive.register(casual(3n, 0xe7en).export()), 429, /Wallet 0xa11ce already plays 2 open unanchored games/);
+  await rejects(archive.register(casual(3n, 0xe7en).export()), 429, /Wallet 0xa11ce already plays 2 open games/);
   // An anchored game is never refused for her caps.
   assert.equal((await archive.register(played([3]).export())).created, true);
 

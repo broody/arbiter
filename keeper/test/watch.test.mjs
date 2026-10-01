@@ -4,9 +4,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { liveHash, publicKey, refereeResumeHash, signedStep, stateHash, verify } from '../../sdk/src/index.mjs';
+import { openGameCall } from '../../sdk/src/proving.mjs';
 import { memoryBackend } from '../../sdk/src/store.mjs';
 import { Archive } from '../archive.mjs';
-import { ACTIVE, CANCELLED, DISPUTE, FORCED, SETTLED, WAITING, decide, startWatcher } from '../watch.mjs';
+import { ACTIVE, DISPUTE, FORCED, SETTLED, UNOPENED, decide, startWatcher, unopened } from '../watch.mjs';
 import {
   CHAIN, CHANNEL, REFEREE_KEY, Session, add, channelOf, counter, entry, fakeChain, keys, played, prefix, signed, terms, timed,
 } from './fixtures.mjs';
@@ -69,8 +70,21 @@ test('decide follows the channel rules', () => {
   assert.equal(decide(forced({ anchor: elsewhere }), session, 0, referee).action, 'wait');
   assert.equal(decide(forced(), session, 0, { ...referee, sent: { resumed: 1 } }).action, 'wait');
 
-  for (const [status, action] of [[SETTLED, 'close'], [CANCELLED, 'close'], [WAITING, 'wait']])
-    assert.equal(decide(channelOf(session, { status }), session, 0).action, action);
+  assert.equal(decide(channelOf(session, { status: SETTLED }), session, 0).action, 'close');
+});
+
+test('a game nobody opened yet is settled from its opening, or left alone', () => {
+  const finished = played(FINISHED), unfinished = prefix(finished, 3);
+  // What the watcher reads for it: epoch 0 at the terms' opening state.
+  const channel = unopened(finished);
+  assert.deepEqual([channel.status, channel.epoch, channel.anchor.seq], [UNOPENED, 0, 0]);
+  assert.equal(channel.anchor.hash, stateHash(counter, finished.start));
+  const settle = decide(channel, finished, 0);
+  assert.deepEqual([settle.action, settle.base.start.seq, settle.base.env.seq], ['settle', 0, finished.env.seq]);
+  assert.deepEqual(decide(unopened(unfinished), unfinished, 0), { action: 'wait', reason: 'not open' });
+  assert.equal(decide(channel, finished, 0, { settle: false }).action, 'wait');
+  // Submitted once: the next round waits for the channel to show it.
+  assert.equal(decide(channel, finished, 0, { sent: { against: new Set([channel.candidate.hash]) } }).action, 'wait');
 });
 
 async function watching(chain, entryOptions, archiveOptions = {}, backend = memoryBackend()) {
@@ -279,7 +293,7 @@ test('the referee leaves forced play alone from an anchor it lacks', async () =>
   } finally { archive.stop(); }
 });
 
-test('the referee registers the timed games that join naming its key, from the world\'s events', async () => {
+test('the referee registers the timed games that open naming its key, from the world\'s events', async () => {
   const chain = fakeChain();
   const { archive, logs, round } = await watching(chain, { world: 0x3031dn, namespace: 'counter' }, refereeing);
   try {
@@ -287,7 +301,7 @@ test('the referee registers the timed games that join naming its key, from the w
     chain.termsOf.set(8n, terms(8n));
     chain.termsOf.set(9n, { ...timed(9n), clock: { ...timed(9n).clock, referee: publicKey(0x999n) } });
     chain.channels.set(7n, channelOf(new Session(counter, timed(7n))));
-    chain.joins.push({ game_id: 5n, block: 9 }, { game_id: 7n, block: 12 }, { game_id: 8n, block: 12 }, { game_id: 9n, block: 13 });
+    chain.openings.push({ game_id: 5n, block: 9 }, { game_id: 7n, block: 12 }, { game_id: 8n, block: 12 }, { game_id: 9n, block: 13 });
     // The first round starts from the chain's head: game 5 joined before the keeper ran.
     await round();
     assert.deepEqual(archive.open(), []);
@@ -297,14 +311,14 @@ test('the referee registers the timed games that join naming its key, from the w
     assert.deepEqual(archive.open().map(i => i.game_id), [7n]);
     assert.ok(archive.referees(ids));
     assert.equal((await archive.session(ids)).env.seq, 0);
-    assert.deepEqual(logs.filter(l => l.action === 'register'), [{ game: '0xc4a11e1/0x7', action: 'register', outcome: 'joined' }]);
+    assert.deepEqual(logs.filter(l => l.action === 'register'), [{ game: '0xc4a11e1/0x7', action: 'register', outcome: 'opened' }]);
     // Each join is read once.
     await round();
     assert.equal(chain.reads.terms, 3);
   } finally { archive.stop(); }
 });
 
-test('the referee retries a join it failed to register each round, across restarts, unless the archive refused it', async () => {
+test('the referee retries an opened game it failed to register each round, across restarts, unless the archive refused it', async () => {
   const chain = fakeChain();
   const world = { world: 0x3031dn, namespace: 'counter' }, options = { ...refereeing, maxOpenGames: 1 };
   const first = await watching(chain, world, options);
@@ -317,7 +331,7 @@ test('the referee retries a join it failed to register each round, across restar
     }
     // Game 9 closed here before its join was read.
     await first.archive.close(first.archive.ids(CHANNEL, 9n), SETTLED);
-    chain.joins.push({ game_id: 7n, block: 10 }, { game_id: 9n, block: 10 });
+    chain.openings.push({ game_id: 7n, block: 10 }, { game_id: 9n, block: 10 });
     // The node can't read the terms: both joins are kept to retry.
     chain.failing.add('terms');
     await first.round();
@@ -330,7 +344,7 @@ test('the referee retries a join it failed to register each round, across restar
     await again.round();
     assert.equal(chain.reads.terms, 4);
     // A join while the keeper is full waits for a free slot.
-    chain.joins.push({ game_id: 8n, block: 11 });
+    chain.openings.push({ game_id: 8n, block: 11 });
     chain.block = 11;
     await again.round();
     await again.round();
@@ -340,8 +354,8 @@ test('the referee retries a join it failed to register each round, across restar
     assert.deepEqual(again.archive.open().map(i => i.game_id), [8n]);
     assert.equal(chain.reads.terms, 7);
     const full = ['0xc4a11e1/0x8', 'failed', 'The keeper is full'];
-    assert.deepEqual(registers(again.logs), [['0xc4a11e1/0x7', 'joined', undefined], ['0xc4a11e1/0x9', 'refused', 'The game is closed here'],
-      full, full, ['0xc4a11e1/0x8', 'joined', undefined]]);
+    assert.deepEqual(registers(again.logs), [['0xc4a11e1/0x7', 'opened', undefined], ['0xc4a11e1/0x9', 'refused', 'The game is closed here'],
+      full, full, ['0xc4a11e1/0x8', 'opened', undefined]]);
   } finally {
     first.archive.stop();
     again?.archive.stop();
@@ -385,11 +399,51 @@ test('an unreadable channel is logged and the round goes on', async () => {
   const { archive, logs, round } = await watching(chain);
   const game = played(FINISHED);
   await archive.register(game.export());
-  await round();
-  assert.deepEqual([logs[0].action, logs[0].outcome, logs[0].error], ['read', 'failed', 'Unknown channel']);
   chain.channels.set(7n, channelOf(game, { status: ACTIVE }));
+  chain.failing.add('channel');
+  await round();
+  assert.deepEqual([logs[0].action, logs[0].outcome, logs[0].error], ['read', 'failed', 'channel failed']);
+  chain.failing.delete('channel');
   await round();
   assert.equal(chain.sent.length, 1);
+});
+
+test('a finished game nobody opened opens in the transaction that settles it', async () => {
+  const chain = fakeChain();
+  const { archive, logs, round } = await watching(chain);
+  const game = played(FINISHED);
+  // Registered on its wallets' signatures, which the archive keeps.
+  const authorizations = [[1n, 2n], [3n, 4n]];
+  await archive.register(game.export(), authorizations);
+  await round();
+  assert.equal(chain.sent.length, 1);
+  const [{ via, session, epoch, open }] = chain.sent;
+  assert.deepEqual([via, epoch, session.start.seq, session.env.seq], ['history', 0, 0, game.env.seq]);
+  assert.deepEqual(open, openGameCall(counter, game.terms, authorizations));
+  assert.deepEqual([logs[0].action, logs[0].outcome], ['settle', 'sent']);
+  // Not again while the chain catches up; once opened, the dispute runs as usual.
+  await round();
+  assert.equal(chain.sent.length, 1);
+  chain.channels.set(7n, channelOf(game, { status: DISPUTE, epoch: 0, candidate: game.env, deadline: 900 }));
+  await round();
+  assert.deepEqual(chain.sent.map(s => s.via), ['history', 'resolve']);
+});
+
+test('a game nobody opened, unfinished, is left alone', async () => {
+  const chain = fakeChain();
+  const { archive, round } = await watching(chain);
+  await archive.register(prefix(played(FINISHED), 3).export(), [[1n, 2n], [3n, 4n]]);
+  await round();
+  assert.equal(chain.sent.length, 0);
+});
+
+test('a game nobody opened without its wallets\' signatures cannot be opened', async () => {
+  const chain = fakeChain();
+  const { archive, logs, round } = await watching(chain);
+  await archive.register(played(FINISHED).export());
+  await round();
+  assert.equal(chain.sent.length, 0);
+  assert.deepEqual([logs[0].action, logs[0].outcome, logs[0].error], ['settle', 'failed', 'No wallet signatures to open the game with']);
 });
 
 test('an unanchored game is never looked up onchain', async () => {
