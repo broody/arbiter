@@ -330,9 +330,13 @@ export class Archive {
    * `unanchoredTtlMs`, but not a finished one waiting to settle. Returns how many.
    */
   async sweep() {
-    const cutoff = this.now() - this.unanchoredTtlMs;
-    const settling = key => this.#casual.get(key).anchored && this.#loaded.get(key)?.env.outcome.finished;
-    const idle = [...this.#casual].filter(([key, casual]) => casual.touched < cutoff && !settling(key)).map(([key]) => key);
+    const cutoff = this.now() - this.unanchoredTtlMs, idle = [];
+    for (const [key, casual] of [...this.#casual]) {
+      if (casual.touched >= cutoff) continue;
+      // A finished game waiting to open settles: loaded from disk if need be.
+      if (casual.anchored && this.known.has(key) && (await this.session(this.known.get(key)))?.env.outcome.finished) continue;
+      idle.push(key);
+    }
     for (const key of idle) this.#forget(key);
     await Promise.all(idle.map(key => this.backend.put(`${CLOSED}${key}`, { status: 'idle' })));
     for (const key of idle) this.log({ game: key, event: 'evicted', reason: 'idle' });

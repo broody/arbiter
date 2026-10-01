@@ -172,7 +172,7 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
       refereeSignature = signed.signature;
     }
     const signatures = authorizations.map(a => (Array.isArray(a) ? a : [a.r, a.s]));
-    return openGameCall(entry.game, terms, signatures, { refereeSignature, entrypoint: entry.entrypoints?.open_game });
+    return openGameCall(entry.game, terms, signatures, { refereeSignature, entrypoint: entry.entrypoints.open_game });
   }
 
   async function visit(ids, now) {
