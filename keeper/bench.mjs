@@ -105,5 +105,5 @@ async function keeper(label, backend) {
 
 console.log(`\n== Keeper as referee: post a step -> the other seat's stream applies it (${STEPS} steps)`);
 await keeper('memory store', memoryBackend());
-const dir = await mkdtemp(join(tmpdir(), 'referee-bench-'));
+const dir = await mkdtemp(join(tmpdir(), 'arbiter-bench-'));
 try { await keeper('file store  ', await fileBackend(dir)); } finally { await rm(dir, { recursive: true, force: true }); }

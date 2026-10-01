@@ -1,4 +1,4 @@
 # The native proof adapter needs Cairo 2.18 (execution-info v3 proof facts),
 # so it lives in its own workspace.
 [workspace]
-members = ["referee_adapter", "examples/counter"]
+members = ["arbiter_adapter", "examples/counter"]

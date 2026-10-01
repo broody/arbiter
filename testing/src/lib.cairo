@@ -1,10 +1,10 @@
 //! Test-only helpers. `sign` computes STARK-curve ECDSA inside Cairo so tests
 //! can sign messages that depend on runtime values (deployed addresses, chain
 //! id). Never call these from a contract: they take private keys.
+use arbiter::{Signature, rng_next};
 use core::ec::{EcPoint, EcPointTrait, NonZeroEcPoint, stark_curve};
 use core::math::{u256_inv_mod, u256_mul_mod_n};
 use core::poseidon::poseidon_hash_span;
-use referee::{Signature, rng_next};
 
 fn generator() -> EcPoint {
     EcPointTrait::new(stark_curve::GEN_X, stark_curve::GEN_Y).unwrap()
@@ -25,7 +25,7 @@ pub fn sign(message: felt252, private_key: felt252) -> Signature {
     let mut attempt: felt252 = 0;
     loop {
         let nonce: u256 = poseidon_hash_span(
-            array!['REFEREE_TEST_NONCE', private_key, message, attempt].span(),
+            array!['ARBITER_TEST_NONCE', private_key, message, attempt].span(),
         )
             .into();
         attempt += 1;
@@ -71,7 +71,7 @@ pub fn chain_value(seed: felt252, index: u32) -> felt252 {
 
 #[cfg(test)]
 mod tests {
-    use referee::verify;
+    use arbiter::verify;
     use super::{public_key, sign};
 
     #[test]

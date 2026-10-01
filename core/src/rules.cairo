@@ -19,7 +19,7 @@ pub trait GameRules {
     /// Number of seats. The protocol currently supports 2.
     const SEATS: u8;
     /// How the game's clocks run when it is timed, e.g.
-    /// `referee::clocks::StandardTime<State>`. Untimed games never use it.
+    /// `arbiter::clocks::StandardTime<State>`. Untimed games never use it.
     impl Time: ClockRules<Self::State>;
 
     fn init(config: @Self::Config) -> Self::State;

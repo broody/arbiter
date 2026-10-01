@@ -61,7 +61,7 @@ export const code = expected => e => { assert.equal(e.rpcError?.code, expected, 
 
 /** A build directory whose backend is mock-backend.mjs; `patched` writes a build.json with patches. */
 export function buildDir({ patched = true } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'referee-prover-test-'));
+  const dir = mkdtempSync(join(tmpdir(), 'arbiter-prover-test-'));
   mkdirSync(join(dir, 'bin'));
   const mock = fileURLToPath(new URL('./mock-backend.mjs', import.meta.url));
   writeFileSync(join(dir, 'bin/starknet_transaction_prover'), `#!/bin/sh\nexec "${process.execPath}" "${mock}" "$@"\n`, { mode: 0o755 });
@@ -72,7 +72,7 @@ export function buildDir({ patched = true } = {}) {
 /** A gateway running mock workers (two by default) against a mock node. */
 export async function workerGateway({ config = {}, sandbox, patched } = {}) {
   process.env.MOCK_OS_PROGRAM = hex(OS);
-  process.env.MOCK_PID_DIR ??= mkdtempSync(join(tmpdir(), 'referee-prover-pids-'));
+  process.env.MOCK_PID_DIR ??= mkdtempSync(join(tmpdir(), 'arbiter-prover-pids-'));
   const n = await node(), logs = [];
   let gateway;
   try {
@@ -80,7 +80,7 @@ export async function workerGateway({ config = {}, sandbox, patched } = {}) {
       adapter_classes: [hex(CLASS)], max_concurrent: 2, build_dir: buildDir({ patched }), ...config,
       workers: { base_port: 20000 + Math.floor(Math.random() * 20000), ...config.workers } }, { log: e => logs.push(e), sandbox });
   } catch (e) { await n.close(); throw e; }
-  return { gateway, logs, info: () => rpc(gateway.url, 'referee_info', []), close: async () => { await gateway.close(); await n.close(); } };
+  return { gateway, logs, info: () => rpc(gateway.url, 'arbiter_info', []), close: async () => { await gateway.close(); await n.close(); } };
 }
 
 /** Prove with a mock worker; `kind` is the mock's behavior (mock-backend.mjs). */

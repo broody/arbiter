@@ -13,7 +13,7 @@ if command -v systemd-run >/dev/null; then prover/test/cgroup.sh; fi
 # read registry records cached by 2.13, so it gets its own cache.
 export SCARB_IGNORE_CAIRO_VERSION=true
 cache_for() { if [ "$1" = 2.18.0 ]; then echo "${SCARB_CACHE_218:-$HOME/.cache/scarb-2.18}"; else echo "${SCARB_CACHE:-$HOME/.cache/scarb}"; fi; }
-PURE="-p referee -p referee_testing -p referee_counter"
+PURE="-p arbiter -p arbiter_testing -p arbiter_counter"
 ASDF_SCARB_VERSION=2.13.1 scarb fmt
 if git rev-parse -q --verify HEAD >/dev/null; then
   git diff --exit-code HEAD -- examples/counter/src/fixtures.cairo || { echo "fixtures changed; commit them" >&2; exit 1; }

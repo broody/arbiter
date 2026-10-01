@@ -1,17 +1,17 @@
 //! Entrypoint implementations for a game's Dojo system. Each wraps the pure
-//! state machine in `referee::channel` with storage, caller authentication,
+//! state machine in `arbiter::channel` with storage, caller authentication,
 //! prover checks and signature checks. A game system calls one helper per
-//! entrypoint, e.g. `referee_dojo::channel::open_game::<MyRules>(ref world, ...)`.
+//! entrypoint, e.g. `arbiter_dojo::channel::open_game::<MyRules>(ref world, ...)`.
+use arbiter::{
+    Batch, Channel, Envelope, GameRules, Move, Outcome, Signature, Terms, TimeControl, approve_all,
+    channel as machine, checkpoint_hash, context_hash, live_hash, open, referee_resume_hash,
+    reopen_hash, replay, state_ref, terms_message, tip_hash, verify, void_hash,
+};
 use core::ec::EcPointTrait;
 use core::num::traits::Zero;
 use dojo::event::EventStorage;
 use dojo::model::{Model, ModelStorage};
 use dojo::world::{IWorldDispatcherTrait, WorldStorage};
-use referee::{
-    Batch, Channel, Envelope, GameRules, Move, Outcome, Signature, Terms, TimeControl, approve_all,
-    channel as machine, checkpoint_hash, context_hash, live_hash, open, referee_resume_hash,
-    reopen_hash, replay, state_ref, terms_message, tip_hash, verify, void_hash,
-};
 use starknet::syscalls::{call_contract_syscall, get_class_hash_at_syscall};
 use starknet::{
     ContractAddress, SyscallResultTrait, get_block_number, get_block_timestamp, get_caller_address,
@@ -231,7 +231,7 @@ pub fn force<
     let seat = seat_of(@game, get_caller_address());
     assert(state_ref::<R>(@start).hash == game.anchor.hash, 'Wrong anchor state');
     let terms = terms::<R>(@game);
-    let end = referee::force::<R>(game.context, @terms, start, witness, seat, steps);
+    let end = arbiter::force::<R>(game.context, @terms, start, witness, seat, steps);
     let channel = machine::forced(
         channel_of(@game),
         epoch,
@@ -269,7 +269,7 @@ pub fn roll<
     let game = read(@world, game_id);
     assert(state_ref::<R>(@start).hash == game.anchor.hash, 'Wrong anchor state');
     let terms = terms::<R>(@game);
-    let end = referee::roll::<R>(game.context, @terms, start, witness, value);
+    let end = arbiter::roll::<R>(game.context, @terms, start, witness, value);
     let channel = machine::rolled(
         channel_of(@game), epoch, state_ref::<R>(@end), get_block_timestamp(), get_block_number(),
     );

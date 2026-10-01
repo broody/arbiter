@@ -1,8 +1,8 @@
 //! The counter game as a Dojo world. The whole channel system is one line per
-//! entrypoint on top of `referee_dojo::channel`.
-use referee::{Batch, Envelope, Move, Signature, Terms};
-use referee_counter::{Action, Config, Counter};
-use referee_dojo::models::ChannelGame;
+//! entrypoint on top of `arbiter_dojo::channel`.
+use arbiter::{Batch, Envelope, Move, Signature, Terms};
+use arbiter_counter::{Action, Config, Counter};
+use arbiter_dojo::models::ChannelGame;
 
 #[starknet::interface]
 pub trait ICounterChannel<T> {
@@ -60,11 +60,11 @@ pub trait ICounterChannel<T> {
 
 #[dojo::contract]
 pub mod channel {
+    use arbiter::{Batch, Envelope, Move, Signature, Terms};
+    use arbiter_counter::{Action, Config, Counter, CounterRules};
+    use arbiter_dojo::channel as binding;
+    use arbiter_dojo::models::ChannelGame;
     use dojo::world::WorldStorage;
-    use referee::{Batch, Envelope, Move, Signature, Terms};
-    use referee_counter::{Action, Config, Counter, CounterRules};
-    use referee_dojo::channel as binding;
-    use referee_dojo::models::ChannelGame;
 
     #[abi(embed_v0)]
     impl CounterChannelImpl of super::ICounterChannel<ContractState> {

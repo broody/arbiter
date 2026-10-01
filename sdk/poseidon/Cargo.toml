@@ -3,7 +3,7 @@
 # allocator, no bindgen. Rebuild with `node sdk/scripts/build-poseidon.mjs`,
 # which writes sdk/src/poseidon-wasm.mjs.
 [package]
-name = "referee_poseidon"
+name = "arbiter_poseidon"
 version = "0.1.0"
 edition = "2021"
 publish = false

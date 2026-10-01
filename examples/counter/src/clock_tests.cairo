@@ -1,10 +1,10 @@
 //! Referee clocks: the timed fixture games replay against their stamps and the
 //! referee's attestation, and unsigned timed steps pin the clock rules, on the
 //! standard time rules and on the hourglass example.
-use referee::clocks::{
+use arbiter::clocks::{
     Byoyomi, MAX_CLOCK_MS, MAX_PERIODS, Standard, StandardClock, StandardTime, decode, encode,
 };
-use referee::{
+use arbiter::{
     Batch, Clock, Envelope, Move, REASON_TIMEOUT, REFEREE, Signature, Terms, TimeControl,
     apply_steps, check_clock, context_hash, due, force, open, replay, rng_next, roll, state_hash,
     tip_hash, void_hash,
@@ -378,7 +378,7 @@ fn the_transcript_cap_ends_the_game() {
     let env = run(steps, stamps);
     assert_eq!(env.seq, 96);
     assert!(env.outcome.finished);
-    assert_eq!((env.outcome.winner, env.outcome.reason), (referee::DRAW, LIMIT));
+    assert_eq!((env.outcome.winner, env.outcome.reason), (arbiter::DRAW, LIMIT));
 }
 
 #[test]

@@ -182,7 +182,7 @@ test('approvals encode as a span of signatures', () => {
 test('proof payload binds the game, epoch and both state hashes', () => {
   const context = contextHash(counter, terms);
   const payload = proofPayload(counter, { classHash: 7n, prover: 8n, terms, context, epoch: 3, startHash: 1n, endHash: 2n });
-  assert.deepEqual(payload.slice(1, 3), [tag('COUNTER'), tag('REFEREE_PROVED_V1')]);
+  assert.deepEqual(payload.slice(1, 3), [tag('COUNTER'), tag('ARBITER_PROVED_V1')]);
   assert.equal(payload.length, 11);
   assert.notEqual(proofMessageHash(8n, payload), proofMessageHash(9n, payload));
 });

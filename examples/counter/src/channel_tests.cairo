@@ -1,8 +1,8 @@
-use referee::channel::{
+use arbiter::channel::{
     ACTIVE, DISPUTE, FORCED, PAUSE_SECONDS, SETTLED, acknowledge, claim_timeout, forced,
     open as open_channel, open_dispute, receive, resign, resolve, resume, rolled, void,
 };
-use referee::{
+use arbiter::{
     Channel, DRAW, Envelope, Move, REASON_ABANDON, REASON_RESIGN, REASON_VOID, REFEREE, StateRef,
     force, open, replay, state_ref,
 };

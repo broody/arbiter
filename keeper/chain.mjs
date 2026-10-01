@@ -10,12 +10,12 @@ import { Account, RpcProvider, hash } from 'starknet';
 import { decodeTerms, felt, hex, poseidon } from '../sdk/src/index.mjs';
 import { contractCall, getChannel, historyCall, proveSession, reverted } from '../sdk/src/proving.mjs';
 
-/** Default entrypoint names: referee_dojo's (e.g. the counter's system). */
+/** Default entrypoint names: arbiter_dojo's (e.g. the counter's system). */
 export const ENTRYPOINTS = { get_channel: 'get_channel', submit_history: 'submit_history', resolve: 'resolve',
   acknowledge: 'acknowledge', resume_by_referee: 'resume_by_referee', terms: 'terms', force: 'force', roll: 'roll',
   open_game: 'open_game' };
 
-/** `ChannelUpdated.kind` values (referee_dojo::models). 1 and 2, a join and a cancel, are retired. */
+/** `ChannelUpdated.kind` values (arbiter_dojo::models). 1 and 2, a join and a cancel, are retired. */
 export const UPDATES = { OPENED: 0, DISPUTED: 3, RECEIVED: 4, RESOLVED: 5, FORCED: 6, RESUMED: 7,
   TIMED_OUT: 8, RESIGNED: 9, ACKNOWLEDGED: 10, ROLLED: 11, VOIDED: 12 };
 
@@ -42,7 +42,7 @@ export function channelUpdate(data) {
     deadline: Number(deadline), state_hash, winner: Number(winner), reason: Number(reason) };
 }
 
-// A channel in forced play (referee::channel::FORCED).
+// A channel in forced play (arbiter::channel::FORCED).
 const FORCED = 3;
 
 // The calls a traced transaction made to `channel` for game `gameId` with one

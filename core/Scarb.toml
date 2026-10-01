@@ -1,5 +1,5 @@
 [package]
-name = "referee"
+name = "arbiter"
 version = "0.1.0"
 edition = "2024_07"
 # Must build on Dojo's Cairo (2.13) and on the proof adapter's Cairo (2.18).

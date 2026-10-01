@@ -36,7 +36,7 @@ test('an allowlisted adapter reaches the backend and gets its proof', async () =
     assert.equal(s.backend.calls.length, 1);
     assert.deepEqual(s.backend.calls[0].params, params);
     assert.equal(await rpc(s.gateway.url, 'starknet_specVersion', []), '0.10.3-rc.2');
-    const info = await rpc(s.gateway.url, 'referee_info', []);
+    const info = await rpc(s.gateway.url, 'arbiter_info', []);
     assert.deepEqual(info.adapter_classes, [hex(CLASS)]);
     assert.deepEqual(info.proof_paths, ['PROOF1']);
     assert.equal(info.memory, 'standard');

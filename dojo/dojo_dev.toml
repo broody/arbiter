@@ -1,6 +1,6 @@
 [world]
-name = "Referee counter"
-seed = "referee_counter"
+name = "Arbiter counter"
+seed = "arbiter_counter"
 
 [namespace]
 default = "counter"

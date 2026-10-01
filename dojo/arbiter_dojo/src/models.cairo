@@ -1,5 +1,5 @@
-use referee::Outcome;
-use referee::channel::{Channel, StateRef};
+use arbiter::Outcome;
+use arbiter::channel::{Channel, StateRef};
 use starknet::ContractAddress;
 
 /// `ChannelUpdated.kind` values. 1 and 2 (a join and a cancel) are retired:
@@ -32,7 +32,7 @@ pub struct StoredRef {
     pub outcome: StoredOutcome,
 }
 
-/// One referee channel, as `get_channel` returns it: its terms and its state
+/// One arbiter channel, as `get_channel` returns it: its terms and its state
 /// together, with seats in the terms' order. `config` is the game's `Config`,
 /// serialized. A timed game's `referee` key and serialized `clock_settings`
 /// form its `TimeControl`, with `referee_tip`, the tip of the referee's hash

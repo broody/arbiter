@@ -1,4 +1,4 @@
-// Node file backend for `SessionStore` (`@referee/sdk/store/file`): one JSON
+// Node file backend for `SessionStore` (`@arbiter/sdk/store/file`): one JSON
 // file per key in a directory, replaced atomically and synced before a write
 // resolves. One process owns a directory at a time; a LOCK file holds its pid.
 import { mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';

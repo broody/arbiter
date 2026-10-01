@@ -2,39 +2,39 @@
 version = 1
 
 [[package]]
-name = "referee"
+name = "arbiter"
 version = "0.1.0"
 
 [[package]]
-name = "referee_adapter"
+name = "arbiter_adapter"
 version = "0.1.0"
 dependencies = [
- "referee",
+ "arbiter",
 ]
 
 [[package]]
-name = "referee_counter"
+name = "arbiter_counter"
 version = "0.1.0"
 dependencies = [
- "referee",
+ "arbiter",
 ]
 
 [[package]]
-name = "referee_counter_adapter"
+name = "arbiter_counter_adapter"
 version = "0.1.0"
 dependencies = [
- "referee",
- "referee_adapter",
- "referee_counter",
- "referee_testing",
+ "arbiter",
+ "arbiter_adapter",
+ "arbiter_counter",
+ "arbiter_testing",
  "snforge_std",
 ]
 
 [[package]]
-name = "referee_testing"
+name = "arbiter_testing"
 version = "0.1.0"
 dependencies = [
- "referee",
+ "arbiter",
 ]
 
 [[package]]

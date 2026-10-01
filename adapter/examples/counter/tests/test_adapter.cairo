@@ -2,18 +2,18 @@
 //! replays a signed game and emits the transition message; `settle` accepts
 //! exactly that message as proof facts and relays the end state. Proof facts
 //! are cheated here; a real run attaches a native Stwo proof instead.
-use referee::clocks::{Standard, encode};
-use referee::{
+use arbiter::clocks::{Standard, encode};
+use arbiter::{
     Batch, Envelope, Move, Signature, Terms, TimeControl, action_hash, actor, apply_steps,
     context_hash, open, stamp_hash, state_hash,
 };
-use referee_adapter::{ProofFacts, check_facts, message_hash, payload};
-use referee_counter::{ADD, Action, Config, Counter, CounterRules};
-use referee_counter_adapter::{
+use arbiter_adapter::{ProofFacts, check_facts, message_hash, payload};
+use arbiter_counter::{ADD, Action, Config, Counter, CounterRules};
+use arbiter_counter_adapter::{
     ICounterProverDispatcher, ICounterProverDispatcherTrait, IVirtualCounterDispatcher,
     IVirtualCounterDispatcherTrait,
 };
-use referee_testing::{chain_value, public_key, sign};
+use arbiter_testing::{chain_value, public_key, sign};
 use snforge_std::{
     CheatSpan, ContractClassTrait, DeclareResultTrait, MessageToL1, MessageToL1SpyAssertionsTrait,
     cheat_proof_facts, cheat_resource_bounds, declare, get_class_hash, spy_messages_to_l1,
@@ -87,13 +87,13 @@ trait IMockChannel<T> {
     fn accepted(self: @T) -> felt252;
 }
 
-/// Stands in for a referee_dojo game system: epoch 0, anchored at the opening
+/// Stands in for a arbiter_dojo game system: epoch 0, anchored at the opening
 /// state in block 10, and the same candidate unless `set_candidate` says
 /// otherwise, or no game at all (`set_unopened`).
 #[starknet::contract]
 mod MockChannel {
-    use referee::{Envelope, Signature, Terms, state_hash};
-    use referee_counter::{Config, Counter, CounterRules};
+    use arbiter::{Envelope, Signature, Terms, state_hash};
+    use arbiter_counter::{Config, Counter, CounterRules};
     use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
     use starknet::{ContractAddress, get_caller_address, get_contract_address};
 

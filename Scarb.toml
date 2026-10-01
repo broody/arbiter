@@ -1,6 +1,6 @@
 # Every library crate is a root member so git dependencies can find it.
 # Members need different toolchains: core, testing and the counter game build on
-# Cairo 2.13 and 2.18, referee_dojo on 2.13 (Dojo 1.8), referee_adapter on 2.18.
+# Cairo 2.13 and 2.18, arbiter_dojo on 2.13 (Dojo 1.8), arbiter_adapter on 2.18.
 # Build here with SCARB_IGNORE_CAIRO_VERSION=true and --package filters; see
 # scripts/check.sh. dojo/ and adapter/ have their own workspaces for examples.
 [workspace]
@@ -8,6 +8,6 @@ members = [
     "core",
     "testing",
     "examples/counter",
-    "dojo/referee_dojo",
-    "adapter/referee_adapter",
+    "dojo/arbiter_dojo",
+    "adapter/arbiter_adapter",
 ]

@@ -1,3 +1,18 @@
+use arbiter::channel::{ACTIVE, DISPUTE, FORCED, PAUSE_SECONDS, SETTLED};
+use arbiter::clocks::{Standard, encode};
+use arbiter::{
+    Batch, Envelope, Move, REASON_ABANDON, REASON_TIMEOUT, REASON_VOID, REFEREE, Signature, Terms,
+    TimeControl, action_hash, actor, apply_steps, checkpoint_hash, context_hash, force, live_hash,
+    open, referee_resume_hash, reopen_hash, roll, stamp_hash, state_hash, terms_message, tip_hash,
+    void_hash,
+};
+use arbiter_counter::{ADD, Action, Config, Counter, CounterRules, GAMBLE};
+use arbiter_dojo::channel::read;
+use arbiter_dojo::models::{
+    ChannelGame, ChannelRng, e_ChannelUpdated, m_ChannelRng, m_ChannelState, m_ChannelTerms,
+    m_ProverAllowed,
+};
+use arbiter_testing::{chain_value, public_key, sign};
 use core::hash::HashStateTrait;
 use core::pedersen::PedersenTrait;
 use dojo::model::ModelStorage;
@@ -6,21 +21,6 @@ use dojo_cairo_test::{
     ContractDef, ContractDefTrait, NamespaceDef, TestResource, WorldStorageTestTrait,
     spawn_test_world,
 };
-use referee::channel::{ACTIVE, DISPUTE, FORCED, PAUSE_SECONDS, SETTLED};
-use referee::clocks::{Standard, encode};
-use referee::{
-    Batch, Envelope, Move, REASON_ABANDON, REASON_TIMEOUT, REASON_VOID, REFEREE, Signature, Terms,
-    TimeControl, action_hash, actor, apply_steps, checkpoint_hash, context_hash, force, live_hash,
-    open, referee_resume_hash, reopen_hash, roll, stamp_hash, state_hash, terms_message, tip_hash,
-    void_hash,
-};
-use referee_counter::{ADD, Action, Config, Counter, CounterRules, GAMBLE};
-use referee_dojo::channel::read;
-use referee_dojo::models::{
-    ChannelGame, ChannelRng, e_ChannelUpdated, m_ChannelRng, m_ChannelState, m_ChannelTerms,
-    m_ProverAllowed,
-};
-use referee_testing::{chain_value, public_key, sign};
 use starknet::syscalls::{deploy_syscall, get_class_hash_at_syscall};
 use starknet::testing::{set_account_contract_address, set_block_timestamp, set_contract_address};
 use starknet::{ContractAddress, SyscallResultTrait, get_tx_info};
@@ -769,20 +769,20 @@ fn segments_extend_the_candidate_within_one_window() {
 
 #[test]
 fn channel_state_packs_and_unpacks_exactly() {
-    let big = referee_dojo::models::StoredOutcome { finished: true, winner: 255, reason: 255 };
+    let big = arbiter_dojo::models::StoredOutcome { finished: true, winner: 255, reason: 255 };
     let r = |
         hash: felt252, seq: u32,
-    | referee::channel::StateRef {
+    | arbiter::channel::StateRef {
         hash,
         seq,
         support_turn: 0xffffffff,
         due: 255,
-        outcome: referee::Outcome {
+        outcome: arbiter::Outcome {
             finished: big.finished, winner: big.winner, reason: big.reason,
         },
     };
     let max40: u64 = 0xffffffffff;
-    let channel = referee::Channel {
+    let channel = arbiter::Channel {
         status: 255,
         epoch: 0xffffffff,
         context: 0,
@@ -795,34 +795,34 @@ fn channel_state_packs_and_unpacks_exactly() {
         acked_epoch: 0xfffffffe,
         acked_deadline: max40 - 3,
         referee_rng: true,
-        result: referee::Outcome { finished: true, winner: 254, reason: 253 },
+        result: arbiter::Outcome { finished: true, winner: 254, reason: 253 },
     };
-    let packed = referee_dojo::models::pack_state(1, @channel);
-    assert_eq!(referee_dojo::models::unpack_state(@packed, 0, 604800), channel);
+    let packed = arbiter_dojo::models::pack_state(1, @channel);
+    assert_eq!(arbiter_dojo::models::unpack_state(@packed, 0, 604800), channel);
     // The one bit that says the referee gives the randomness stands alone.
-    let seats = referee::Channel { referee_rng: false, ..channel };
-    let packed = referee_dojo::models::pack_state(1, @seats);
-    assert_eq!(referee_dojo::models::unpack_state(@packed, 0, 604800), seats);
+    let seats = arbiter::Channel { referee_rng: false, ..channel };
+    let packed = arbiter_dojo::models::pack_state(1, @seats);
+    assert_eq!(arbiter_dojo::models::unpack_state(@packed, 0, 604800), seats);
     // A candidate that is the anchor is stored as zero, and read back as the anchor.
-    let same = referee::Channel { candidate: channel.anchor, ..channel };
-    let packed = referee_dojo::models::pack_state(1, @same);
+    let same = arbiter::Channel { candidate: channel.anchor, ..channel };
+    let packed = arbiter_dojo::models::pack_state(1, @same);
     assert_eq!(packed.candidate, 0);
-    assert_eq!(referee_dojo::models::unpack_state(@packed, 0, 604800), same);
+    assert_eq!(arbiter_dojo::models::unpack_state(@packed, 0, 604800), same);
 }
 
 #[test]
 #[should_panic(expected: 'Value exceeds 40 bits')]
 fn block_numbers_past_40_bits_are_refused() {
-    let opening = referee::channel::StateRef {
+    let opening = arbiter::channel::StateRef {
         hash: 0xa,
         seq: 0,
         support_turn: 0,
         due: 0,
-        outcome: referee::Outcome { finished: false, winner: 0, reason: 0 },
+        outcome: arbiter::Outcome { finished: false, winner: 0, reason: 0 },
     };
-    let empty = referee::channel::open(1, opening, 3600, false, 0);
-    let channel = referee::Channel { anchor_block: 0x10000000000, ..empty };
-    referee_dojo::models::pack_state(1, @channel);
+    let empty = arbiter::channel::open(1, opening, 3600, false, 0);
+    let channel = arbiter::Channel { anchor_block: 0x10000000000, ..empty };
+    arbiter_dojo::models::pack_state(1, @channel);
 }
 
 // ---- Randomness from the referee ----

@@ -1,7 +1,7 @@
-//! Minimal referee game. Seats alternate. ADD raises a shared counter by 1..=3;
+//! Minimal arbiter game. Seats alternate. ADD raises a shared counter by 1..=3;
 //! GAMBLE asks the opponent for randomness and raises it by a d6 roll. Whoever
 //! brings the counter to the target wins.
-use referee::GameRules;
+use arbiter::GameRules;
 
 pub const ADD: u8 = 0;
 pub const GAMBLE: u8 = 1;
@@ -42,7 +42,7 @@ pub impl CounterRules of GameRules {
     const TAG: felt252 = 'COUNTER';
     const RULES_VERSION: u32 = 1;
     const SEATS: u8 = 2;
-    impl Time = referee::clocks::StandardTime<Counter>;
+    impl Time = arbiter::clocks::StandardTime<Counter>;
 
     fn init(config: @Config) -> Counter {
         assert(*config.target > 0, 'Invalid target');
@@ -90,7 +90,7 @@ pub impl CounterRules of GameRules {
     }
 
     fn adjudicate(config: @Config, state: @Counter) -> (u8, u8) {
-        (referee::DRAW, LIMIT)
+        (arbiter::DRAW, LIMIT)
     }
 }
 

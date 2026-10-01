@@ -1,8 +1,8 @@
 //! A game with its own time rules: the counter game on an hourglass, where the
 //! time a seat uses flows to its opponent. Any `ClockRules` plugs in the same
 //! way, through `GameRules::Time`.
-use referee::GameRules;
-use referee::clocks::{ClockRules, MAX_CLOCK_MS, decode, encode};
+use arbiter::GameRules;
+use arbiter::clocks::{ClockRules, MAX_CLOCK_MS, decode, encode};
 use crate::{Action, Config, Counter, CounterRules};
 
 #[derive(Copy, Drop, Serde, PartialEq, Debug)]

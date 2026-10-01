@@ -1,6 +1,6 @@
+use arbiter::{Batch, Envelope, GameRules, Signature, Terms, context_hash, open, replay, state_hash};
 use core::num::traits::Zero;
 use core::poseidon::poseidon_hash_span;
-use referee::{Batch, Envelope, GameRules, Signature, Terms, context_hash, open, replay, state_hash};
 use starknet::syscalls::{
     call_contract_syscall, get_class_hash_at_syscall, get_execution_info_v3_syscall,
     send_message_to_l1_syscall,
@@ -31,7 +31,7 @@ pub fn payload<impl R: GameRules>(
     end_hash: felt252,
 ) -> Array<felt252> {
     array![
-        class_hash, R::TAG, 'REFEREE_PROVED_V1', chain_id, prover, channel, game_id, context,
+        class_hash, R::TAG, 'ARBITER_PROVED_V1', chain_id, prover, channel, game_id, context,
         epoch.into(), start_hash, end_hash,
     ]
 }

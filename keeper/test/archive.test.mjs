@@ -198,7 +198,7 @@ test('unanchored games: capped per wallet, closed once finished or idle', async 
 });
 
 test('the archive, its evidence and closed games survive a restart', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'referee-keeper-'));
+  const dir = await mkdtemp(join(tmpdir(), 'arbiter-keeper-'));
   try {
     let backend = await fileBackend(dir);
     let archive = await open(backend);

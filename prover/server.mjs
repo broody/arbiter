@@ -1,18 +1,18 @@
-// referee prover gateway: a `starknet_proveTransaction` JSON-RPC endpoint (the
-// API `@referee/sdk/proving` calls) in front of a proving backend, today
+// arbiter prover gateway: a `starknet_proveTransaction` JSON-RPC endpoint (the
+// API `@arbiter/sdk/proving` calls) in front of a proving backend, today
 // StarkWare's starknet_transaction_prover built by build.sh (PROOF1). It runs
 // the backend as isolated workers, one job each (workers.mjs), or forwards to an
 // external backend at `backend_url`.
 //
 // Before a request takes a proving slot, the gateway checks that it is the
-// zero-fee virtual INVOKE_V3 of an allowlisted referee adapter class whose
-// pinned virtual OS program is the backend's. So a public server proves referee
+// zero-fee virtual INVOKE_V3 of an allowlisted arbiter adapter class whose
+// pinned virtual OS program is the backend's. So a public server proves arbiter
 // settlements and nothing else. It never sees session keys: transcripts and
 // signatures are public.
 //
 //   node prover/server.mjs CONFIG_JSON      (see config.example.json)
 //
-// Methods: starknet_specVersion, starknet_proveTransaction, referee_info.
+// Methods: starknet_specVersion, starknet_proveTransaction, arbiter_info.
 import { createServer } from 'node:http';
 import { existsSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -24,13 +24,13 @@ import { hex, tag } from '../sdk/src/index.mjs';
 import { rpc } from '../sdk/src/proving.mjs';
 import { Slots, cgroupSandbox, post, processSandbox, startWorkers } from './workers.mjs';
 
-// JSON-RPC error codes: the proving API's where one fits, then referee's own.
+// JSON-RPC error codes: the proving API's where one fits, then arbiter's own.
 export const INVALID_REQUEST = -32600, METHOD_NOT_FOUND = -32601, INVALID_PARAMS = -32602, INTERNAL = -32603;
 export const SERVICE_BUSY = -32005, RATE_LIMITED = -32029;
 export const BLOCK_NOT_FOUND = 24, INVALID_TRANSACTION = 1000;
 export const NOT_ALLOWED = 1100, WRONG_OS_PROGRAM = 1101, EXCEEDS_PROOF1 = 1102, JOB_FAILED = 1103;
 
-// The adapter's pinned virtual OS program getter (referee_adapter `os_program`).
+// The adapter's pinned virtual OS program getter (arbiter_adapter `os_program`).
 const OS_PROGRAM_SELECTOR = hash.getSelectorFromName('os_program');
 
 const DEFAULTS = {
@@ -78,7 +78,7 @@ export function loadConfig(raw) {
     config.workers = { ...WORKER_DEFAULTS, job_memory: MEMORY_MODES[config.memory].job_memory, ...config.workers };
     if (!Object.hasOwn(SANDBOXES, config.workers.sandbox))
       throw Error(`Config workers.sandbox must be one of ${Object.keys(SANDBOXES).join(', ')}`);
-    config.build_dir ??= process.env.REFEREE_PROVER_BUILD ?? join(homedir(), '.cache/referee-prover');
+    config.build_dir ??= process.env.ARBITER_PROVER_BUILD ?? join(homedir(), '.cache/arbiter-prover');
   }
   return config;
 }
@@ -147,7 +147,7 @@ export async function startGateway(rawConfig, { log = entry => console.log(JSON.
       if (e.rpcError?.code === 20) fail(NOT_ALLOWED, 'Sender is not a deployed contract');
       throw e;
     }
-    if (!config.adapter_classes.has(classHash)) fail(NOT_ALLOWED, 'Sender is not an allowlisted referee adapter', { class_hash: hex(classHash) });
+    if (!config.adapter_classes.has(classHash)) fail(NOT_ALLOWED, 'Sender is not an allowlisted arbiter adapter', { class_hash: hex(classHash) });
     const [osProgram] = await node('starknet_call', { block_id: block,
       request: { contract_address: tx.sender_address, entry_point_selector: OS_PROGRAM_SELECTOR, calldata: [] } });
     if (BigInt(osProgram) !== config.virtual_os_program)
@@ -170,7 +170,7 @@ export async function startGateway(rawConfig, { log = entry => console.log(JSON.
     if (!request || request.jsonrpc !== '2.0' || typeof request.method !== 'string') fail(INVALID_REQUEST, 'Invalid JSON-RPC request');
     switch (request.method) {
       case 'starknet_specVersion': return { result: backendVersion };
-      case 'referee_info': return { result: info() };
+      case 'arbiter_info': return { result: info() };
       case 'starknet_proveTransaction': {
         const id = ++jobs, started = Date.now();
         const entry = { job: id, client, sender: request.params?.transaction?.sender_address,
@@ -278,6 +278,6 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const file = process.argv[2];
   if (!file) { console.error('usage: node prover/server.mjs CONFIG_JSON'); process.exit(2); }
   const gateway = await startGateway(JSON.parse(await readFile(file, 'utf8')));
-  console.error(`referee prover gateway on ${gateway.url}: ${JSON.stringify(gateway.info())}`);
+  console.error(`arbiter prover gateway on ${gateway.url}: ${JSON.stringify(gateway.info())}`);
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => gateway.close().then(() => process.exit(0)));
 }

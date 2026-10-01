@@ -1,13 +1,13 @@
-// Native SNIP-36 proving of a session through a referee_adapter instance: build
+// Native SNIP-36 proving of a session through a arbiter_adapter instance: build
 // the virtual transaction the adapter executes, request a proof, check the
-// response, and build the `settle` call. Works for any referee game; the game
-// comes from the session. Import as `@referee/sdk/proving`.
+// response, and build the `settle` call. Works for any arbiter game; the game
+// comes from the session. Import as `@arbiter/sdk/proving`.
 //
-// Adapter convention (referee_adapter::prover): `__execute__(channel, game_id,
+// Adapter convention (arbiter_adapter::prover): `__execute__(channel, game_id,
 // epoch, start, witness, batch, opening)`, with no witness argument for a game
 // whose witness is `()`, and `settle(channel, game_id, epoch, start_hash, end,
 // acks)`. The game's channel exposes `snapshot(game_id)`
-// (referee_dojo::channel::snapshot). A proof starts from the channel's anchor,
+// (arbiter_dojo::channel::snapshot). A proof starts from the channel's anchor,
 // or from its candidate to extend it. For a game no channel has opened yet,
 // `opening` carries its terms and the proof starts from their opening state;
 // its `settle` then goes in one transaction with `open_game`.
@@ -23,7 +23,7 @@ const NO_ACKS = [ZERO_SIGNATURE, ZERO_SIGNATURE];
 
 /** Native verification accepts proof bases at least this many blocks behind the head. */
 export const NATIVE_CONFIRMATIONS = 10;
-/** PROOF1 is the small (log20) path, PROOF2 the large path; referee_adapter accepts both. */
+/** PROOF1 is the small (log20) path, PROOF2 the large path; arbiter_adapter accepts both. */
 export const PROOF_VERSIONS = ['PROOF1', 'PROOF2'];
 /**
  * Virtual OS program attested in Starknet v0.14.4 proof facts (Sepolia, 2026-09).
@@ -126,7 +126,7 @@ export const openGameCall = (game, terms, signatures, { refereeSignature = ZERO_
   contractCall(terms.channel, entrypoint, [...encodeTerms(game, terms), BigInt(signatures.length),
     ...signatures.flatMap(signature => [BigInt(signature.length), ...signature.map(felt)]), ...encodeSignature(refereeSignature)]);
 
-/** A game's `get_channel(game_id)`: referee_dojo's `ChannelGame` model, decoded. */
+/** A game's `get_channel(game_id)`: arbiter_dojo's `ChannelGame` model, decoded. */
 export async function getChannel(provider, game, channel, gameId, { block = 'latest', entrypoint = 'get_channel' } = {}) {
   return decodeChannelGame(game, await provider.callContract(contractCall(channel, entrypoint, [gameId]), block));
 }

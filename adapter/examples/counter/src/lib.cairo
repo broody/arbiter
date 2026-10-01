@@ -1,8 +1,8 @@
 //! Proof adapter for the counter game: a thin account contract over
-//! `referee_adapter`. Deploy one instance per Starknet OS program and
+//! `arbiter_adapter`. Deploy one instance per Starknet OS program and
 //! allowlist its class in the game's channel.
-use referee::{Batch, Envelope, Signature, Terms};
-use referee_counter::{Action, Config, Counter};
+use arbiter::{Batch, Envelope, Signature, Terms};
+use arbiter_counter::{Action, Config, Counter};
 use starknet::ContractAddress;
 
 #[starknet::interface]
@@ -46,9 +46,9 @@ pub trait IVirtualCounter<T> {
 
 #[starknet::contract(account)]
 pub mod CounterProver {
-    use referee::{Batch, Envelope, Signature, Terms};
-    use referee_adapter::prover;
-    use referee_counter::{Action, Config, Counter, CounterRules};
+    use arbiter::{Batch, Envelope, Signature, Terms};
+    use arbiter_adapter::prover;
+    use arbiter_counter::{Action, Config, Counter, CounterRules};
     use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
     use starknet::{ContractAddress, VALIDATED};
 

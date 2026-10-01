@@ -1,21 +1,21 @@
-# systemd unit for the referee prover gateway (system or user instance).
+# systemd unit for the arbiter prover gateway (system or user instance).
 # Delegate=yes gives the gateway its own cgroup v2 subtree: with
 # workers.cgroup_root "self" it moves itself into a `gateway` leaf and runs each
 # worker in a sibling group under the job limits (prover/README.md, Isolation).
-# Paths assume the repository at /opt/referee (with `npm ci --omit=dev`), a build
-# from prover/build.sh at /var/lib/referee-prover/build and the config at
-# /etc/referee/prover.json.
+# Paths assume the repository at /opt/arbiter (with `npm ci --omit=dev`), a build
+# from prover/build.sh at /var/lib/arbiter-prover/build and the config at
+# /etc/arbiter/prover.json.
 [Unit]
-Description=referee prover gateway
+Description=arbiter prover gateway
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=referee
-Group=referee
-Environment=REFEREE_PROVER_BUILD=/var/lib/referee-prover/build
-ExecStart=/usr/bin/node /opt/referee/prover/server.mjs /etc/referee/prover.json
+User=arbiter
+Group=arbiter
+Environment=ARBITER_PROVER_BUILD=/var/lib/arbiter-prover/build
+ExecStart=/usr/bin/node /opt/arbiter/prover/server.mjs /etc/arbiter/prover.json
 Delegate=yes
 # The whole subtree: max_concurrent workers at workers.job_memory each, plus the
 # gateway. Size it to the host (for example 2 x 56G standard workers).
@@ -28,8 +28,8 @@ RestartSec=10
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/referee-prover
-StateDirectory=referee-prover
+ReadWritePaths=/var/lib/arbiter-prover
+StateDirectory=arbiter-prover
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

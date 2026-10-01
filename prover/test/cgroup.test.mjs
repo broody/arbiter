@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import { JOB_FAILED } from '../server.mjs';
 import { alive, childPid, code, job, until, workerGateway } from './helpers.mjs';
 
-const skip = process.env.REFEREE_CGROUP_TEST !== '1' && 'needs a delegated cgroup: run prover/test/cgroup.sh';
+const skip = process.env.ARBITER_CGROUP_TEST !== '1' && 'needs a delegated cgroup: run prover/test/cgroup.sh';
 const failed = reason => e => code(JOB_FAILED)(e) && e.rpcError.data.reason === reason;
 // The delegated subtree: this process's cgroup, or its parent once the gateway has moved into `gateway`.
 const root = () => {

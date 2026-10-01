@@ -29,7 +29,7 @@ const kinds = {
     return { backend, reopen: async () => backend, shared: async () => backend, done: async () => {} };
   },
   file: async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'referee-store-'));
+    const dir = await mkdtemp(join(tmpdir(), 'arbiter-store-'));
     let backend = await fileBackend(dir);
     return {
       backend,
@@ -40,8 +40,8 @@ const kinds = {
   },
   indexedDB: () => {
     const indexedDB = new IDBFactory();
-    const handles = [indexedDbBackend('referee', { indexedDB })];
-    const another = async () => { handles.push(indexedDbBackend('referee', { indexedDB })); return handles.at(-1); };
+    const handles = [indexedDbBackend('arbiter', { indexedDB })];
+    const another = async () => { handles.push(indexedDbBackend('arbiter', { indexedDB })); return handles.at(-1); };
     return { backend: handles[0], reopen: another, shared: another, done: () => Promise.all(handles.map(h => h.close())) };
   },
 };
@@ -170,7 +170,7 @@ for (const [name, make] of Object.entries(kinds)) {
 }
 
 test('file: one process owns a store directory', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'referee-store-'));
+  const dir = await mkdtemp(join(tmpdir(), 'arbiter-store-'));
   try {
     const backend = await fileBackend(dir);
     await assert.rejects(fileBackend(dir), new RegExp(`in use by process ${process.pid}`));

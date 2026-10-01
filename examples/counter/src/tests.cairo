@@ -1,4 +1,4 @@
-use referee::{
+use arbiter::{
     Batch, Envelope, Move, REASON_RESIGN, Signature, apply_steps, approve_all, checkpoint_hash,
     context_hash, force, live_hash, open, referee_resume_hash, replay, rng_next, state_hash,
     terms_message,

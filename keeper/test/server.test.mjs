@@ -1,4 +1,4 @@
-// The keeper over HTTP, driven by @referee/sdk/keeper: two players moving
+// The keeper over HTTP, driven by @arbiter/sdk/keeper: two players moving
 // through it, long polls, errors, limits and config loading.
 import assert from 'node:assert/strict';
 import { dirname } from 'node:path';

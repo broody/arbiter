@@ -25,7 +25,7 @@ call starknet_chainId >/dev/null || { cat "$log" >&2; exit 1; }
 read -r address key < <(call dev_predeployedAccounts | node -e \
   'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const [a]=JSON.parse(s).result;console.log(a.address,a.privateKey)})')
 (cd dojo && export ASDF_SOZO_VERSION=${SOZO_VERSION:-1.8.0} \
-  && sozo build -p referee_counter_dojo >/dev/null \
+  && sozo build -p arbiter_counter_dojo >/dev/null \
   && sozo migrate --rpc-url "$RPC" --account-address "$address" --private-key "$key" >/dev/null)
 channel=$(node -e 'console.log(require("./dojo/manifest_dev.json").contracts.find(c => c.tag === "counter-channel").address)')
 world=$(node -e 'console.log(require("./dojo/manifest_dev.json").world.address)')

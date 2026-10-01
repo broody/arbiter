@@ -15,11 +15,11 @@
 #     -H "Content-Type: application/json" -d @request.json'
 #
 # Environment:
-#   REFEREE_PROVER_BUILD     the build to measure (default ~/.cache/referee-prover)
+#   ARBITER_PROVER_BUILD     the build to measure (default ~/.cache/arbiter-prover)
 #   CHAIN_ID                 default SN_SEPOLIA
 #   MEASURE_MEMORY_MAX       cgroup memory cap, e.g. 24G (default none)
 #   MEASURE_PORT             backend port (default 3050)
-#   MEASURE_LOG              backend log (default $REFEREE_PROVER_BUILD/measure/<unit>.log)
+#   MEASURE_LOG              backend log (default $ARBITER_PROVER_BUILD/measure/<unit>.log)
 #   MAX_CONCURRENT_REQUESTS  backend concurrency (default 1)
 #   PROVER_*, MALLOC_*       memory mode (README) and allocator settings, passed
 #                            to the backend and recorded in the summary
@@ -27,11 +27,11 @@ set -euo pipefail
 rpc="${1:?usage: prover/measure.sh RPC_URL -- CLIENT_COMMAND [ARG ...]}"; shift
 [ "${1:-}" = "--" ] && shift
 [ $# -gt 0 ] || { echo "usage: prover/measure.sh RPC_URL -- CLIENT_COMMAND [ARG ...]" >&2; exit 2; }
-BUILD_DIR="${REFEREE_PROVER_BUILD:-$HOME/.cache/referee-prover}"
+BUILD_DIR="${ARBITER_PROVER_BUILD:-$HOME/.cache/arbiter-prover}"
 bin="$BUILD_DIR/bin/starknet_transaction_prover"
 [ -x "$bin" ] || { echo "no backend at $bin: run prover/build.sh" >&2; exit 1; }
 port="${MEASURE_PORT:-3050}"
-unit="referee-measure-$(date +%Y%m%d-%H%M%S)-$$"
+unit="arbiter-measure-$(date +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$BUILD_DIR/measure"
 log="${MEASURE_LOG:-$BUILD_DIR/measure/$unit.log}"
 backend="http://127.0.0.1:$port"

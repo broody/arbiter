@@ -2,6 +2,40 @@
 version = 1
 
 [[package]]
+name = "arbiter"
+version = "0.1.0"
+
+[[package]]
+name = "arbiter_adapter"
+version = "0.1.0"
+dependencies = [
+ "arbiter",
+]
+
+[[package]]
+name = "arbiter_counter"
+version = "0.1.0"
+dependencies = [
+ "arbiter",
+]
+
+[[package]]
+name = "arbiter_dojo"
+version = "0.1.0"
+dependencies = [
+ "arbiter",
+ "dojo",
+ "dojo_cairo_macros",
+]
+
+[[package]]
+name = "arbiter_testing"
+version = "0.1.0"
+dependencies = [
+ "arbiter",
+]
+
+[[package]]
 name = "dojo"
 version = "1.8.0"
 source = "registry+https://scarbs.xyz/"
@@ -15,37 +49,3 @@ name = "dojo_cairo_macros"
 version = "1.8.0"
 source = "registry+https://scarbs.xyz/"
 checksum = "sha256:c4aa04037a0c5029b05b78229dae22bf02269b9912e8a8c12f8af34aa6b72051"
-
-[[package]]
-name = "referee"
-version = "0.1.0"
-
-[[package]]
-name = "referee_adapter"
-version = "0.1.0"
-dependencies = [
- "referee",
-]
-
-[[package]]
-name = "referee_counter"
-version = "0.1.0"
-dependencies = [
- "referee",
-]
-
-[[package]]
-name = "referee_dojo"
-version = "0.1.0"
-dependencies = [
- "dojo",
- "dojo_cairo_macros",
- "referee",
-]
-
-[[package]]
-name = "referee_testing"
-version = "0.1.0"
-dependencies = [
- "referee",
-]

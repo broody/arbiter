@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the PROOF1 backend: StarkWare's starknet_transaction_prover (the service
 # behind the hosted Sepolia prover) at the sequencer revision pinned in pins.json,
-# with in-process Stwo proving and referee's bounded-memory patches (patches/,
+# with in-process Stwo proving and arbiter's bounded-memory patches (patches/,
 # off unless the backend runs with PROVER_LOW_MEMORY=1). Output:
 # $BUILD_DIR/bin/starknet_transaction_prover, the Sierra compiler under
 # $BUILD_DIR/tools, and $BUILD_DIR/build.json.
@@ -9,7 +9,7 @@
 #   prover/build.sh
 #
 # Environment:
-#   REFEREE_PROVER_BUILD  build directory (default ~/.cache/referee-prover)
+#   ARBITER_PROVER_BUILD  build directory (default ~/.cache/arbiter-prover)
 #   SEQUENCER_SOURCE      clone source (default: the pinned repository; a local
 #                         clone of it saves the download)
 #   CAIRO_LANG_BIN        directory holding cairo-compile from cairo-lang 0.14.3a3,
@@ -21,7 +21,7 @@ pin() { node -e "const p=require('$here/pins.json');console.log($1)"; }
 REPO=$(pin 'p.sequencer.repository'); REV=$(pin 'p.sequencer.revision')
 TOOLCHAIN=$(pin 'p.toolchain'); CAIRO_LANG=$(pin 'p.cairo_lang')
 DEPS=$(pin 'Object.keys(p.patches.dependencies).join(" ")')
-BUILD_DIR="${REFEREE_PROVER_BUILD:-$HOME/.cache/referee-prover}"
+BUILD_DIR="${ARBITER_PROVER_BUILD:-$HOME/.cache/arbiter-prover}"
 SRC="$BUILD_DIR/sequencer"
 [ -n "${CAIRO_LANG_BIN:-}" ] && export PATH="$CAIRO_LANG_BIN:$PATH"
 

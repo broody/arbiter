@@ -1,4 +1,4 @@
-// referee keeper: archives and forwards each game's signed steps, and watches
+// arbiter keeper: archives and forwards each game's signed steps, and watches
 // the channel to answer disputes, resolve them and settle finished games.
 //
 // A game entry is anchored (the default) when its games settle on a channel
@@ -26,7 +26,7 @@
 //
 //   node keeper/server.mjs CONFIG_JSON      (see config.example.json)
 //
-// HTTP API (JSON; BigInts as { "$n": "<decimal>" }, see @referee/sdk/store):
+// HTTP API (JSON; BigInts as { "$n": "<decimal>" }, see @arbiter/sdk/store):
 //   POST /games                             { record: session.export(), authorizations? }
 //   GET  /games                             archived game ids
 //   GET  /games/:channel/:game              { record, start, seq, transcript }
@@ -338,6 +338,6 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   if (!file) { console.error('usage: node keeper/server.mjs CONFIG_JSON'); process.exit(2); }
   const config = await loadConfig(JSON.parse(await readFile(file, 'utf8')), { base: dirname(resolve(file)) });
   const keeper = await startKeeper({ ...config, store: resolve(dirname(resolve(file)), config.store) });
-  console.error(`referee keeper on ${keeper.url}: ${JSON.stringify(keeper.info())}`);
+  console.error(`arbiter keeper on ${keeper.url}: ${JSON.stringify(keeper.info())}`);
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => keeper.close().then(() => process.exit(0)));
 }

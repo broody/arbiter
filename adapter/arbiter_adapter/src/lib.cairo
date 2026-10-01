@@ -1,4 +1,4 @@
-//! Generic logic for a referee proof adapter: an immutable account contract
+//! Generic logic for an arbiter proof adapter: an immutable account contract
 //! that proves a replay natively (SNIP-36) and relays the verified result to
 //! the game's channel. Ported from Surround's `ChannelProver`.
 //!
@@ -12,7 +12,7 @@
 //! commit to exactly this transition and calls the channel's `accept_verified`.
 //!
 //! The channel is called through raw syscalls, so any game system that exposes
-//! referee_dojo's `snapshot` and `accept_verified` entrypoints works.
+//! arbiter_dojo's `snapshot` and `accept_verified` entrypoints works.
 pub mod facts;
 pub mod prover;
 

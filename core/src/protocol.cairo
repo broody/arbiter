@@ -30,7 +30,7 @@ pub fn context_hash<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>>(
     terms: @Terms<R::Config>,
 ) -> felt252 {
     let mut fields = array![
-        R::TAG, 'REFEREE_CHANNEL_V1', PROTOCOL_VERSION, R::RULES_VERSION.into(),
+        R::TAG, 'ARBITER_CHANNEL_V1', PROTOCOL_VERSION, R::RULES_VERSION.into(),
     ];
     terms.serialize(ref fields);
     poseidon_hash_span(fields.span())
@@ -39,7 +39,7 @@ pub fn context_hash<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>>(
 pub fn state_hash<impl R: GameRules, +Serde<R::State>, +Drop<R::State>>(
     env: @Envelope<R::State>,
 ) -> felt252 {
-    let mut fields = array![R::TAG, 'REFEREE_STATE_V1'];
+    let mut fields = array![R::TAG, 'ARBITER_STATE_V1'];
     env.serialize(ref fields);
     poseidon_hash_span(fields.span())
 }
@@ -51,23 +51,23 @@ pub fn state_hash<impl R: GameRules, +Serde<R::State>, +Drop<R::State>>(
 pub fn action_hash<impl R: GameRules, +Serde<R::Action>, +Drop<R::Action>>(
     context: felt252, seq: u32, transcript: felt252, step: @Move<R::Action>,
 ) -> felt252 {
-    let mut fields = array![R::TAG, 'REFEREE_ACTION_V1', context, seq.into(), transcript];
+    let mut fields = array![R::TAG, 'ARBITER_ACTION_V1', context, seq.into(), transcript];
     step.serialize(ref fields);
     signing_hash(fields.span())
 }
 
 pub fn checkpoint_hash<impl R: GameRules>(context: felt252, epoch: u32, state: felt252) -> felt252 {
-    signing_hash(array![R::TAG, 'REFEREE_CHECKPOINT_V1', context, epoch.into(), state].span())
+    signing_hash(array![R::TAG, 'ARBITER_CHECKPOINT_V1', context, epoch.into(), state].span())
 }
 
 pub fn reopen_hash<impl R: GameRules>(context: felt252, epoch: u32, state: felt252) -> felt252 {
-    signing_hash(array![R::TAG, 'REFEREE_REOPEN_V1', context, epoch.into(), state].span())
+    signing_hash(array![R::TAG, 'ARBITER_REOPEN_V1', context, epoch.into(), state].span())
 }
 
 /// Message the referee of a timed game signs to show it is live during a
 /// dispute (`channel::acknowledge`): the dispute's epoch and deadline.
 pub fn live_hash<impl R: GameRules>(context: felt252, epoch: u32, deadline: u64) -> felt252 {
-    signing_hash(array![R::TAG, 'REFEREE_LIVE_V1', context, epoch.into(), deadline.into()].span())
+    signing_hash(array![R::TAG, 'ARBITER_LIVE_V1', context, epoch.into(), deadline.into()].span())
 }
 
 /// Message the referee of a timed game signs to return it from forced play to
@@ -75,7 +75,7 @@ pub fn live_hash<impl R: GameRules>(context: felt252, epoch: u32, deadline: u64)
 pub fn referee_resume_hash<impl R: GameRules>(
     context: felt252, epoch: u32, state: felt252,
 ) -> felt252 {
-    signing_hash(array![R::TAG, 'REFEREE_RESUME_V1', context, epoch.into(), state].span())
+    signing_hash(array![R::TAG, 'ARBITER_RESUME_V1', context, epoch.into(), state].span())
 }
 
 /// Message the referee signs to commit its hash-chain tip to one game, before
@@ -84,7 +84,7 @@ pub fn referee_resume_hash<impl R: GameRules>(
 pub fn tip_hash<impl R: GameRules>(
     chain_id: felt252, channel: felt252, game_id: felt252, tip: felt252,
 ) -> felt252 {
-    signing_hash(array![R::TAG, 'REFEREE_TIP_V1', chain_id, channel, game_id, tip].span())
+    signing_hash(array![R::TAG, 'ARBITER_TIP_V1', chain_id, channel, game_id, tip].span())
 }
 
 /// SNIP-12 (revision 1) type hashes of the typed data a seat's wallet signs to
@@ -95,14 +95,14 @@ const DOMAIN_TYPE_HASH: felt252 = 0x1ff2f602e42168014d405a94f75e8a93d640751d71d1
 const GAME_TYPE_HASH: felt252 = 0xd88a9d4412b386c3c7cbac82410db786655dee114866b6dc5db898c6fabbe7;
 
 /// The SNIP-12 message hash a seat's wallet at `account` signs to agree to a
-/// game: the SDK's `termsTypedData`, whose domain is referee's on `chain_id`
+/// game: the SDK's `termsTypedData`, whose domain is arbiter's on `chain_id`
 /// and whose message names the game and binds every term through `context`.
 /// The channel opens the game only once every seat's account accepts its
 /// signature (`is_valid_signature`).
 pub fn terms_message<impl R: GameRules>(
     chain_id: felt252, game_id: felt252, context: felt252, account: felt252,
 ) -> felt252 {
-    let domain = poseidon_hash_span(array![DOMAIN_TYPE_HASH, 'referee', 1, chain_id, 1].span());
+    let domain = poseidon_hash_span(array![DOMAIN_TYPE_HASH, 'arbiter', 1, chain_id, 1].span());
     let game = poseidon_hash_span(array![GAME_TYPE_HASH, R::TAG, game_id, context].span());
     poseidon_hash_span(array!['StarkNet Message', domain, account, game].span())
 }
@@ -110,7 +110,7 @@ pub fn terms_message<impl R: GameRules>(
 /// Message every seat signs to void a game whose roll waits for a referee that
 /// is down (`channel::void`), from the anchor `state`.
 pub fn void_hash<impl R: GameRules>(context: felt252, epoch: u32, state: felt252) -> felt252 {
-    signing_hash(array![R::TAG, 'REFEREE_VOID_V1', context, epoch.into(), state].span())
+    signing_hash(array![R::TAG, 'ARBITER_VOID_V1', context, epoch.into(), state].span())
 }
 
 /// Message the referee of a timed game signs after each step: the transcript
@@ -119,7 +119,7 @@ pub fn void_hash<impl R: GameRules>(context: felt252, epoch: u32, state: felt252
 pub fn stamp_hash<impl R: GameRules>(
     context: felt252, seq: u32, transcript: felt252, clock: @Clock,
 ) -> felt252 {
-    let mut fields = array![R::TAG, 'REFEREE_STAMP_V1', context, seq.into(), transcript];
+    let mut fields = array![R::TAG, 'ARBITER_STAMP_V1', context, seq.into(), transcript];
     clock.serialize(ref fields);
     signing_hash(fields.span())
 }
@@ -178,7 +178,7 @@ pub fn approve_all(keys: Span<felt252>, message: felt252, signatures: Span<Signa
 /// One hash-chain link: a reveal `v` is valid when `rng_next(v)` equals the
 /// seat's current head.
 pub fn rng_next(value: felt252) -> felt252 {
-    poseidon_hash_span(array!['REFEREE_RNG_V1', value].span())
+    poseidon_hash_span(array!['ARBITER_RNG_V1', value].span())
 }
 
 /// Seed handed to `GameRules::resolve`. Neither seat can predict it before the
@@ -187,7 +187,7 @@ pub fn seed<impl R: GameRules>(
     context: felt252, seq: u32, requester: felt252, revealer: felt252,
 ) -> felt252 {
     poseidon_hash_span(
-        array![R::TAG, 'REFEREE_SEED_V1', context, seq.into(), requester, revealer].span(),
+        array![R::TAG, 'ARBITER_SEED_V1', context, seq.into(), requester, revealer].span(),
     )
 }
 

@@ -1,4 +1,4 @@
 # Dojo packages live in their own workspace: Dojo 1.8 is pinned to Cairo 2.13,
 # while the pure crates in the root workspace also build on 2.18.
 [workspace]
-members = ["referee_dojo", "examples/counter"]
+members = ["arbiter_dojo", "examples/counter"]

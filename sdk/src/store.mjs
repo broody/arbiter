@@ -1,6 +1,6 @@
-// Durable client sessions (`@referee/sdk/store`): transcripts, signing marks
+// Durable client sessions (`@arbiter/sdk/store`): transcripts, signing marks
 // and session keys in a small async key-value backend. `memoryBackend` and
-// `indexedDbBackend` are here; the Node file backend is `@referee/sdk/store/file`.
+// `indexedDbBackend` are here; the Node file backend is `@arbiter/sdk/store/file`.
 import { Session, actorOf, contextHash, felt, hex, publicKey, signedStep } from './index.mjs';
 
 const check = (condition, message) => { if (!condition) throw Error(message); };
@@ -232,7 +232,7 @@ export function memoryBackend() {
  * it: `update` is one readwrite transaction, and writes resolve after a
  * strict-durability commit.
  */
-export function indexedDbBackend(name = 'referee', { indexedDB = globalThis.indexedDB } = {}) {
+export function indexedDbBackend(name = 'arbiter', { indexedDB = globalThis.indexedDB } = {}) {
   const STORE = 'records';
   let db;
   const connect = () => (db ??= new Promise((resolve, reject) => {

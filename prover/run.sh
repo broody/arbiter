@@ -3,12 +3,12 @@
 # isolated workers: max_concurrent backends, one job each, each in its own
 # cgroup (workers.mjs). Here the gateway runs in a systemd user scope with
 # Delegate=yes, which gives it the cgroup subtree its workers need; deployments
-# use deploy/referee-prover.service or deploy/Dockerfile instead.
+# use deploy/arbiter-prover.service or deploy/Dockerfile instead.
 #
 #   prover/run.sh CONFIG_JSON
 #
-# Stopping this script stops the gateway and its workers. REFEREE_PROVER_BUILD
-# selects the build (default ~/.cache/referee-prover) unless the config's
+# Stopping this script stops the gateway and its workers. ARBITER_PROVER_BUILD
+# selects the build (default ~/.cache/arbiter-prover) unless the config's
 # build_dir does.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"

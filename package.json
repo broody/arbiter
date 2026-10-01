@@ -1,9 +1,9 @@
 {
-  "name": "@referee/sdk",
+  "name": "@arbiter/sdk",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Signing, transcripts, sessions, channel codecs and native proving for referee games.",
+  "description": "Signing, transcripts, sessions, channel codecs and native proving for arbiter games.",
   "exports": {
     ".": "./sdk/src/index.mjs",
     "./proving": "./sdk/src/proving.mjs",

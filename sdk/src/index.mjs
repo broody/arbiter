@@ -1,4 +1,4 @@
-// JS mirror of referee/core/src/protocol.cairo. Every hash here must match the
+// JS mirror of arbiter/core/src/protocol.cairo. Every hash here must match the
 // Cairo byte for byte; the counter example's fixtures test that.
 import { ec, shortString, typedData } from 'starknet';
 import { poseidonHashMany } from './poseidon.mjs';
@@ -87,7 +87,7 @@ export function encodeTerms(game, t) {
 }
 
 export const contextHash = (game, terms) =>
-  poseidon([tag(game.tag), tag('REFEREE_CHANNEL_V1'), PROTOCOL_VERSION, BigInt(game.rulesVersion), ...encodeTerms(game, terms)]);
+  poseidon([tag(game.tag), tag('ARBITER_CHANNEL_V1'), PROTOCOL_VERSION, BigInt(game.rulesVersion), ...encodeTerms(game, terms)]);
 
 /** Cairo `Move<A>` Serde: variant index, then payload. */
 export function encodeStep(game, step) {
@@ -104,18 +104,18 @@ export function encodeStep(game, step) {
 }
 
 export const actionHash = (game, context, seq, transcript, step) =>
-  signingHash([tag(game.tag), tag('REFEREE_ACTION_V1'), felt(context), BigInt(seq), felt(transcript), ...encodeStep(game, step)]);
+  signingHash([tag(game.tag), tag('ARBITER_ACTION_V1'), felt(context), BigInt(seq), felt(transcript), ...encodeStep(game, step)]);
 
 export const checkpointHash = (game, context, epoch, stateHash) =>
-  signingHash([tag(game.tag), tag('REFEREE_CHECKPOINT_V1'), felt(context), BigInt(epoch), felt(stateHash)]);
+  signingHash([tag(game.tag), tag('ARBITER_CHECKPOINT_V1'), felt(context), BigInt(epoch), felt(stateHash)]);
 export const reopenHash = (game, context, epoch, stateHash) =>
-  signingHash([tag(game.tag), tag('REFEREE_REOPEN_V1'), felt(context), BigInt(epoch), felt(stateHash)]);
+  signingHash([tag(game.tag), tag('ARBITER_REOPEN_V1'), felt(context), BigInt(epoch), felt(stateHash)]);
 /** What the referee of a timed game signs to show it is live during a dispute (`live_hash`). */
 export const liveHash = (game, context, epoch, deadline) =>
-  signingHash([tag(game.tag), tag('REFEREE_LIVE_V1'), felt(context), BigInt(epoch), BigInt(deadline)]);
+  signingHash([tag(game.tag), tag('ARBITER_LIVE_V1'), felt(context), BigInt(epoch), BigInt(deadline)]);
 /** What the referee of a timed game signs to return it from forced play on its own (`referee_resume_hash`). */
 export const refereeResumeHash = (game, context, epoch, stateHash) =>
-  signingHash([tag(game.tag), tag('REFEREE_RESUME_V1'), felt(context), BigInt(epoch), felt(stateHash)]);
+  signingHash([tag(game.tag), tag('ARBITER_RESUME_V1'), felt(context), BigInt(epoch), felt(stateHash)]);
 /**
  * What the referee signs to commit its hash-chain tip to one game (`tip_hash`),
  * which the channel checks when the last seat joins. A seat must check it too
@@ -123,17 +123,17 @@ export const refereeResumeHash = (game, context, epoch, stateHash) =>
  * made up would let that seat know every roll.
  */
 export const tipHash = (game, chainId, channel, gameId, tip) =>
-  signingHash([tag(game.tag), tag('REFEREE_TIP_V1'), felt(chainId), felt(channel), felt(gameId), felt(tip)]);
+  signingHash([tag(game.tag), tag('ARBITER_TIP_V1'), felt(chainId), felt(channel), felt(gameId), felt(tip)]);
 /** What every seat signs to void a game whose roll waits for a referee that is down (`void_hash`). */
 export const voidHash = (game, context, epoch, stateHash) =>
-  signingHash([tag(game.tag), tag('REFEREE_VOID_V1'), felt(context), BigInt(epoch), felt(stateHash)]);
+  signingHash([tag(game.tag), tag('ARBITER_VOID_V1'), felt(context), BigInt(epoch), felt(stateHash)]);
 /**
  * What the referee of a timed game signs after each step (`stamp_hash`): the
  * transcript and the clocks `env` reached. The last attestation covers every
  * earlier stamp, since the clocks depend on all of them.
  */
 export const stampHash = (game, context, env) =>
-  signingHash([tag(game.tag), tag('REFEREE_STAMP_V1'), felt(context), BigInt(env.seq), felt(env.transcript), ...encodeClock(game, env.clock)]);
+  signingHash([tag(game.tag), tag('ARBITER_STAMP_V1'), felt(context), BigInt(env.seq), felt(env.transcript), ...encodeClock(game, env.clock)]);
 
 /**
  * What each seat's wallet signs to agree to a game: SNIP-12 typed data naming
@@ -154,7 +154,7 @@ export function termsTypedData(game, terms) {
       Game: [{ name: 'game', type: 'shortstring' }, { name: 'game_id', type: 'felt' }, { name: 'context', type: 'felt' }],
     },
     primaryType: 'Game',
-    domain: { name: 'referee', version: '1', chainId: shortString.decodeShortString(hex(terms.chain_id)), revision: '1' },
+    domain: { name: 'arbiter', version: '1', chainId: shortString.decodeShortString(hex(terms.chain_id)), revision: '1' },
     message: { game: game.tag, game_id: hex(terms.game_id), context: hex(contextHash(game, terms)) },
   };
 }
@@ -187,18 +187,18 @@ export function encodeEnvelope(game, env) {
     ...game.encodeState(env.game),
   ];
 }
-export const stateHash = (game, env) => poseidon([tag(game.tag), tag('REFEREE_STATE_V1'), ...encodeEnvelope(game, env)]);
+export const stateHash = (game, env) => poseidon([tag(game.tag), tag('ARBITER_STATE_V1'), ...encodeEnvelope(game, env)]);
 
 // Hash-chain randomness. A seat keeps its seed; the chain is c_0 = seed,
 // c_{k+1} = rngNext(c_k), and it commits c_len as its tip. Reveals walk back.
-export const rngNext = value => poseidon([tag('REFEREE_RNG_V1'), felt(value)]);
+export const rngNext = value => poseidon([tag('ARBITER_RNG_V1'), felt(value)]);
 export function rngChain(seed, len) {
   const chain = [felt(seed)];
   for (let i = 0; i < len; i++) chain.push(rngNext(chain[i]));
   return chain; // chain[len] is the tip; reveal chain[len-1], chain[len-2], ...
 }
 export const seed = (game, context, seq, requester, revealer) =>
-  poseidon([tag(game.tag), tag('REFEREE_SEED_V1'), felt(context), BigInt(seq), felt(requester), felt(revealer)]);
+  poseidon([tag(game.tag), tag('ARBITER_SEED_V1'), felt(context), BigInt(seq), felt(requester), felt(revealer)]);
 
 /**
  * A long hash chain kept as checkpoints, for a referee that holds one per
@@ -570,7 +570,7 @@ export function replay(game, terms, start, witness, signed) {
  * seat REFEREE and a zero signature. Our own timed steps wait in `pending` until they come back
  * stamped, and we can sign ahead of them within our turn. `lastSigned[seat]` is the record of the last step this client signed
  * for that seat, or null; `sign` refuses to sign anything that would
- * contradict it. Persist it apart from the transcript (`@referee/sdk/store`
+ * contradict it. Persist it apart from the transcript (`@arbiter/sdk/store`
  * does) and pass it back in when restoring.
  */
 export class Session {
@@ -799,7 +799,7 @@ export function timeLeft(game, terms, env, at) {
 }
 
 /**
- * The standard time rules (`referee::clocks::StandardTime`), in milliseconds:
+ * The standard time rules (`arbiter::clocks::StandardTime`), in milliseconds:
  * settings `{ turn_ms, bank_ms, increment_ms, byoyomi }` with `byoyomi` null
  * or `{ periods, period_ms }`, and clocks `{ banks, periods }` per seat. A
  * turn's time comes from `turn_ms` first, which does not carry over, then from
@@ -1121,7 +1121,7 @@ export function decodeSnapshot(game, values) {
 const readOutcome = r => ({ finished: r.bool(), winner: r.num(), reason: r.num() });
 const readRef = r => ({ hash: r.next(), seq: r.num(), support_turn: r.num(), due: r.num(), outcome: readOutcome(r) });
 
-/** referee_dojo's `ChannelGame` model, as returned by a game's `get_channel`. */
+/** arbiter_dojo's `ChannelGame` model, as returned by a game's `get_channel`. */
 export function decodeChannelGame(game, values) {
   const r = new Reader(values);
   const result = {
@@ -1146,11 +1146,11 @@ export function decodeChannelGame(game, values) {
 }
 export { Reader };
 
-// ---- Proof adapter (referee_adapter) ----
+// ---- Proof adapter (arbiter_adapter) ----
 
 /** The L2->L1 payload a proved transition commits to (`prover::payload`). */
 export function proofPayload(game, { classHash, prover, terms, context, epoch, startHash, endHash }) {
-  return [felt(classHash), tag(game.tag), tag('REFEREE_PROVED_V1'), felt(terms.chain_id), felt(prover),
+  return [felt(classHash), tag(game.tag), tag('ARBITER_PROVED_V1'), felt(terms.chain_id), felt(prover),
     felt(terms.channel), felt(terms.game_id), felt(context), BigInt(epoch), felt(startHash), felt(endHash)];
 }
 /** The message hash proof facts carry for `payload` sent by `prover` to L1 address 0. */

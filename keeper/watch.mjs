@@ -19,7 +19,7 @@ import { Session, disputeAnswer, due, felt, hex, open, rebase, stateHash } from 
 import { openGameCall } from '../sdk/src/proving.mjs';
 import { KeeperError, gameKey } from './archive.mjs';
 
-/** Channel statuses (referee::channel). A game id no channel has opened reads as UNOPENED. */
+/** Channel statuses (arbiter::channel). A game id no channel has opened reads as UNOPENED. */
 export const UNOPENED = 0, ACTIVE = 1, DISPUTE = 2, FORCED = 3, SETTLED = 4;
 const CURSOR = 'keeper/cursor/', RETRY = 'keeper/retry/';
 

@@ -1,7 +1,7 @@
-// Client for a referee keeper (`@referee/sdk/keeper`): archive a session, send
+// Client for an arbiter keeper (`@arbiter/sdk/keeper`): archive a session, send
 // our steps and fetch the other seat's, over the keeper's HTTP API. The keeper
 // cannot forge steps (this client verifies each one it applies) but it can
-// withhold them, so a client keeps its own copy (`@referee/sdk/store`). A
+// withhold them, so a client keeps its own copy (`@arbiter/sdk/store`). A
 // keeper that referees a timed game also stamps each step it receives. Steps
 // arrive by long poll (`pull`) or as a server-sent event stream (`follow`).
 import { Session, felt, hex, signedStep } from './index.mjs';
