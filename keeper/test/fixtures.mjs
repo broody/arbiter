@@ -42,7 +42,7 @@ export const ref = env => ({ hash: stateHash(counter, env), seq: env.seq, suppor
 export function channelOf(session, { status = ACTIVE, epoch = 0, anchor = session.start, candidate = anchor, deadline = 0,
   acked_epoch = 0, acked_deadline = 0 } = {}) {
   return { id: session.terms.game_id, status, epoch, context: contextHash(counter, session.terms), anchor: ref(anchor),
-    candidate: ref(candidate), deadline, anchor_block: 0, candidate_block: 0, acked_epoch, acked_deadline };
+    candidate: ref(candidate), deadline, anchor_block: 0, candidate_block: 0, acked_epoch, acked_deadline, started: 0 };
 }
 
 /**

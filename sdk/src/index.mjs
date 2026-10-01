@@ -1140,6 +1140,8 @@ export function decodeChannelGame(game, values) {
   Object.assign(result, {
     anchor: readRef(r), candidate: readRef(r), anchor_block: r.num(), candidate_block: r.num(), deadline: r.num(),
     acked_epoch: r.num(), acked_deadline: r.num(), result: readOutcome(r),
+    // When the game started, in seconds, as its referee's first stamp attests; 0 if untimed or not yet.
+    started: r.num(),
   });
   r.done();
   return result;

@@ -3,7 +3,7 @@
 // and what it leaves to the players.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { liveHash, publicKey, refereeResumeHash, signedStep, stateHash, verify } from '../../sdk/src/index.mjs';
+import { ZERO_SIGNATURE, liveHash, publicKey, refereeResumeHash, signedStep, stateHash, verify } from '../../sdk/src/index.mjs';
 import { openGameCall } from '../../sdk/src/proving.mjs';
 import { memoryBackend } from '../../sdk/src/store.mjs';
 import { Archive } from '../archive.mjs';
@@ -427,6 +427,20 @@ test('a finished game nobody opened opens in the transaction that settles it', a
   chain.channels.set(7n, channelOf(game, { status: DISPUTE, epoch: 0, candidate: game.env, deadline: 900 }));
   await round();
   assert.deepEqual(chain.sent.map(s => s.via), ['history', 'resolve']);
+});
+
+test('a game module\'s openCall opens the game from what it registered with', async () => {
+  const chain = fakeChain();
+  const seen = [];
+  const openCall = async (ids, terms, options) => { seen.push([ids.game_id, options]); return { entrypoint: 'open_rated', calldata: [7] }; };
+  const { archive, round } = await watching(chain, { openCall });
+  const game = played(FINISHED);
+  await archive.register(game.export(), [[1n, 2n], [3n, 4n]], { ticket: '0x7', signature: ['0x1', '0x2'] });
+  assert.deepEqual(await archive.extras(archive.ids(CHANNEL, 7n)), { ticket: '0x7', signature: ['0x1', '0x2'] });
+  await round();
+  assert.deepEqual(chain.sent[0].open, { entrypoint: 'open_rated', calldata: [7] });
+  assert.deepEqual(seen, [[7n, { signatures: [[1n, 2n], [3n, 4n]], refereeSignature: ZERO_SIGNATURE,
+    extras: { ticket: '0x7', signature: ['0x1', '0x2'] } }]]);
 });
 
 test('a game nobody opened, unfinished, is left alone', async () => {

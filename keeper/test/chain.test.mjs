@@ -54,7 +54,7 @@ test('forced play is read back from the chain, call by call, to a state the keep
   // step to 0xa1 (block 40), then a forced gamble and a posted roll to 0xa3 (block 50).
   const ref = hash => [hash, 5n, 3n, 1n, 0n, 0n, 0n];
   const stored = (anchor, block) => [7n, 0xa11cen, 0xb0bn, 1n, 2n, 3n, 4n, 0xad0b7e5n, 1n, 20n, BigInt(FORCED), 3n, 0xc0n, 3600n,
-    0n, 0n, 0n, ...ref(anchor), ...ref(anchor), BigInt(block), BigInt(block), 900n, 0n, 0n, 0n, 0n, 0n].map(hex);
+    0n, 0n, 0n, ...ref(anchor), ...ref(anchor), BigInt(block), BigInt(block), 900n, 0n, 0n, 0n, 0n, 0n, 0n].map(hex);
   const at = block => (block === 'latest' || block >= 50 ? stored(0xa3n, 50) : block >= 40 ? stored(0xa1n, 40) : stored(0xa0n, 30));
   const update = (gameId, kind, state, tx) => ({ transaction_hash: tx,
     data: [1n, gameId, 8n, BigInt(kind), 0n, 0n, BigInt(FORCED), 0n, state, 0n, 0n].map(hex) });

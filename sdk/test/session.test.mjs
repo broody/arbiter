@@ -161,10 +161,10 @@ test('terms, snapshots and channels decode from Cairo serialization', () => {
   const ref = [0x11n, 5n, 3n, 1n, 1n, 2n, 1n];
   const channel = decodeChannelGame(counter, [
     9n, 0xa11cen, 0xb0bn, 1n, 2n, 3n, 4n, 0xad0b7e5n, 1n, 20n, 4n, 2n, 0xc0n, 3600n, 0x7en, 4n, 30000n, 60000n, 2000n, 1n,
-    0x71bn, ...ref, ...ref, 55n, 56n, 0n, 3n, 900n, 1n, 2n, 1n,
+    0x71bn, ...ref, ...ref, 55n, 56n, 0n, 3n, 900n, 1n, 2n, 1n, 1790773622n,
   ]);
   assert.deepEqual([channel.anchor_block, channel.candidate_block, channel.deadline], [55, 56, 0]);
-  assert.deepEqual([channel.acked_epoch, channel.acked_deadline], [3, 900]);
+  assert.deepEqual([channel.acked_epoch, channel.acked_deadline, channel.started], [3, 900, 1790773622]);
   assert.equal(channel.config.target, 20);
   assert.deepEqual(channel.clock,
     { referee: 0x7en, settings: { turn_ms: 30000, bank_ms: 60000, increment_ms: 2000, byoyomi: null }, rng_tip: 0x71bn });

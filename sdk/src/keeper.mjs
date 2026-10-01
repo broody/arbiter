@@ -18,11 +18,13 @@ export class KeeperClient {
 
   /**
    * Archive `session`, or merge it into the keeper's copy. A game that no
-   * channel anchors needs, the first time, each seat's wallet signature over
-   * `termsTypedData(game, terms)`, in seat order.
+   * channel holds yet needs, the first time, each seat's wallet signature over
+   * `termsTypedData(game, terms)`, in seat order. `extras` is kept with it for
+   * the game module's `openCall`, e.g. what the game's own opening needs.
    */
-  register(session, { authorizations } = {}) {
-    return this.#call('POST', '/games', { record: session.export(), ...(authorizations ? { authorizations } : {}) });
+  register(session, { authorizations, extras } = {}) {
+    return this.#call('POST', '/games', { record: session.export(), ...(authorizations ? { authorizations } : {}),
+      ...(extras !== undefined ? { extras } : {}) });
   }
 
   /**

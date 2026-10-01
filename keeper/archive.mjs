@@ -31,7 +31,7 @@ export class KeeperError extends Error {
 export const fail = (status, message, data) => { throw new KeeperError(status, message, data); };
 
 export const gameKey = ids => `${hex(ids.channel)}/${hex(ids.game_id)}`;
-const EVIDENCE = 'keeper/evidence/', CLOSED = 'keeper/closed/', AUTHORIZED = 'keeper/authorized/';
+const EVIDENCE = 'keeper/evidence/', CLOSED = 'keeper/closed/', AUTHORIZED = 'keeper/authorized/', EXTRAS = 'keeper/extras/';
 const ADMITTED = 'keeper/admitted/', CLOCK = 'keeper/clock/';
 const summary = session => ({ start: session.start.seq, seq: session.env.seq, transcript: session.env.transcript });
 const position = session => ({ seq: session.start.seq, transcript: session.start.transcript });
@@ -137,13 +137,16 @@ export class Archive {
   /** The wallet signatures a game was admitted with, or null. */
   async authorizations(ids) { return (await this.backend.get(`${AUTHORIZED}${gameKey(ids)}`)) ?? null; }
 
+  /** What a game registered with for its game module's `openCall` (opaque here), or null. */
+  async extras(ids) { return (await this.backend.get(`${EXTRAS}${gameKey(ids)}`)) ?? null; }
+
   /**
    * Archive an exported session, or merge it into the archived copy. A new
    * game's terms must pass `verify`, with `authorizations` for a game no
    * channel holds (unanchored, or not opened yet), which are kept with it: the
    * keeper opens a game with them when it settles it.
    */
-  async register(record, authorizations) {
+  async register(record, authorizations, extras = null) {
     if (!record?.terms || !Array.isArray(record.steps)) fail(400, 'Expected { record: session.export() }');
     try { ['chain_id', 'channel', 'game_id'].forEach(k => felt(record.terms[k])); } catch { fail(400, 'Invalid terms'); }
     const entry = this.#entry(record.terms.channel);
@@ -156,7 +159,7 @@ export class Archive {
       const current = await this.#load(ids);
       if (!current) {
         if (await this.#isClosed(key)) fail(409, 'The game is closed here');
-        return this.#admit(key, ids, entry, incoming, authorizations);
+        return this.#admit(key, ids, entry, incoming, authorizations, extras);
       }
       if (incoming.context !== current.context) fail(409, 'The game is archived with other terms');
       // Merge where one transcript's start lies in the other's history.
@@ -415,7 +418,7 @@ export class Archive {
   // Admit a new game: within its entry's step cap, its wallets' caps if no
   // channel holds it, and the keeper's capacity, whose reserved slots only go
   // to games that `admit` ranks above 0.
-  async #admit(key, ids, entry, session, authorizations) {
+  async #admit(key, ids, entry, session, authorizations, extras) {
     const { terms } = session;
     const needs = entry.game.maxSteps(terms.config) + 1;
     if (needs > entry.maxSteps)
@@ -449,6 +452,7 @@ export class Archive {
     if (players.length) this.#track(key, players, entry.anchored);
     try {
       if (authorizations) await this.backend.put(`${AUTHORIZED}${key}`, authorizations);
+      if (extras != null) await this.backend.put(`${EXTRAS}${key}`, extras);
       if (players.length) await this.backend.put(`${ADMITTED}${key}`, { players, ...(unopened ? { unopened } : {}) });
       await this.store.save(session);
     } catch (e) {

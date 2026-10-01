@@ -39,6 +39,7 @@ One arbiter channel: its terms and its state together. Derives `Copy`, `Drop`, `
 | `deadline` | `u64` | End of the current window, or 0. |
 | `acked_epoch`, `acked_deadline` | `u32`, `u64` | The dispute (epoch and deadline) the referee acknowledged. |
 | `result` | `StoredOutcome` | The final result once settled. |
+| `started` | `u64` | When the game started, in seconds: the first stamp (`Clock.started`) of any state the channel received, as its referee attests it. 0 for an untimed game and until such a state arrives. A rated game takes its time from it. |
 
 `referee`, `clock_settings` and `referee_tip` form the game's `TimeControl`. The channel fields mirror `arbiter::channel::Channel` ([Channel](/reference/cairo#stateref-and-channel)).
 
@@ -47,7 +48,7 @@ One arbiter channel: its terms and its state together. Derives `Copy`, `Drop`, `
 | `channel_of(game: @ChannelGame) -> Channel` | The channel fields as a `Channel`. |
 | `with_channel(game: ChannelGame, channel: Channel) -> ChannelGame` | `game` with its channel fields replaced by `channel`'s. |
 | `game_of(terms: @ChannelTerms, channel: Channel, referee_tip: felt252) -> ChannelGame` | The combined view: the terms, the unpacked channel, and the referee's tip (zero for a game without one). |
-| `pack_state(id: felt252, channel: @Channel) -> ChannelState` | Packs a channel (below). Panics with `'Value exceeds 40 bits'` if `deadline`, `anchor_block`, `candidate_block` or `acked_deadline` is `2^40` or more. |
+| `pack_state(id: felt252, channel: @Channel) -> ChannelState` | Packs a channel (below). Panics with `'Value exceeds 40 bits'` if `deadline`, `anchor_block`, `candidate_block` or `acked_deadline` is `2^40` or more, and with `'Value exceeds 34 bits'` if `started` is `2^34` or more. |
 | `unpack_state(state: @ChannelState, context: felt252, response_seconds: u32) -> Channel` | Unpacks a channel. `context` and `response_seconds` live in `ChannelTerms`, so the caller passes them. |
 
 ### ChannelTerms
@@ -103,8 +104,9 @@ The channel state machine's fields in four felts. `#[dojo::model]`, keyed by `id
 | `refs` | 0..89 | The anchor's reference |
 | | 89..106 | `result` |
 | | 128..217 | The candidate's reference |
+| | 217..251 | `started` |
 
-A reference (89 bits) is `seq` (bits 0..32), `support_turn` (32..64), `due` (64..72) and its outcome (72..89). An outcome (17 bits) is `finished` (bit 0), `winner` (1..9) and `reason` (9..17). Blocks and timestamps get 40 bits each, which lasts for millennia.
+A reference (89 bits) is `seq` (bits 0..32), `support_turn` (32..64), `due` (64..72) and its outcome (72..89). An outcome (17 bits) is `finished` (bit 0), `winner` (1..9) and `reason` (9..17). Blocks and timestamps get 40 bits each, which lasts for millennia. `started` gets 34, which lasts until 2514: a felt's high word holds 123 bits, and `refs` fills it.
 
 ### ProverAllowed
 

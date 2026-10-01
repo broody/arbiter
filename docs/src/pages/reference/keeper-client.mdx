@@ -41,6 +41,7 @@ Requests and answers are JSON with `BigInt`s as `{ "$n": "<decimal>" }` (`string
 
 ```js
 await keeper.register(session, { authorizations }) // a game no channel holds yet: the usual case
+await keeper.register(session, { authorizations, extras }) // and what its own opening needs (the game module's openCall)
 await keeper.register(session)                     // a game a channel already holds
 ```
 

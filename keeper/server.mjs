@@ -20,14 +20,17 @@
 // trust it not to leak.
 //
 // A game module may export, next to its codec, `admit(ids, terms)`, which
-// ranks a new game for the keeper's reserved capacity, and
-// `afterSettle(ids, channel)`, which returns calls to send with the resolve
-// that settles a game. Each also gets `{ provider }`.
+// ranks a new game for the keeper's reserved capacity, `afterSettle(ids,
+// channel)`, which returns calls to send with the resolve that settles a game,
+// and `openCall(ids, terms, { signatures, refereeSignature, extras })`, the
+// call that opens a game no channel holds yet when the channel's own
+// `open_game` won't do, from what it registered with (`extras` is opaque to
+// the keeper). Each also gets `{ provider }`.
 //
 //   node keeper/server.mjs CONFIG_JSON      (see config.example.json)
 //
 // HTTP API (JSON; BigInts as { "$n": "<decimal>" }, see @arbiter/sdk/store):
-//   POST /games                             { record: session.export(), authorizations? }
+//   POST /games                             { record: session.export(), authorizations?, extras? }
 //   GET  /games                             archived game ids
 //   GET  /games/:channel/:game              { record, start, seq, transcript }
 //   GET  /games/:channel/:game/steps        ?from=SEQ&wait=SECONDS (long poll)
@@ -93,7 +96,7 @@ export async function loadConfig(raw, { base = process.cwd(), env = process.env 
     config.entries.set(channel, {
       channel, game, anchored, entrypoints: { ...ENTRYPOINTS, ...g.entrypoints }, ...settings(g, config),
       world: anchored && g.world ? felt(g.world) : null, namespace: g.namespace ?? null, from_block: g.from_block ?? null,
-      admit: hook('admit'), afterSettle: hook('afterSettle'),
+      admit: hook('admit'), afterSettle: hook('afterSettle'), openCall: hook('openCall'),
       prover: g.prover ? { url: g.prover.url, class_hash: BigInt(g.prover.class_hash) } : null,
     });
   }
@@ -146,6 +149,7 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
     anchored: true, ...e, ...settings(e, config),
     admit: e.admit ? (ids, terms) => e.admit(ids, terms, context) : null,
     afterSettle: e.afterSettle ? (ids, channel) => e.afterSettle(ids, channel, context) : null,
+    openCall: e.openCall ? (ids, terms, options) => e.openCall(ids, terms, { ...options, ...context }) : null,
   }]));
   const archive = await Archive.open(backend, {
     games: [...entries].map(([channel, e]) => [channel, { game: e.game, anchored: e.anchored, maxSteps: e.max_steps,
@@ -218,7 +222,7 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
     const [root, channel, game, leaf, ...rest] = parts;
     if (root !== 'games' || rest.length) fail(404, 'Not found');
     if (!channel) {
-      if (method === 'POST') return archive.register(body?.record, body?.authorizations);
+      if (method === 'POST') return archive.register(body?.record, body?.authorizations, body?.extras);
       if (method === 'GET') return { games: archive.open().map(ids => ({ channel: hex(ids.channel), game_id: hex(ids.game_id) })) };
       fail(405, 'Method not allowed');
     }

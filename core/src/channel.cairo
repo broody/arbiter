@@ -6,7 +6,9 @@
 //! on every seat's signed terms: there is no game waiting for a seat.
 use crate::protocol::{due, forfeit, state_hash};
 use crate::rules::GameRules;
-use crate::types::{DRAW, Envelope, Outcome, REASON_ABANDON, REASON_RESIGN, REASON_VOID, REFEREE};
+use crate::types::{
+    Clock, DRAW, Envelope, Outcome, REASON_ABANDON, REASON_RESIGN, REASON_VOID, REFEREE,
+};
 
 /// A game id no channel has opened: a binding reads a missing state as 0.
 pub const UNOPENED: u8 = 0;
@@ -55,6 +57,13 @@ pub struct Channel {
     /// never reads it: it is here so that a binding can keep the referee's tip
     /// apart from the terms, and read it only for the games that have one.
     pub referee_rng: bool,
+    /// When the game started, in seconds: the first stamp (`Clock.started`) of
+    /// any state the channel received, as its referee attests it. 0 for an
+    /// untimed game, and until such a state arrives. Every branch a referee
+    /// attests shares it, since the referee never stamps two steps at one seq.
+    /// The machine never reads it: a binding keeps it (`started_from`) for
+    /// games that date what they settle, such as rated ones.
+    pub started: u64,
     /// Final result once SETTLED.
     pub result: Outcome,
 }
@@ -96,8 +105,20 @@ pub fn open(
         acked_epoch: 0,
         acked_deadline: 0,
         referee_rng,
+        started: 0,
         result: unfinished(),
     }
+}
+
+/// Keep the start of a state the channel received: its clock's first stamp,
+/// in seconds, if the channel has none yet.
+pub fn started_from(mut channel: Channel, clock: @Option<Clock>) -> Channel {
+    if channel.started == 0 {
+        if let Option::Some(clock) = clock {
+            channel.started = *clock.started / 1000;
+        }
+    }
+    channel
 }
 
 /// A state proved or replayed from the anchor, or from the candidate (the

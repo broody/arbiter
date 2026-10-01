@@ -290,8 +290,12 @@ each entry's `max_steps`. Steps to a closed game get 409.
     `resume_by_referee` and `terms`, as arbiter_dojo's helpers name them.
   - Hooks: the module may export, next to the codec, `admit(ids, terms, {
     provider })`, the priority of a new game for the reserved slots (Surround
-    ranks rated games first), and `afterSettle(ids, channel, { provider })`,
-    the calls to send with the resolve that settles a game (Surround's `rate`).
+    ranks rated games first), `afterSettle(ids, channel, { provider })`, the
+    calls to send with the resolve that settles a game (Surround's `rate`), and
+    `openCall(ids, terms, { signatures, refereeSignature, extras, provider })`,
+    the call that opens a game no channel holds yet when the channel's own
+    `open_game` won't do, from the `extras` the game registered with (Surround
+    opens a rated game with its ticket).
 - `store`: the file store directory (`@arbiter/sdk/store/file`, one process
   per directory).
 - `settle: false` stops the keeper from submitting finished games itself.

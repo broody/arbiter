@@ -103,7 +103,7 @@ A new game takes an open slot. At most `max_open_games` games are open at once, 
 
 Archive a session, or merge it into the archived copy. Clients call it once, usually before the game opens onchain.
 
-The body is `{ record, authorizations? }`. `record` is `session.export()`: `{ version: 6, terms, start, witness, steps }`, with the start envelope, its witness and the signed steps. `authorizations` is for a game no channel holds, one not opened yet or an unanchored one: each seat's wallet signature over `termsTypedData(game, terms)` ([`@arbiter/sdk`](/reference/sdk)), in seat order. The keeper opens a game with them when it settles it. The keeper checks the body in this order:
+The body is `{ record, authorizations?, extras? }`. `record` is `session.export()`: `{ version: 6, terms, start, witness, steps }`, with the start envelope, its witness and the signed steps. `authorizations` is for a game no channel holds, one not opened yet or an unanchored one: each seat's wallet signature over `termsTypedData(game, terms)` ([`@arbiter/sdk`](/reference/sdk)), in seat order. The keeper opens a game with them when it settles it. The keeper checks the body in this order:
 
 | Status | Message | When |
 | --- | --- | --- |
@@ -140,7 +140,7 @@ A new game is admitted in this order:
 | `409` | `The game's randomness tip is not this referee's` | The terms name this keeper's referee key with a non-zero `clock.rng_tip`, and that tip is not the tip of the keeper's own chain for the game, or the keeper has no randomness secret. It could not roll for the game. |
 | `503` | `The keeper is full: its reserved capacity is for priority games` | Only reserved slots are left, and the entry's `admit` hook ranks the game 0 or less, or the entry has none. |
 
-The keeper keeps the `authorizations` with the game, and `GET /games/:channel/:game` returns them.
+The keeper keeps the `authorizations` with the game, and `GET /games/:channel/:game` returns them. It keeps `extras` too, any JSON value, opaque to it: what the game module's `openCall` hook needs to open the game, such as Surround's ticket for a rated game ([Hooks](#hooks)).
 
 ## `GET /games`
 
@@ -468,11 +468,12 @@ Loading also fails with `Config needs chain_id`, `Config needs at least one entr
 
 ### Hooks
 
-A game's `module` may export, next to its codec, two functions. Each gets `{ provider }`, the keeper's RPC provider, as its last argument.
+A game's `module` may export, next to its codec, three functions. Each gets `{ provider }`, the keeper's RPC provider, in its last argument.
 
 | Name | Signature | What it does |
 | --- | --- | --- |
 | `admit` | `(ids, terms, { provider })` | A new game's priority, as a number. Called only when the reserved slots are all that is left: above 0, the game may take one. Surround ranks rated games first. |
 | `afterSettle` | `(ids, channel, { provider })` | The calls to send with the `resolve` that settles a game, as starknet.js calls (`{ contractAddress, entrypoint, calldata }`). Surround returns its `rate`. |
+| `openCall` | `(ids, terms, { signatures, refereeSignature, extras, provider })` | The call that opens a game no channel holds yet, in the transaction that settles it, when the channel's own `open_game` won't do. `signatures` are the wallet signatures the game registered with, `refereeSignature` the referee's over its tip (zero when it has none), and `extras` what the game registered with besides (`POST /games`), opaque to the keeper. Surround opens a rated game with `open_rated_game` and the ticket in `extras`. Without the hook, the keeper sends `openGameCall`. |
 
 The keeper bundles the `afterSettle` calls into the `resolve` transaction when a simulation of the bundle succeeds, and otherwise sends them in a second transaction. If the hook throws, it logs the error and sends the `resolve` alone.

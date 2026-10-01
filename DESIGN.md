@@ -801,10 +801,15 @@ repository, updated in its own pass.
   the ticket expires (a long game, or an abandoned one the winner opens), so
   `check_ticket` no longer checks the time, nor that black calls. It keeps
   every policy check and records the digest, so a ticket is used once.
-- *Keeping the start.* Only the end state's hash is stored, and `rate` runs in
-  a later transaction, so the call that settles the game keeps `started` from
-  the end envelope, next to the settlement time and route that
-  `note_settlement` already writes.
+- *Keeping the start.* Only a state's hash is stored, and `rate` runs in a
+  later transaction, so the binding keeps the start: every state it receives
+  (a submission, a proof, forced play, a roll) sets `Channel.started`, in
+  seconds, from its clock's first stamp if the channel has none yet. It is
+  packed into `ChannelState` (34 bits, no new slot) and shown on
+  `ChannelGame`. Every branch a referee attests shares its first stamp, since
+  the referee never stamps two steps at one seq. `rate` reads it from the
+  channel, so neither the keeper nor the matchmaker has to supply the end
+  state.
 - *Rating* takes `played_at` from `clock.started / 1000` and voids the game
   unless `issued_at ≤ played_at ≤ expires_at`. A rated game never started
   (`started == 0`) is void. `settled_at` stays chain time, `played_at ≤

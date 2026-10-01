@@ -15,7 +15,7 @@
 // It submits a segment by onchain replay (`submit_history`) when short, or by
 // a native proof through the game's adapter. Forced play and timeouts
 // otherwise need a player's wallet, so the keeper waits them out.
-import { Session, disputeAnswer, due, felt, hex, open, rebase, stateHash } from '../sdk/src/index.mjs';
+import { Session, ZERO_SIGNATURE, disputeAnswer, due, felt, hex, open, rebase, stateHash } from '../sdk/src/index.mjs';
 import { openGameCall } from '../sdk/src/proving.mjs';
 import { KeeperError, gameKey } from './archive.mjs';
 
@@ -91,7 +91,7 @@ export function unopened(session) {
   const { game, terms } = session, opening = open(game, terms);
   const ref = { hash: stateHash(game, opening), seq: 0, support_turn: 0, due: due(game, opening), outcome: opening.outcome };
   return { id: terms.game_id, status: UNOPENED, epoch: 0, context: session.context, anchor: ref, candidate: ref,
-    anchor_block: 0, candidate_block: 0, deadline: 0, acked_epoch: 0, acked_deadline: 0 };
+    anchor_block: 0, candidate_block: 0, deadline: 0, acked_epoch: 0, acked_deadline: 0, started: 0 };
 }
 
 /**
@@ -158,11 +158,12 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
 
   // A game's `open_game` call, from the wallet signatures it was registered
   // with and, when it takes its randomness from this keeper's referee, the
-  // referee's signature over its tip.
+  // referee's signature over its tip. A game module's `openCall` builds it
+  // instead when it has one, with what the game registered with (`extras`).
   async function openCall(entry, ids, terms) {
     const authorizations = await archive.authorizations(ids);
     if (!authorizations) throw Error('No wallet signatures to open the game with');
-    let refereeSignature;
+    let refereeSignature = ZERO_SIGNATURE;
     const tip = terms.clock?.rng_tip ?? 0n;
     if (felt(tip) !== 0n) {
       if (archive.referee === null || felt(terms.clock.referee) !== archive.referee)
@@ -172,6 +173,7 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
       refereeSignature = signed.signature;
     }
     const signatures = authorizations.map(a => (Array.isArray(a) ? a : [a.r, a.s]));
+    if (entry.openCall) return entry.openCall(ids, terms, { signatures, refereeSignature, extras: await archive.extras(ids) });
     return openGameCall(entry.game, terms, signatures, { refereeSignature, entrypoint: entry.entrypoints.open_game });
   }
 

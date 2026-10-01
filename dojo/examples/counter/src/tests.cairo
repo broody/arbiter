@@ -574,6 +574,37 @@ fn stamped_game_settles_in_one_transaction() {
 }
 
 #[test]
+fn the_channel_keeps_when_the_game_started() {
+    let (game, world, id) = started_with(blitz());
+    let terms = game.terms(id);
+    let start = opening(@terms);
+    assert_eq!(stored(@world, id).started, 0);
+    // A candidate of the first four steps, stamped from 1 s: the game started at 1 s.
+    let steps = full_game();
+    let (first, middle) = stamp_steps(@terms, start, steps.slice(0, 4), blitz_stamps().slice(0, 4));
+    caller(CAROL());
+    game.submit_history(id, 0, start, first, no_approvals());
+    assert_eq!(stored(@world, id).started, 1);
+    // Extending it keeps that start.
+    let (rest, _) = stamp_steps(@terms, middle, steps.slice(4, 3), blitz_stamps().slice(4, 3));
+    game.submit_history(id, 0, middle, rest, no_approvals());
+    let channel = stored(@world, id);
+    assert_eq!((channel.candidate.seq, channel.started), (7, 1));
+    assert_eq!(game.get_channel(id).started, 1);
+}
+
+#[test]
+fn an_untimed_game_has_no_start() {
+    let (game, world, id) = started();
+    let terms = game.terms(id);
+    let start = opening(@terms);
+    let (batch, _) = stamp_steps(@terms, start, full_game(), array![].span());
+    caller(CAROL());
+    game.submit_history(id, 0, start, batch, no_approvals());
+    assert_eq!(stored(@world, id).started, 0);
+}
+
+#[test]
 fn flagged_seat_loses_after_the_window() {
     let (game, world, id) = started_with(blitz());
     let terms = game.terms(id);
@@ -795,6 +826,7 @@ fn channel_state_packs_and_unpacks_exactly() {
         acked_epoch: 0xfffffffe,
         acked_deadline: max40 - 3,
         referee_rng: true,
+        started: 0x3ffffffff,
         result: arbiter::Outcome { finished: true, winner: 254, reason: 253 },
     };
     let packed = arbiter_dojo::models::pack_state(1, @channel);
@@ -808,6 +840,21 @@ fn channel_state_packs_and_unpacks_exactly() {
     let packed = arbiter_dojo::models::pack_state(1, @same);
     assert_eq!(packed.candidate, 0);
     assert_eq!(arbiter_dojo::models::unpack_state(@packed, 0, 604800), same);
+}
+
+#[test]
+#[should_panic(expected: 'Value exceeds 34 bits')]
+fn starts_past_34_bits_are_refused() {
+    let opening = arbiter::channel::StateRef {
+        hash: 0xa,
+        seq: 0,
+        support_turn: 0,
+        due: 0,
+        outcome: arbiter::Outcome { finished: false, winner: 0, reason: 0 },
+    };
+    let empty = arbiter::channel::open(1, opening, 3600, false, 0);
+    let channel = arbiter::Channel { started: 0x400000000, ..empty };
+    arbiter_dojo::models::pack_state(1, @channel);
 }
 
 #[test]

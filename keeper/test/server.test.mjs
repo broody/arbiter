@@ -134,9 +134,11 @@ test('a game no channel has opened yet is held on its wallets\' signatures', asy
     // It must start where its terms open: there is no anchor to start from.
     const later = new Session(counter, unopened, { start: session.env, witness: session.witness() });
     await assert.rejects(k.client.register(later, { authorizations: [alice, bob] }), /starts at its opening/);
-    assert.equal((await k.client.register(session, { authorizations: [alice, bob] })).created, true);
+    // What the game's own opening needs comes along, for the game module's openCall.
+    assert.equal((await k.client.register(session, { authorizations: [alice, bob], extras: { ticket: '0x9' } })).created, true);
     const kept = parse(await (await fetch(`${k.url}/games/${hex(CHANNEL)}/${hex(9n)}`)).text());
     assert.deepEqual(kept.authorizations, [alice, bob]);
+    assert.deepEqual(await k.archive.extras(k.archive.ids(CHANNEL, 9n)), { ticket: '0x9' });
     // Until it opens, it counts against its wallets' caps.
     const another = { ...unopened, game_id: 10n };
     const signed = wallets.map(key => walletSign(key, termsTypedData(counter, another)));
@@ -217,8 +219,11 @@ test('config: per-entry settings, old names, and the game module\'s hooks', asyn
   [50, 200, 32, 300, 60, 900, 0x3031dn, 'counter', 5]);
   assert.deepEqual(hooked.afterSettle({ game_id: 7n }), [{ contractAddress: '0xabc', entrypoint: 'rate', calldata: ['0x7'] }]);
   assert.equal(hooked.admit({}, timed()), 1);
+  assert.deepEqual(hooked.openCall({ game_id: 7n }, terms(), { extras: { code: '0x5' } }),
+    { contractAddress: '0xabc', entrypoint: 'open_special', calldata: ['0x5'] });
   assert.deepEqual([plain.max_steps, plain.replay_max_steps, plain.proof_max_steps, plain.start_grace_seconds,
     plain.answer_margin_seconds, plain.admit, plain.afterSettle, plain.world], [500, 32, null, 120, 600, null, null, null]);
+  assert.equal(plain.openCall, null);
   assert.deepEqual([hooked.entrypoints.acknowledge, hooked.entrypoints.resume_by_referee, hooked.entrypoints.terms],
     ['acknowledge', 'resume_by_referee', 'terms']);
   await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [{ ...GAME, world: '0x1' }] }, { base }), /needs its namespace/);

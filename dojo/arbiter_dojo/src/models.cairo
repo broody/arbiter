@@ -68,6 +68,9 @@ pub struct ChannelGame {
     pub acked_epoch: u32,
     pub acked_deadline: u64,
     pub result: StoredOutcome,
+    /// When the game started, in seconds, as its referee's first stamp
+    /// attests (`Channel.started`); 0 for an untimed game or before one.
+    pub started: u64,
 }
 
 /// What a channel fixes when it opens: seats, keys, randomness tips, prover,
@@ -192,6 +195,7 @@ pub fn channel_of(game: @ChannelGame) -> Channel {
         acked_epoch: *game.acked_epoch,
         acked_deadline: *game.acked_deadline,
         referee_rng: *game.referee_tip != 0,
+        started: *game.started,
         result: (*game.result).into(),
     }
 }
@@ -209,6 +213,7 @@ pub fn with_channel(mut game: ChannelGame, channel: Channel) -> ChannelGame {
     game.acked_epoch = channel.acked_epoch;
     game.acked_deadline = channel.acked_deadline;
     game.result = channel.result.into();
+    game.started = channel.started;
     game
 }
 
@@ -241,6 +246,7 @@ pub fn game_of(terms: @ChannelTerms, channel: Channel, referee_tip: felt252) -> 
             acked_epoch: 0,
             acked_deadline: 0,
             result: StoredOutcome { finished: false, winner: 0, reason: 0 },
+            started: 0,
         },
         channel,
     )
@@ -248,15 +254,18 @@ pub fn game_of(terms: @ChannelTerms, channel: Channel, referee_tip: felt252) -> 
 
 // Packing. `times`, low 128 bits: status (8), epoch (32), deadline (40),
 // anchor block (40); high: candidate block (40), acknowledged epoch (32) and
-// deadline (40), and whether the referee gives the randomness (1). `refs`, low: the anchor's
-// reference (89) and the result (17);
-// high: the candidate's reference (89). A reference is seq (32), support turn
-// (32), due seat (8) and its outcome (17): finished (1), winner (8), reason (8).
-// Blocks and seconds fit 40 bits for millennia.
+// deadline (40), and whether the referee gives the randomness (1). `refs`,
+// low: the anchor's reference (89) and the result (17); high: the candidate's
+// reference (89) and when the game started, in seconds (34). A reference is
+// seq (32), support turn (32), due seat (8) and its outcome (17): finished
+// (1), winner (8), reason (8). Blocks and seconds fit 40 bits for millennia,
+// and a start 34 bits until the year 2514. A felt's high word holds at most
+// 123 bits, which `refs` fills.
 
 const TWO_8: u128 = 0x100;
 const TWO_17: u128 = 0x20000;
 const TWO_32: u128 = 0x100000000;
+const TWO_34: u128 = 0x400000000;
 const TWO_40: u128 = 0x10000000000;
 const TWO_72: u128 = 0x1000000000000000000;
 const TWO_112: u128 = 0x10000000000000000000000000000;
@@ -281,7 +290,9 @@ pub fn pack_state(id: felt252, channel: @Channel) -> ChannelState {
         + bits40(c.acked_deadline) * TWO_40 * TWO_32
         + referee_rng;
     let refs_low = pack_ref(@c.anchor) + pack_outcome(@c.result) * TWO_89;
-    let refs_high = pack_ref(@c.candidate);
+    let started: u128 = c.started.into();
+    assert(started < TWO_34, 'Value exceeds 34 bits');
+    let refs_high = pack_ref(@c.candidate) + started * TWO_89;
     ChannelState {
         id,
         anchor: c.anchor.hash,
@@ -311,13 +322,14 @@ pub fn unpack_state(state: @ChannelState, context: felt252, response_seconds: u3
         context,
         response_seconds,
         anchor: unpack_ref(refs.low % TWO_89, anchor_hash),
-        candidate: unpack_ref(refs.high, candidate_hash),
+        candidate: unpack_ref(refs.high % TWO_89, candidate_hash),
         anchor_block: (low / (TWO_8 * TWO_32 * TWO_40) % TWO_40).try_into().unwrap(),
         candidate_block: (high % TWO_40).try_into().unwrap(),
         deadline: (low / (TWO_8 * TWO_32) % TWO_40).try_into().unwrap(),
         acked_epoch: (high / TWO_40 % TWO_32).try_into().unwrap(),
         acked_deadline: (high / (TWO_40 * TWO_32) % TWO_40).try_into().unwrap(),
         referee_rng: high / TWO_112 % 2 == 1,
+        started: (refs.high / TWO_89).try_into().unwrap(),
         result: unpack_outcome(refs.low / TWO_89 % TWO_17),
     }
 }

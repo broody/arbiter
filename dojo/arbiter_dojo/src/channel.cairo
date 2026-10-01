@@ -240,7 +240,7 @@ pub fn force<
         get_block_timestamp(),
         get_block_number(),
     );
-    save(ref world, game_id, channel, FORCED);
+    save(ref world, game_id, machine::started_from(channel, @end.clock), FORCED);
 }
 
 /// Post the referee's value for the roll the anchor waits for, during forced
@@ -273,7 +273,7 @@ pub fn roll<
     let channel = machine::rolled(
         channel_of(@game), epoch, state_ref::<R>(@end), get_block_timestamp(), get_block_number(),
     );
-    save(ref world, game_id, channel, ROLLED);
+    save(ref world, game_id, machine::started_from(channel, @end.clock), ROLLED);
 }
 
 /// End a game whose roll waits for a referee that is down, with no result
@@ -477,14 +477,14 @@ fn receive<impl R: GameRules, +Serde<R::State>, +Drop<R::State>>(
     end: Envelope<R::State>,
     acks: Span<Signature>,
 ) {
-    let end = state_ref::<R>(@end);
+    let end_ref = state_ref::<R>(@end);
     let approved = approve_all(
-        keys(@game), checkpoint_hash::<R>(game.context, epoch, end.hash), acks,
+        keys(@game), checkpoint_hash::<R>(game.context, epoch, end_ref.hash), acks,
     );
     let channel = machine::receive(
-        channel_of(@game), epoch, end, approved, get_block_timestamp(), get_block_number(),
+        channel_of(@game), epoch, end_ref, approved, get_block_timestamp(), get_block_number(),
     );
-    save(ref world, game.id, channel, RECEIVED);
+    save(ref world, game.id, machine::started_from(channel, @end.clock), RECEIVED);
 }
 
 fn config<impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>>(game: @ChannelGame) -> R::Config {

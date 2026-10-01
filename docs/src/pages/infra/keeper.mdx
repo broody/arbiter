@@ -305,9 +305,11 @@ Every key and default is in [Config](/reference/keeper-api#config).
 ### Add hooks (optional)
 
 The game's module may export, next to its codec, `admit(ids, terms, { provider })`,
-a new game's priority for the reserved slots, and
+a new game's priority for the reserved slots,
 `afterSettle(ids, channel, { provider })`, the calls to send with the `resolve`
-that settles a game. See [Hooks](/reference/keeper-api#hooks).
+that settles a game, and `openCall(ids, terms, { signatures, refereeSignature, extras, provider })`,
+the call that opens a game no channel holds yet when the channel's own
+`open_game` won't do. See [Hooks](/reference/keeper-api#hooks).
 
 ### Start it
 

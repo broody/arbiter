@@ -645,6 +645,7 @@ Cairo Serde encoders and decoders for channel calldata. Decoders return felts as
   anchor_block, candidate_block, deadline,
   acked_epoch, acked_deadline, // the dispute the referee acknowledged
   result,             // { finished, winner, reason }
+  started,            // when the game started, in seconds (the referee's first stamp); 0 if untimed or not yet
 }
 ```
 
