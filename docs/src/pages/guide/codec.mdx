@@ -12,10 +12,10 @@ onchain. The fixtures test at the end of this page catches that early.
 ## The counter's codec
 
 This is the whole codec for the counter from [Write the rules](/guide/rules)
-([`sdk/examples/counter.mjs`](https://github.com/broody/referee/blob/main/sdk/examples/counter.mjs)):
+([`sdk/examples/counter.mjs`](https://github.com/broody/arbiter/blob/main/sdk/examples/counter.mjs)):
 
 ```js
-import { low128 } from '@referee/sdk'
+import { low128 } from '@arbiter/sdk'
 
 export const ADD = 0, GAMBLE = 1, REACHED = 1, LIMIT = 2
 
@@ -121,7 +121,7 @@ Surround's Go codec keeps the position history as its witness:
 
 ```js
 openingWitness: config => [positionHash({ black: 0n, white: 0n }, config.size)],
-encodeWitness: history => referee.span(history),
+encodeWitness: history => arbiter.span(history),
 load(config, state, witness) {
   const history = witness.map(felt), seen = new Set(history)
   // … check `history` against state.history_root, as the Cairo `load` does
@@ -134,7 +134,7 @@ witness: s => [...s.history],
 ### Optional: time rules
 
 A timed game's clocks run by its time rules. Without `time`, the codec uses
-`standardTime`, the mirror of `referee::clocks::StandardTime`. A game whose
+`standardTime`, the mirror of `arbiter::clocks::StandardTime`. A game whose
 Cairo `GameRules::Time` is its own `ClockRules` mirrors it as `time`:
 
 | Function | Mirrors | Does |
@@ -149,7 +149,7 @@ Cairo `GameRules::Time` is its own `ClockRules` mirrors it as `time`:
 
 The counter's hourglass rules, where the time a seat uses flows to its
 opponent, are the example
-([`sdk/examples/counter.mjs`](https://github.com/broody/referee/blob/main/sdk/examples/counter.mjs)):
+([`sdk/examples/counter.mjs`](https://github.com/broody/arbiter/blob/main/sdk/examples/counter.mjs)):
 
 ```js
 export const hourglassTime = {
@@ -178,7 +178,7 @@ export const hourglassCounter = { ...counter, time: hourglassTime }
 Unit tests on each side aren't enough. You want the Cairo to replay what the JS
 signed. The counter does this with a fixture generator:
 
-1. [`sdk/scripts/gen-counter-fixtures.mjs`](https://github.com/broody/referee/blob/main/sdk/scripts/gen-counter-fixtures.mjs)
+1. [`sdk/scripts/gen-counter-fixtures.mjs`](https://github.com/broody/arbiter/blob/main/sdk/scripts/gen-counter-fixtures.mjs)
    plays scripted games through the JS SDK (one untimed, and four timed games
    a referee stamps: on the standard time rules, with byo-yomi, on the
    hourglass rules, whose clock the referee starts with a `start`, and one

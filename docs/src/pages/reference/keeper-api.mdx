@@ -1,6 +1,6 @@
 # Keeper HTTP API
 
-The keeper ([`keeper/server.mjs`](https://github.com/broody/referee/blob/main/keeper/server.mjs)) archives each game's signed steps, forwards them between seats and, with a referee key, referees timed games. With a randomness secret too, it gives those games their randomness. This page is the reference for its HTTP API and its config file, for anyone calling it without [`@referee/sdk/keeper`](/reference/keeper-client) or running one. For what the keeper does and how to deploy it, see [Keeper](/infra/keeper).
+The keeper ([`keeper/server.mjs`](https://github.com/broody/arbiter/blob/main/keeper/server.mjs)) archives each game's signed steps, forwards them between seats and, with a referee key, referees timed games. With a randomness secret too, it gives those games their randomness. This page is the reference for its HTTP API and its config file, for anyone calling it without [`@arbiter/sdk/keeper`](/reference/keeper-client) or running one. For what the keeper does and how to deploy it, see [Keeper](/infra/keeper).
 
 ```bash
 KEEPER_PRIVATE_KEY=0x... node keeper/server.mjs keeper/config.local.json
@@ -29,7 +29,7 @@ A game is open until the keeper closes it: the watcher closes a game once its ch
 
 ## Wire format
 
-Requests and answers are JSON, with BigInts encoded as `{ "$n": "<decimal>" }` (`stringify` and `parse` in [`@referee/sdk/store`](/reference/store)). On decoding, any object whose only key is `$n` with a string value becomes a BigInt. Small integers such as `seq` are plain JSON numbers.
+Requests and answers are JSON, with BigInts encoded as `{ "$n": "<decimal>" }` (`stringify` and `parse` in [`@arbiter/sdk/store`](/reference/store)). On decoding, any object whose only key is `$n` with a string value becomes a BigInt. Small integers such as `seq` are plain JSON numbers.
 
 ```json
 { "start": 0, "seq": 2, "transcript": { "$n": "2139781652317985318" }, "accepted": 1 }
@@ -39,7 +39,7 @@ JSON answers carry `Content-Type: application/json`. The server does not check a
 
 ### Step records
 
-The keeper answers with the step records of `Session` ([`@referee/sdk`](/reference/sdk)):
+The keeper answers with the step records of `Session` ([`@arbiter/sdk`](/reference/sdk)):
 
 | Field | Meaning |
 | --- | --- |
@@ -103,7 +103,7 @@ A new game takes an open slot. At most `max_open_games` games are open at once, 
 
 Archive a session, or merge it into the archived copy. Clients call it once, usually before the game opens onchain.
 
-The body is `{ record, authorizations? }`. `record` is `session.export()`: `{ version: 6, terms, start, witness, steps }`, with the start envelope, its witness and the signed steps. `authorizations` is for a game no channel holds, one not opened yet or an unanchored one: each seat's wallet signature over `termsTypedData(game, terms)` ([`@referee/sdk`](/reference/sdk)), in seat order. The keeper opens a game with them when it settles it. The keeper checks the body in this order:
+The body is `{ record, authorizations? }`. `record` is `session.export()`: `{ version: 6, terms, start, witness, steps }`, with the start envelope, its witness and the signed steps. `authorizations` is for a game no channel holds, one not opened yet or an unanchored one: each seat's wallet signature over `termsTypedData(game, terms)` ([`@arbiter/sdk`](/reference/sdk)), in seat order. The keeper opens a game with them when it settles it. The keeper checks the body in this order:
 
 | Status | Message | When |
 | --- | --- | --- |
@@ -282,7 +282,7 @@ The body is JSON: `{ config }` for a game no channel holds, the usual case since
 { "rng_tip": { "$n": "1830…" }, "signature": { "r": { "$n": "2957…" }, "s": { "$n": "8841…" } } }
 ```
 
-`signature` is the referee's over `tip_hash(chain_id, channel, game_id, rng_tip)` (`tipHash` in [`@referee/sdk`](/reference/sdk#hashing-and-signing)), for the keeper's configured chain. The same game always gets the same tip: the keeper derives each chain from its randomness secret and the game's ids, and stores nothing. The chain has a value for every roll the game's `maxSteps(config)` allows.
+`signature` is the referee's over `tip_hash(chain_id, channel, game_id, rng_tip)` (`tipHash` in [`@arbiter/sdk`](/reference/sdk#hashing-and-signing)), for the keeper's configured chain. The same game always gets the same tip: the keeper derives each chain from its randomness secret and the game's ids, and stores nothing. The chain has a value for every roll the game's `maxSteps(config)` allows.
 
 The keeper checks the request in this order:
 
@@ -336,7 +336,7 @@ Answers `200` with the body `ok`, not JSON.
 
 ## Config
 
-`node keeper/server.mjs CONFIG_JSON` loads a JSON file ([`config.example.json`](https://github.com/broody/referee/blob/main/keeper/config.example.json)):
+`node keeper/server.mjs CONFIG_JSON` loads a JSON file ([`config.example.json`](https://github.com/broody/arbiter/blob/main/keeper/config.example.json)):
 
 ```json
 {
@@ -396,7 +396,7 @@ Answers `200` with the body `ok`, not JSON.
 | `rpc_url` | none | Starknet JSON-RPC endpoint. |
 | `host` | `"127.0.0.1"` | Listen address. |
 | `port` | `3200` | Listen port. |
-| `store` | `"keeper-data"` | Directory of the file store (`@referee/sdk/store/file`), resolved from the config file's directory. One process per directory. |
+| `store` | `"keeper-data"` | Directory of the file store (`@arbiter/sdk/store/file`), resolved from the config file's directory. One process per directory. |
 | `poll_seconds` | `15` | Watcher interval. `0` disables the watcher. |
 | `settle` | `true` | Whether the watcher submits finished games whose channel is still `ACTIVE`, and their next segments. With `false` it still answers, acknowledges and resolves disputes, and resumes games from forced play. |
 | `max_open_games` | `10000` | Open games. Formerly `max_games`, which still works. |

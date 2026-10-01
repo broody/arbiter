@@ -38,7 +38,7 @@ sequenceDiagram
   sign the rest of its turn from its own unstamped steps (`Session.tip`) while
   they wait for their stamps (`Session.pending`).
 - **The attestation** is the referee's signature over
-  `signing_hash(TAG, 'REFEREE_STAMP_V1', context, seq, transcript, clock)`: the
+  `signing_hash(TAG, 'ARBITER_STAMP_V1', context, seq, transcript, clock)`: the
   transcript and the clocks after the step. The clocks depend on every stamp so
   far, so the **last** attestation covers them all.
 - In a timed game, `Session.receive` refuses a step without a stamp and checks
@@ -49,8 +49,8 @@ sequenceDiagram
 The protocol keeps the mechanics: stamps, `used`, turns, reveals, pauses,
 flags and attestations. A game's time rules decide what a seat has and what a
 finished turn costs. A game names them with `GameRules::Time`, an impl of
-`referee::clocks::ClockRules<State>`
-([`core/src/clocks.cairo`](https://github.com/broody/referee/blob/main/core/src/clocks.cairo)):
+`arbiter::clocks::ClockRules<State>`
+([`core/src/clocks.cairo`](https://github.com/broody/arbiter/blob/main/core/src/clocks.cairo)):
 
 | Function | What it returns |
 | --- | --- |
@@ -66,7 +66,7 @@ time can depend on the position.
 
 ### `StandardTime`
 
-`referee::clocks::StandardTime` covers most clocks, in milliseconds, with
+`arbiter::clocks::StandardTime` covers most clocks, in milliseconds, with
 settings `Standard { turn_ms, bank_ms, increment_ms, byoyomi }` and clocks
 `StandardClock { banks, periods }`:
 
@@ -87,7 +87,7 @@ settings `Standard { turn_ms, bank_ms, increment_ms, byoyomi }` and clocks
 | Fischer (blitz 3+2) | `bank_ms` 180 s + `increment_ms` 2 s |
 | Japanese byo-yomi (10 min + 5 × 30 s) | `bank_ms` 600 s + `byoyomi` 5 × 30 s |
 
-[`examples/counter/src/hourglass.cairo`](https://github.com/broody/referee/blob/main/examples/counter/src/hourglass.cairo)
+[`examples/counter/src/hourglass.cairo`](https://github.com/broody/arbiter/blob/main/examples/counter/src/hourglass.cairo)
 is a second rule set, where the time a seat uses flows to its opponent, in
 about 40 lines.
 

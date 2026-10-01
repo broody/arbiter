@@ -19,7 +19,7 @@ The adapter is an **account contract** with two entrypoints:
   yet, takes the game's terms and starts from their opening state at epoch 0),
   replays it with your rules against the final signatures (and, in a
   timed game, the referee's attestation), and emits one L2→L1 message: the
-  adapter's class, the game's `TAG`, `'REFEREE_PROVED_V1'`, the chain, the
+  adapter's class, the game's `TAG`, `'ARBITER_PROVED_V1'`, the chain, the
   adapter, the channel, the game, the context, the epoch, and the start and end
   state hashes. A prover runs this transaction in Starknet's virtual OS and
   proves it.
@@ -60,7 +60,7 @@ by a namespace owner.
 
 ## Write it
 
-The adapter needs Cairo 2.18 and depends on `referee_adapter` and your rules
+The adapter needs Cairo 2.18 and depends on `arbiter_adapter` and your rules
 crate:
 
 ```toml
@@ -70,8 +70,8 @@ edition = "2024_07"
 cairo-version = "=2.18.0"
 
 [dependencies]
-referee = { git = "https://github.com/broody/referee.git", rev = "<commit>" }
-referee_adapter = { git = "https://github.com/broody/referee.git", rev = "<commit>" }
+arbiter = { git = "https://github.com/broody/arbiter.git", rev = "<commit>" }
+arbiter_adapter = { git = "https://github.com/broody/arbiter.git", rev = "<commit>" }
 my_game = { path = "../rules" }
 starknet = "=2.18.0"
 
@@ -80,14 +80,14 @@ casm = true
 ```
 
 The counter's adapter is about 40 lines of forwarding
-([`adapter/examples/counter/src/lib.cairo`](https://github.com/broody/referee/blob/main/adapter/examples/counter/src/lib.cairo)):
+([`adapter/examples/counter/src/lib.cairo`](https://github.com/broody/arbiter/blob/main/adapter/examples/counter/src/lib.cairo)):
 
 ```cairo
 #[starknet::contract(account)]
 pub mod CounterProver {
-    use referee::{Batch, Envelope, Signature, Terms};
-    use referee_adapter::prover;
-    use referee_counter::{Action, Config, Counter, CounterRules};
+    use arbiter::{Batch, Envelope, Signature, Terms};
+    use arbiter_adapter::prover;
+    use arbiter_counter::{Action, Config, Counter, CounterRules};
     use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
     use starknet::{ContractAddress, VALIDATED};
 
@@ -181,11 +181,11 @@ of the terms, and the channel accepts proofs only from it.
 
 ## Prove and settle from JS
 
-`proveSession` in `@referee/sdk/proving` does the whole client side:
+`proveSession` in `@arbiter/sdk/proving` does the whole client side:
 
 ```js
-import { proveSession } from '@referee/sdk/proving'
-import { rebase } from '@referee/sdk'
+import { proveSession } from '@arbiter/sdk/proving'
+import { rebase } from '@arbiter/sdk'
 
 // The session must start at the channel's current anchor (or its candidate, to extend it).
 const base = rebase(session, anchorHash)
@@ -201,7 +201,7 @@ A game nobody opened yet is proved from its terms, at epoch 0, and
 `proveSession` says so with `opening: true`. Open it in the same transaction:
 
 ```js
-import { openGameCall, proveSession } from '@referee/sdk/proving'
+import { openGameCall, proveSession } from '@arbiter/sdk/proving'
 
 const proved = await proveSession({ rpcUrl, proverUrl, session, epoch: 0, expectedClassHash: ADAPTER_CLASS_HASH })
 await account.execute([openGameCall(counter, terms, signatures), proved.call(acks)], { ...proved.options })

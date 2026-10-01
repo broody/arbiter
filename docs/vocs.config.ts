@@ -1,9 +1,9 @@
 import { defineConfig } from 'vocs/config'
 
 export default defineConfig({
-  title: 'Referee',
+  title: 'Arbiter',
   description: 'Turn-based games played offchain with signed moves and settled on Starknet.',
-  socials: [{ icon: 'github', link: 'https://github.com/broody/referee' }],
+  socials: [{ icon: 'github', link: 'https://github.com/broody/arbiter' }],
   sidebar: [
     {
       text: 'Introduction',
@@ -46,13 +46,13 @@ export default defineConfig({
     {
       text: 'Reference',
       items: [
-        { text: '@referee/sdk', link: '/reference/sdk' },
-        { text: '@referee/sdk/proving', link: '/reference/proving' },
-        { text: '@referee/sdk/store', link: '/reference/store' },
-        { text: '@referee/sdk/keeper', link: '/reference/keeper-client' },
+        { text: '@arbiter/sdk', link: '/reference/sdk' },
+        { text: '@arbiter/sdk/proving', link: '/reference/proving' },
+        { text: '@arbiter/sdk/store', link: '/reference/store' },
+        { text: '@arbiter/sdk/keeper', link: '/reference/keeper-client' },
         { text: 'Keeper HTTP API', link: '/reference/keeper-api' },
-        { text: 'Cairo: referee', link: '/reference/cairo' },
-        { text: 'Cairo: referee_dojo, adapter', link: '/reference/dojo' },
+        { text: 'Cairo: arbiter', link: '/reference/cairo' },
+        { text: 'Cairo: arbiter_dojo, adapter', link: '/reference/dojo' },
         { text: 'Glossary', link: '/reference/glossary' },
       ],
     },

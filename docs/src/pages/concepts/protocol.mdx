@@ -3,8 +3,8 @@
 This page covers the protocol at the level of individual steps: what a step is,
 what a seat signs, how the transcript chains them, and how a replay
 authenticates a whole batch with one signature per seat. The Cairo lives in
-[`core/src/protocol.cairo`](https://github.com/broody/referee/blob/main/core/src/protocol.cairo),
-and the JS mirror in `@referee/sdk`.
+[`core/src/protocol.cairo`](https://github.com/broody/arbiter/blob/main/core/src/protocol.cairo),
+and the JS mirror in `@arbiter/sdk`.
 
 ## The envelope
 
@@ -25,7 +25,7 @@ and dispute works on envelopes:
 | `outcome` | `{ finished, winner, reason }` |
 | `game` | Your `GameRules::State` |
 
-The **state hash** is `poseidon(TAG, 'REFEREE_STATE_V1', envelope…)`. The channel
+The **state hash** is `poseidon(TAG, 'ARBITER_STATE_V1', envelope…)`. The channel
 stores state hashes, and anchors, candidates and proofs all refer to states by
 their hash.
 
@@ -73,7 +73,7 @@ steps per game action). See [Write the rules](/guide/rules#max_steps-and-adjudic
 ## What a seat signs
 
 ```text
-message = signing_hash(TAG, 'REFEREE_ACTION_V1', context, seq, transcript, move…)
+message = signing_hash(TAG, 'ARBITER_ACTION_V1', context, seq, transcript, move…)
 ```
 
 - **`context`** binds the game (see below), so a signature can't move to
@@ -108,7 +108,7 @@ dropping or editing any earlier step changes every later message.
 ## The context
 
 ```text
-context = poseidon(TAG, 'REFEREE_CHANNEL_V1', PROTOCOL_VERSION, RULES_VERSION, terms…)
+context = poseidon(TAG, 'ARBITER_CHANNEL_V1', PROTOCOL_VERSION, RULES_VERSION, terms…)
 ```
 
 The **terms** are everything both seats agreed to: each seat's wallet signs
@@ -134,19 +134,19 @@ one purpose can never be reused for another:
 
 | Tag | Hash of |
 | --- | --- |
-| `REFEREE_CHANNEL_V1` | The context |
-| `REFEREE_STATE_V1` | A state (envelope) |
-| `REFEREE_ACTION_V1` | A step's message, signed by a seat |
-| `REFEREE_CHECKPOINT_V1` | A checkpoint approval: `(context, epoch, state hash)`, signed by every seat |
-| `REFEREE_REOPEN_V1` | A reopen approval, to resume offchain play after forced play |
-| `REFEREE_STAMP_V1` | A referee attestation: `(context, seq, transcript, clock)` |
-| `REFEREE_LIVE_V1` | The referee's acknowledgement of a dispute: `(context, epoch, deadline)` |
-| `REFEREE_RESUME_V1` | The referee's approval to resume offchain play from forced play: `(context, epoch, anchor hash)` |
-| `REFEREE_TIP_V1` | The referee's commitment of its hash-chain tip to one game: `(chain id, channel, game id, tip)` |
-| `REFEREE_VOID_V1` | A void approval, to end a game whose roll waits for a referee that is down: `(context, epoch, anchor hash)`, signed by every seat |
-| `REFEREE_RNG_V1` | One hash-chain link |
-| `REFEREE_SEED_V1` | The seed handed to `resolve` |
-| `REFEREE_PROVED_V1` | The transition a proof commits to |
+| `ARBITER_CHANNEL_V1` | The context |
+| `ARBITER_STATE_V1` | A state (envelope) |
+| `ARBITER_ACTION_V1` | A step's message, signed by a seat |
+| `ARBITER_CHECKPOINT_V1` | A checkpoint approval: `(context, epoch, state hash)`, signed by every seat |
+| `ARBITER_REOPEN_V1` | A reopen approval, to resume offchain play after forced play |
+| `ARBITER_STAMP_V1` | A referee attestation: `(context, seq, transcript, clock)` |
+| `ARBITER_LIVE_V1` | The referee's acknowledgement of a dispute: `(context, epoch, deadline)` |
+| `ARBITER_RESUME_V1` | The referee's approval to resume offchain play from forced play: `(context, epoch, anchor hash)` |
+| `ARBITER_TIP_V1` | The referee's commitment of its hash-chain tip to one game: `(chain id, channel, game id, tip)` |
+| `ARBITER_VOID_V1` | A void approval, to end a game whose roll waits for a referee that is down: `(context, epoch, anchor hash)`, signed by every seat |
+| `ARBITER_RNG_V1` | One hash-chain link |
+| `ARBITER_SEED_V1` | The seed handed to `resolve` |
+| `ARBITER_PROVED_V1` | The transition a proof commits to |
 
 ## Final-signature authentication
 

@@ -1,4 +1,4 @@
-# referee docs
+# arbiter docs
 
 The developer guide, built with [Vocs](https://vocs.dev).
 

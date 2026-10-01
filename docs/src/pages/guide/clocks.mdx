@@ -59,11 +59,11 @@ byo-yomi must be positive. `open_game` rejects anything else
 ### Time rules
 
 A game with a different notion of time writes its own rules: a Cairo
-`referee::clocks::ClockRules` named by `GameRules::Time`, and its JS mirror as
+`arbiter::clocks::ClockRules` named by `GameRules::Time`, and its JS mirror as
 the codec's `time` (see [Mirror the rules in JS](/guide/codec#optional-time-rules)).
 The counter's hourglass rules, where the time a seat uses flows to its
 opponent, are a complete example in about 40 lines
-([`examples/counter/src/hourglass.cairo`](https://github.com/broody/referee/blob/main/examples/counter/src/hourglass.cairo)).
+([`examples/counter/src/hourglass.cairo`](https://github.com/broody/arbiter/blob/main/examples/counter/src/hourglass.cairo)).
 The settings are then whatever those rules define, for instance
 `{ bank_ms }` for the hourglass.
 
@@ -159,7 +159,7 @@ Clients don't know the referee's clock exactly, so estimate it from the last
 stamp:
 
 ```js
-import { timeLeft } from '@referee/sdk'
+import { timeLeft } from '@arbiter/sdk'
 
 const receivedAt = Date.now()   // when the latest stamped step arrived
 function render() {
@@ -216,7 +216,7 @@ gets the same tip.
 ### Check it and put it in the terms
 
 ```js
-import { tipHash, verify } from '@referee/sdk'
+import { tipHash, verify } from '@arbiter/sdk'
 
 if (!verify(tipHash(counter, CHAIN_ID, CHANNEL, gameId, rng_tip), signature, REFEREE_PUBLIC_KEY))
   throw Error('This tip is not the referee\'s')
@@ -309,11 +309,11 @@ game settles with `REASON_VOID` (131): it has no winner, and it isn't a draw.
 
 ## Referee without a keeper
 
-`Referee` in `@referee/sdk` is what the keeper uses. Run it yourself to referee
+`Referee` in `@arbiter/sdk` is what the keeper uses. Run it yourself to referee
 from your own server:
 
 ```js
-import { Referee, Session } from '@referee/sdk'
+import { Referee, Session } from '@arbiter/sdk'
 
 // Keep one Referee per game for as long as the game runs.
 const referee = new Referee(new Session(counter, terms), REFEREE_PRIVATE_KEY)
@@ -343,7 +343,7 @@ To give a game its randomness too, keep a hash chain for it, sign its tip
 before the seats sign the terms, and pass the chain as `rng`:
 
 ```js
-import { Referee, RngChain, Session, sign, tipHash } from '@referee/sdk'
+import { Referee, RngChain, Session, sign, tipHash } from '@arbiter/sdk'
 
 const chain = new RngChain(CHAIN_SEED, 256)   // long enough for every roll of the game
 // The terms carry chain.tip, and open_game takes this signature.

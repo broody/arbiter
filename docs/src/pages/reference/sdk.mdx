@@ -1,12 +1,12 @@
-# @referee/sdk
+# @arbiter/sdk
 
-The JS mirror of the referee protocol: moves, hashes and signatures, sessions that verify every step, the referee of timed games, and the Cairo Serde codecs for channel calldata. Clients, keepers and tools that play or check a game use it.
+The JS mirror of the arbiter protocol: moves, hashes and signatures, sessions that verify every step, the referee of timed games, and the Cairo Serde codecs for channel calldata. Clients, keepers and tools that play or check a game use it.
 
 ```js
-import { Session, play } from '@referee/sdk'
+import { Session, play } from '@arbiter/sdk'
 ```
 
-Source: [`sdk/src/index.mjs`](https://github.com/broody/referee/blob/main/sdk/src/index.mjs). Every hash matches [`core/src/protocol.cairo`](https://github.com/broody/referee/blob/main/core/src/protocol.cairo) byte for byte; the counter example's fixtures test that.
+Source: [`sdk/src/index.mjs`](https://github.com/broody/arbiter/blob/main/sdk/src/index.mjs). Every hash matches [`core/src/protocol.cairo`](https://github.com/broody/arbiter/blob/main/core/src/protocol.cairo) byte for byte; the counter example's fixtures test that.
 
 ## Values
 
@@ -32,7 +32,7 @@ A game codec is a plain object that mirrors the game's `GameRules` in JS. The SD
 | `resolve` | `(config, state, seed, scratch)` | Completes the pending randomness request with `seed`. Returns the new state. |
 | `due` | `(state)` | The seat due to act. The protocol overrides it while a reveal is pending. |
 | `outcome` | `(state)` | `null` while the game runs, then `[winner, reason]`: `winner` is the winning seat + 1, or 0 for a draw, and `reason` is 1 to 127. |
-| `maxSteps` | `(config)` | The most steps (`seq`) a transcript may hold (`GameRules::max_steps`). `applyStep` ends the game with `adjudicate` at the first step at or past it that leaves no reveal pending. A safety net, not the game's own limit: see [`core/src/rules.cairo`](https://github.com/broody/referee/blob/main/core/src/rules.cairo). |
+| `maxSteps` | `(config)` | The most steps (`seq`) a transcript may hold (`GameRules::max_steps`). `applyStep` ends the game with `adjudicate` at the first step at or past it that leaves no reveal pending. A safety net, not the game's own limit: see [`core/src/rules.cairo`](https://github.com/broody/arbiter/blob/main/core/src/rules.cairo). |
 | `adjudicate` | `(config, state)` | `[winner, reason]` for a game stopped at `maxSteps`, as `outcome` reports them. |
 
 Games whose replay takes a witness add:
@@ -57,10 +57,10 @@ The JS argument order differs from Cairo's: `state` comes before `seat`, and `sc
 `apply` and `outcome` must return `null`, not `undefined`, for "no request" and "not over". The SDK compares with `=== null`.
 :::
 
-The counter example's codec ([`sdk/examples/counter.mjs`](https://github.com/broody/referee/blob/main/sdk/examples/counter.mjs)):
+The counter example's codec ([`sdk/examples/counter.mjs`](https://github.com/broody/arbiter/blob/main/sdk/examples/counter.mjs)):
 
 ```js
-import { low128 } from '@referee/sdk'
+import { low128 } from '@arbiter/sdk'
 
 export const ADD = 0, GAMBLE = 1, REACHED = 1, LIMIT = 2
 
@@ -138,21 +138,21 @@ A step is a move object. Only `resign` names its seat. Every other move belongs 
 | `signingHash` | `(values)` | `poseidon(values)` masked to 250 bits, for STARK-curve ECDSA. |
 | `low128` | `(value)` | The low 128 bits. |
 | `span` | `(values)` | Cairo `Span<felt252>` Serde: the length, then the elements. |
-| `contextHash` | `(game, terms)` | The channel context: Poseidon of the game tag, `'REFEREE_CHANNEL_V1'`, `PROTOCOL_VERSION`, `rulesVersion` and `encodeTerms(game, terms)`. |
-| `actionHash` | `(game, context, seq, transcript, step)` | The message a seat signs for `step` at position `seq`: a signing hash under `'REFEREE_ACTION_V1'` of the context, `seq`, the transcript and the encoded step. |
-| `checkpointHash` | `(game, context, epoch, stateHash)` | The checkpoint approval message, under `'REFEREE_CHECKPOINT_V1'`. |
-| `reopenHash` | `(game, context, epoch, stateHash)` | The reopen approval message, under `'REFEREE_REOPEN_V1'`. |
-| `liveHash` | `(game, context, epoch, deadline)` | What the referee of a timed game signs to show it is live during a dispute (`live_hash`), under `'REFEREE_LIVE_V1'`. See [`Referee.acknowledgement`](#referee). |
-| `refereeResumeHash` | `(game, context, epoch, stateHash)` | What the referee of a timed game signs to return it from forced play on its own (`referee_resume_hash`), under `'REFEREE_RESUME_V1'`. See [`Referee.resumeSignature`](#referee). |
-| `tipHash` | `(game, chainId, channel, gameId, tip)` | What the referee signs to commit its hash-chain tip to one game (`tip_hash`), under `'REFEREE_TIP_V1'`. The terms carry the tip, so the referee signs it before the seats sign them. Each seat checks the signature before its wallet signs the terms, and the channel checks it again in `open_game`: a tip another seat made up would let that seat know every roll. |
-| `voidHash` | `(game, context, epoch, stateHash)` | What every seat signs to void a game whose roll waits for a referee that is down (`void_hash`), under `'REFEREE_VOID_V1'`. `stateHash` is the channel's anchor hash. |
-| `stateHash` | `(game, env)` | Poseidon of the game tag, `'REFEREE_STATE_V1'` and `encodeEnvelope(game, env)`. The channel stores its anchor as this hash. |
-| `termsTypedData` | `(game, terms)` | The SNIP-12 typed data each seat's wallet signs to agree to a game: domain `{ name: 'referee', version: '1', chainId, revision: '1' }`, with `terms.chain_id` as a short string, and a `Game` message `{ game, game_id, context }`, where `context` is `contextHash(game, terms)`. The context binds every term, so the signature binds the wallet (`terms.players[seat]`) to its session key (`terms.keys[seat]`). Sign it with the wallet (`account.signMessage`). The channel opens the game on every seat's signature (`open_game`, through each account's `is_valid_signature`), and a keeper checks them the same way before it holds a game no channel holds. |
+| `contextHash` | `(game, terms)` | The channel context: Poseidon of the game tag, `'ARBITER_CHANNEL_V1'`, `PROTOCOL_VERSION`, `rulesVersion` and `encodeTerms(game, terms)`. |
+| `actionHash` | `(game, context, seq, transcript, step)` | The message a seat signs for `step` at position `seq`: a signing hash under `'ARBITER_ACTION_V1'` of the context, `seq`, the transcript and the encoded step. |
+| `checkpointHash` | `(game, context, epoch, stateHash)` | The checkpoint approval message, under `'ARBITER_CHECKPOINT_V1'`. |
+| `reopenHash` | `(game, context, epoch, stateHash)` | The reopen approval message, under `'ARBITER_REOPEN_V1'`. |
+| `liveHash` | `(game, context, epoch, deadline)` | What the referee of a timed game signs to show it is live during a dispute (`live_hash`), under `'ARBITER_LIVE_V1'`. See [`Referee.acknowledgement`](#referee). |
+| `refereeResumeHash` | `(game, context, epoch, stateHash)` | What the referee of a timed game signs to return it from forced play on its own (`referee_resume_hash`), under `'ARBITER_RESUME_V1'`. See [`Referee.resumeSignature`](#referee). |
+| `tipHash` | `(game, chainId, channel, gameId, tip)` | What the referee signs to commit its hash-chain tip to one game (`tip_hash`), under `'ARBITER_TIP_V1'`. The terms carry the tip, so the referee signs it before the seats sign them. Each seat checks the signature before its wallet signs the terms, and the channel checks it again in `open_game`: a tip another seat made up would let that seat know every roll. |
+| `voidHash` | `(game, context, epoch, stateHash)` | What every seat signs to void a game whose roll waits for a referee that is down (`void_hash`), under `'ARBITER_VOID_V1'`. `stateHash` is the channel's anchor hash. |
+| `stateHash` | `(game, env)` | Poseidon of the game tag, `'ARBITER_STATE_V1'` and `encodeEnvelope(game, env)`. The channel stores its anchor as this hash. |
+| `termsTypedData` | `(game, terms)` | The SNIP-12 typed data each seat's wallet signs to agree to a game: domain `{ name: 'arbiter', version: '1', chainId, revision: '1' }`, with `terms.chain_id` as a short string, and a `Game` message `{ game, game_id, context }`, where `context` is `contextHash(game, terms)`. The context binds every term, so the signature binds the wallet (`terms.players[seat]`) to its session key (`terms.keys[seat]`). Sign it with the wallet (`account.signMessage`). The channel opens the game on every seat's signature (`open_game`, through each account's `is_valid_signature`), and a keeper checks them the same way before it holds a game no channel holds. |
 | `termsMessageHash` | `(game, terms, account)` | The SNIP-12 message hash the wallet at `account` signs over `termsTypedData(game, terms)`, as a `BigInt`: what `open_game` passes to the account's `is_valid_signature` (`terms_message` in Cairo). |
-| `rngNext` | `(value)` | The next hash-chain value: `poseidon([tag('REFEREE_RNG_V1'), value])`. |
+| `rngNext` | `(value)` | The next hash-chain value: `poseidon([tag('ARBITER_RNG_V1'), value])`. |
 | `rngChain` | `(seed, len)` | `len + 1` values from `seed`, each `rngNext` of the one before. `chain[len]` is the tip to commit. Reveal `chain[len - 1]`, then `chain[len - 2]`, and so on. |
 | `RngChain` | class | A long hash chain kept as checkpoints, for a referee that holds one per game. See [RngChain](#rngchain). |
-| `seed` | `(game, context, seq, requester, revealer)` | The seed `resolve` receives: Poseidon of the game tag, `'REFEREE_SEED_V1'`, the context, the request's `seq`, and the chain values the requester and the revealer revealed for it. The revealer is a seat, or the referee. |
+| `seed` | `(game, context, seq, requester, revealer)` | The seed `resolve` receives: Poseidon of the game tag, `'ARBITER_SEED_V1'`, the context, the request's `seq`, and the chain values the requester and the revealer revealed for it. The revealer is a seat, or the referee. |
 | `publicKey` | `(privateKey)` | The Stark public key (x coordinate) as a `BigInt`. |
 | `sign` | `(message, privateKey)` | An ECDSA signature `{ r, s }` over `message`. |
 | `verify` | `(message, signature, key)` | Whether `signature` is valid for `message` under public key `key`. Accepts either y parity, as the Cairo verifier does. Returns `false` instead of throwing. |
@@ -172,7 +172,7 @@ The hash chain `rngChain(seed, length)`, kept as checkpoints instead of every va
 | `before` | `(head)` | The value that hashes to `head`, or `null` if `head` is not on the chain or is its first value. |
 
 ```js
-import { RngChain, sign, tipHash } from '@referee/sdk'
+import { RngChain, sign, tipHash } from '@arbiter/sdk'
 
 const chain = new RngChain(chainSeed, 256)
 // The referee commits the tip to one game by signing it.
@@ -237,7 +237,7 @@ For timed games. See [Clocks and the referee](/concepts/clocks) and [Add a clock
 | `timeLeft` | `(game, terms, env, at)` | Each seat's clock at referee time `at`, for display, by seat: the time rules' `view`. The due seat's counts the time it has used since its turn began, including the time since the last stamp unless the clock is paused. The other seats show what they start their next turn with, and so do all seats once the game is over. `null` for an untimed game, or time rules without `view`. |
 | `encodeTimeControl` | `(game, c)` | Cairo Serde of `TimeControl`: `referee`, then `encodeSettings(c.settings)` as a span, then `rng_tip` (0 when absent). |
 | `encodeClock` | `(game, c)` | Cairo Serde of `Clock`: `encodeClock(c.seats)` of the time rules as a span, then `used`, `stamp` and `started`. |
-| `stampHash` | `(game, context, env)` | What the referee signs after each step (`stamp_hash`): a signing hash under `'REFEREE_STAMP_V1'` of `env.seq`, `env.transcript` and `encodeClock(game, env.clock)`. The last attestation covers every earlier stamp, since the clocks depend on all of them. |
+| `stampHash` | `(game, context, env)` | What the referee signs after each step (`stamp_hash`): a signing hash under `'ARBITER_STAMP_V1'` of `env.seq`, `env.transcript` and `encodeClock(game, env.clock)`. The last attestation covers every earlier stamp, since the clocks depend on all of them. |
 | `standardTime` | object | The standard time rules. See [standardTime](#standardtime). |
 
 How `applyStep` charges a stamped step, mirroring `charge` in protocol.cairo. `limit` and `settle` are the game's time rules:
@@ -254,7 +254,7 @@ How `applyStep` charges a stamped step, mirroring `charge` in protocol.cairo. `l
 
 ### Time rules
 
-A game's time rules (`game.time`) mirror its Cairo `ClockRules` ([`core/src/clocks.cairo`](https://github.com/broody/referee/blob/main/core/src/clocks.cairo)) over decoded values. Without `game.time`, the SDK uses `standardTime`.
+A game's time rules (`game.time`) mirror its Cairo `ClockRules` ([`core/src/clocks.cairo`](https://github.com/broody/arbiter/blob/main/core/src/clocks.cairo)) over decoded values. Without `game.time`, the SDK uses `standardTime`.
 
 | Name | Signature | What it does |
 | --- | --- | --- |
@@ -267,10 +267,10 @@ A game's time rules (`game.time`) mirror its Cairo `ClockRules` ([`core/src/cloc
 | `encodeClock` | `(clocks)` | Cairo Serde of the clocks. |
 | `view` | `(settings, clocks, seat, used, state)` | Optional. What `timeLeft` shows for `seat` after it used `used` this turn. |
 
-The counter example's hourglass time rules, in which the time a seat uses flows to its opponent (`hourglassTime` in [`sdk/examples/counter.mjs`](https://github.com/broody/referee/blob/main/sdk/examples/counter.mjs)):
+The counter example's hourglass time rules, in which the time a seat uses flows to its opponent (`hourglassTime` in [`sdk/examples/counter.mjs`](https://github.com/broody/arbiter/blob/main/sdk/examples/counter.mjs)):
 
 ```js
-import { MAX_CLOCK_MS } from '@referee/sdk'
+import { MAX_CLOCK_MS } from '@arbiter/sdk'
 
 export const hourglassTime = {
   encodeSettings: s => [BigInt(s.bank_ms)],
@@ -295,7 +295,7 @@ export const hourglassCounter = { ...counter, time: hourglassTime }
 
 ### standardTime
 
-The standard time rules (`referee::clocks::StandardTime`), in milliseconds.
+The standard time rules (`arbiter::clocks::StandardTime`), in milliseconds.
 
 - Settings are `{ turn_ms, bank_ms, increment_ms, byoyomi }`, with `byoyomi` `null` or `{ periods, period_ms }`.
 - Each seat's clocks are `{ banks, periods }`: its bank (main time) and its byo-yomi periods left. `periods` is empty without byo-yomi.
@@ -332,7 +332,7 @@ new Session(game, terms, { start, witness, lastSigned } = {})
 | `env` | The current envelope. |
 | `scratch` | The game's working memory at `env`, or `null` for a game without `load`. |
 | `steps` | The step records from `start`, in order. |
-| `lastSigned` | `lastSigned[seat]` is the record of the last step this client signed for that seat, or `null`. Persist it apart from the transcript (`@referee/sdk/store` does) and pass it back when restoring. |
+| `lastSigned` | `lastSigned[seat]` is the record of the last step this client signed for that seat, or `null`. Persist it apart from the transcript (`@arbiter/sdk/store` does) and pass it back when restoring. |
 | `timed` | Getter: whether `terms.clock` is set. Every step then needs the referee's stamp. |
 | `pending` | Getter: our signed steps that await the referee's stamp, oldest first, as step records. Always empty in an untimed game. |
 | `tip` | Getter: the envelope after our pending steps, which `sign` signs from. `env` when none are pending. |
@@ -419,7 +419,7 @@ As the referee of a timed game: verifies a seat's signed step, or a `flag`, a `s
 
 | Name | Signature | What it does |
 | --- | --- | --- |
-| `resume` | `(records)` | Stages our own signed steps that still await the referee's stamp, e.g. from a store after a restart (`@referee/sdk/store` does this), as `pending`. Skips records at a seq below the `tip`'s, which the history already holds, and stops at the first that does not follow the `tip`. Throws `Invalid session signature` for a referee step or a signature that does not verify, and the [step errors](#step-errors). |
+| `resume` | `(records)` | Stages our own signed steps that still await the referee's stamp, e.g. from a store after a restart (`@arbiter/sdk/store` does this), as `pending`. Skips records at a seq below the `tip`'s, which the history already holds, and stops at the first that does not follow the `tip`. Throws `Invalid session signature` for a referee step or a signature that does not verify, and the [step errors](#step-errors). |
 | `discard` | `(record)` | Forgets our pending step `record` and any after it, as if never signed: for a store whose write of it failed, so the signature never leaves. Does nothing if `record` is not pending. Does not change `lastSigned`. |
 | `transcriptAt` | `(seq)` | The transcript at `seq`, for `start.seq <= seq <= env.seq`; otherwise `undefined`. |
 | `includes` | `({ seq, transcript })` | Whether this session's history passes through that position, or starts after it. |
@@ -450,14 +450,14 @@ Session.import(game, record, { lastSigned } = {})
 }
 ```
 
-The record shares objects with the session; `structuredClone` it before changing it. Signing marks and pending steps are not part of it. To store it as text, use `stringify` from [`@referee/sdk/store`](/reference/store#stringify-and-parse), which keeps `BigInt`s.
+The record shares objects with the session; `structuredClone` it before changing it. Signing marks and pending steps are not part of it. To store it as text, use `stringify` from [`@arbiter/sdk/store`](/reference/store#stringify-and-parse), which keeps `BigInt`s.
 
 `Session.import` rebuilds a session from such a record, verifying every step with `receive`. `lastSigned` is as for the constructor. Throws `Unsupported transcript version` unless `version` is 6, and any error of `receive`.
 
 ### Example
 
 ```js
-import { Session, play, signedStep } from '@referee/sdk'
+import { Session, play, signedStep } from '@arbiter/sdk'
 import { counter } from './counter.mjs' // your game codec
 
 const add = amount => play({ kind: 0, amount }) // the counter's ADD
@@ -501,7 +501,7 @@ In a game that takes its randomness from the referee (`terms.clock.rng_tip`), `r
 | `deadline` | `()` | Wall-clock time from which the due seat can be flagged, or `null` while the clock is paused, the referee owes a roll or the game is over. |
 
 ```js
-import { Referee } from '@referee/sdk'
+import { Referee } from '@arbiter/sdk'
 
 const referee = new Referee(session, refereeKey)
 const started = referee.start() // run the clock before the first move
@@ -520,7 +520,7 @@ if (at !== null) setTimeout(() => {
 With `rng`, `stamp` answers a request for randomness in the same call:
 
 ```js
-import { Referee, RngChain, Session } from '@referee/sdk'
+import { Referee, RngChain, Session } from '@arbiter/sdk'
 
 const chain = new RngChain(chainSeed, 256) // its tip is terms.clock.rng_tip
 const referee = new Referee(new Session(counter, terms), refereeKey, { rng: chain })
@@ -630,7 +630,7 @@ Cairo Serde encoders and decoders for channel calldata. Decoders return felts as
 | `readTerms` | `(game, r)` | Reads `Terms` from a `Reader`, with `game.decodeConfig` for the config and the time rules' `decodeSettings` for the clock settings. |
 | `decodeTerms` | `(game, values)` | `readTerms` over all of `values`. |
 | `decodeSnapshot` | `(game, values)` | The channel's `snapshot(game_id)`: `{ terms, epoch, anchor_hash, anchor_block, candidate_hash, candidate_block }`. A proof starts from the anchor or the candidate. |
-| `decodeChannelGame` | `(game, values)` | referee_dojo's `ChannelGame`, as a game's `get_channel` returns it. |
+| `decodeChannelGame` | `(game, values)` | arbiter_dojo's `ChannelGame`, as a game's `get_channel` returns it. |
 
 `decodeChannelGame` returns:
 
@@ -668,9 +668,9 @@ A cursor over Cairo Serde felts, converted to `BigInt`s. A codec's `decodeConfig
 
 ## Proof payloads
 
-Used by [`@referee/sdk/proving`](/reference/proving) to check a prover's response.
+Used by [`@arbiter/sdk/proving`](/reference/proving) to check a prover's response.
 
 | Name | Signature | What it does |
 | --- | --- | --- |
-| `proofPayload` | `(game, { classHash, prover, terms, context, epoch, startHash, endHash })` | The L2→L1 payload a proved transition commits to (`prover::payload`): the adapter class hash, the game tag, `'REFEREE_PROVED_V1'`, the chain id, `prover`, the channel, the game id, the context, `epoch`, and the start and end state hashes. |
+| `proofPayload` | `(game, { classHash, prover, terms, context, epoch, startHash, endHash })` | The L2→L1 payload a proved transition commits to (`prover::payload`): the adapter class hash, the game tag, `'ARBITER_PROVED_V1'`, the chain id, `prover`, the channel, the game id, the context, `epoch`, and the start and end state hashes. |
 | `proofMessageHash` | `(prover, payload)` | The message hash proof facts carry for `payload` sent by `prover` to L1 address 0. |

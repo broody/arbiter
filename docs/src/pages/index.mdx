@@ -1,6 +1,6 @@
-# Referee
+# Arbiter
 
-Referee lets two players play a turn-based game on Starknet **without a
+Arbiter lets two players play a turn-based game on Starknet **without a
 transaction per move**, while the chain still enforces the rules and the
 result.
 
@@ -13,13 +13,13 @@ the same code then:
 - replays disputed history onchain;
 - runs inside the Stwo proof that settles the game.
 
-Referee was extracted from [Surround](https://github.com/broody/surround), a Go
+Arbiter was extracted from [Surround](https://github.com/broody/surround), a Go
 game, and generalized for games with randomness and clocks, such as Hashfront (a
 tactics game).
 
 ## What you write, what you get
 
-| You write | Referee provides |
+| You write | Arbiter provides |
 | --- | --- |
 | The rules, as one Cairo trait (`GameRules`): state, actions, whose turn, who won, and how long a game may run | Signed steps, transcripts and replay |
 | A JS mirror of the rules (a codec), so clients can check moves | Hash-chain randomness that neither player can bias |
@@ -27,27 +27,27 @@ tactics game).
 | A proof adapter of about 40 lines, if you settle with proofs | The channel: disputes, forced play, timeouts, resignation, settlement |
 | Your game's UI | A session store with a signing guard, and a keeper that archives moves and answers disputes |
 
-The [counter example](https://github.com/broody/referee/blob/main/examples/counter/src/lib.cairo)
+The [counter example](https://github.com/broody/arbiter/blob/main/examples/counter/src/lib.cairo)
 is a complete game, with dice, in about 100 lines of Cairo.
 
 ## Packages
 
 | Package | Path | What it does |
 | --- | --- | --- |
-| `referee` | `core/` | The protocol and the channel's dispute logic as pure Cairo functions. No Dojo. Builds on Cairo 2.13 and 2.18 |
-| `referee_dojo` | `dojo/referee_dojo/` | Dojo models, the `ChannelUpdated` event, and one helper per channel entrypoint |
-| `referee_adapter` | `adapter/referee_adapter/` | The proof adapter: the virtual replay that gets proved, and `settle`. Cairo 2.18 |
-| `referee_testing` | `testing/` | A test-only Cairo signer |
-| `@referee/sdk` | `sdk/` | The JS protocol: `Session`, hashing, signing, replay, clocks and codecs. Subpaths `/proving`, `/store` and `/keeper` |
+| `arbiter` | `core/` | The protocol and the channel's dispute logic as pure Cairo functions. No Dojo. Builds on Cairo 2.13 and 2.18 |
+| `arbiter_dojo` | `dojo/arbiter_dojo/` | Dojo models, the `ChannelUpdated` event, and one helper per channel entrypoint |
+| `arbiter_adapter` | `adapter/arbiter_adapter/` | The proof adapter: the virtual replay that gets proved, and `settle`. Cairo 2.18 |
+| `arbiter_testing` | `testing/` | A test-only Cairo signer |
+| `@arbiter/sdk` | `sdk/` | The JS protocol: `Session`, hashing, signing, replay, clocks and codecs. Subpaths `/proving`, `/store` and `/keeper` |
 | keeper | `keeper/` | A service that archives and forwards steps, referees clocks, gives randomness, answers disputes and settles |
-| prover | `prover/` | A self-hosted native prover behind a gateway that proves only referee settlements |
+| prover | `prover/` | A self-hosted native prover behind a gateway that proves only arbiter settlements |
 
 ## Status
 
 | | |
 | --- | --- |
 | Built and tested | Protocol (v6), optional clocks, randomness from the referee, games opened by their players' signatures, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS SDK, session store, keeper, counter example |
-| Proven on Sepolia | Surround settles full games with one native proof through `referee_adapter` |
+| Proven on Sepolia | Surround settles full games with one native proof through `arbiter_adapter` |
 | Tested end to end on Katana | Games opened on wallet signatures, the keeper answering a dispute, opening and settling finished games, refereeing a timed game, and giving a game its randomness |
 | In progress | More than 2 seats |
 | Not yet | PROOF2 large-path proving (network support expected around 2026-10-10) |

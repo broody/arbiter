@@ -12,10 +12,10 @@ It uses the counter's codec. Substitute yours.
 
 ```js
 import { ec, stark } from 'starknet'
-import { disputeAnswer, play, playRandom, publicKey, reveal, rngChain, rebase, termsTypedData } from '@referee/sdk'
-import { SessionStore, indexedDbBackend } from '@referee/sdk/store'
-import { KeeperClient } from '@referee/sdk/keeper'
-import { contractCall, getChannel, historyCall, openGameCall, snapshotIfOpen } from '@referee/sdk/proving'
+import { disputeAnswer, play, playRandom, publicKey, reveal, rngChain, rebase, termsTypedData } from '@arbiter/sdk'
+import { SessionStore, indexedDbBackend } from '@arbiter/sdk/store'
+import { KeeperClient } from '@arbiter/sdk/keeper'
+import { contractCall, getChannel, historyCall, openGameCall, snapshotIfOpen } from '@arbiter/sdk/proving'
 import { ADD, GAMBLE, counter } from './counter.mjs' // your game codec
 
 const store = new SessionStore(indexedDbBackend('my-game'))
@@ -258,7 +258,7 @@ roll, played onchain with `force`, pauses forced play: no seat is due, and
 nobody can be timed out. A void ends the pause with no result:
 
 ```js
-import { ZERO_SIGNATURE, encodeSignatures, sign, voidHash } from '@referee/sdk'
+import { ZERO_SIGNATURE, encodeSignatures, sign, voidHash } from '@arbiter/sdk'
 
 const channel = await getChannel(provider, counter, CHANNEL, gameId)
 // Each seat approves the void from the channel's anchor, at its current epoch.

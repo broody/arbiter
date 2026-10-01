@@ -1,6 +1,6 @@
 # Keeper
 
-A keeper keeps referee games moving when players can't or won't. It's one
+A keeper keeps arbiter games moving when players can't or won't. It's one
 service over one piece of state, the latest verified transcript of each game:
 
 | Part | What it does |
@@ -27,7 +27,7 @@ flowchart LR
   W -- "prove + settle" --> P["Adapter"]
 ```
 
-Clients use it through `@referee/sdk/keeper` (see
+Clients use it through `@arbiter/sdk/keeper` (see
 [Build the client](/guide/client) and the
 [client reference](/reference/keeper-client)). The HTTP API is in the
 [reference](/reference/keeper-api).
@@ -37,7 +37,7 @@ Clients use it through `@referee/sdk/keeper` (see
 - It can't forge a step: it keeps only steps whose signatures verify, and
   every client verifies again whatever it pulls.
 - It can delay or withhold steps. Both players keep their own copies
-  (`@referee/sdk/store`), so it's never the only copy.
+  (`@arbiter/sdk/store`), so it's never the only copy.
 - It holds no player keys. Its account pays for `submit_history`, `resolve`
   and the adapter's `settle`, which anyone may send, with `open_game` on the
   seats' own wallet signatures for a game nobody opened yet; for its
@@ -100,7 +100,7 @@ A game opens onchain only when it first needs the chain, usually to settle
 keeper admits it on its seats' wallet signatures instead:
 
 1. Each seat's wallet signs the terms: `termsTypedData(game, terms)` in
-   [`@referee/sdk`](/reference/sdk), SNIP-12 typed data naming the game and
+   [`@arbiter/sdk`](/reference/sdk), SNIP-12 typed data naming the game and
    its terms' context.
 2. The client registers the game with the signatures in seat order
    (`register(session, { authorizations })`).
@@ -238,7 +238,7 @@ keeper only watches and logs what it would send.
 
 ### Write a config
 
-Start from [`keeper/config.example.json`](https://github.com/broody/referee/blob/main/keeper/config.example.json):
+Start from [`keeper/config.example.json`](https://github.com/broody/arbiter/blob/main/keeper/config.example.json):
 
 ```json
 {
@@ -341,7 +341,7 @@ for the transactions it sends, and cap them with `max_fee_fri`.
   `register`, with `outcome` (`sent`, `failed`, `skipped` without an account,
   `opened`, or `refused`: a registration the archive turned down, which,
   unlike a `failed` one, isn't retried) and `tx`.
-- **Store.** A directory of JSON files (`@referee/sdk/store/file`). A `LOCK`
+- **Store.** A directory of JSON files (`@arbiter/sdk/store/file`). A `LOCK`
   file allows one process per directory. Closed games stay in it.
 - **Limits.** `max_open_games`, `reserved_games`, `max_open_per_player` and
   `max_steps` bound storage, `rate_per_minute` and `max_body_bytes` bound

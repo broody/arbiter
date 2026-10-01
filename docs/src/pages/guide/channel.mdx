@@ -1,7 +1,7 @@
 # Deploy the channel
 
 Your game's onchain contract is a Dojo system whose entrypoints each forward to
-a helper in `referee_dojo::channel`. The helpers do the work: storage, caller
+a helper in `arbiter_dojo::channel`. The helpers do the work: storage, caller
 authentication, prover checks, signature checks and the channel state machine.
 Your system adds the game's types and one line per entrypoint.
 
@@ -17,16 +17,16 @@ cairo-version = "2.13.1"
 sierra = true
 build-external-contracts = [
     "dojo::world::world_contract::world",
-    "referee_dojo::models::m_ChannelTerms",
-    "referee_dojo::models::m_ChannelState",
-    "referee_dojo::models::m_ChannelRng",       # only if games take randomness from their referee
-    "referee_dojo::models::m_ProverAllowed",
-    "referee_dojo::models::e_ChannelUpdated",
+    "arbiter_dojo::models::m_ChannelTerms",
+    "arbiter_dojo::models::m_ChannelState",
+    "arbiter_dojo::models::m_ChannelRng",       # only if games take randomness from their referee
+    "arbiter_dojo::models::m_ProverAllowed",
+    "arbiter_dojo::models::e_ChannelUpdated",
 ]
 
 [dependencies]
-referee = { git = "https://github.com/broody/referee.git", rev = "<commit>" }
-referee_dojo = { git = "https://github.com/broody/referee.git", rev = "<commit>" }
+arbiter = { git = "https://github.com/broody/arbiter.git", rev = "<commit>" }
+arbiter_dojo = { git = "https://github.com/broody/arbiter.git", rev = "<commit>" }
 my_game = { path = "../rules" }          # your GameRules crate
 starknet = "2.13.1"
 dojo = "1.8.0"
@@ -36,8 +36,8 @@ dojo_cairo_macros = "1.8.0"
 allow-prebuilt-plugins = ["dojo_cairo_macros"]
 ```
 
-The `build-external-contracts` list registers referee's models and event in your
-namespace. Dojo 1.8 is pinned to Cairo 2.13, which is why `referee` also builds
+The `build-external-contracts` list registers arbiter's models and event in your
+namespace. Dojo 1.8 is pinned to Cairo 2.13, which is why `arbiter` also builds
 on 2.13.
 
 A channel is stored in two models. `ChannelTerms` holds what the channel fixes
@@ -62,7 +62,7 @@ default = "counter"
 ## The system
 
 This is the counter's system
-([`dojo/examples/counter/src/lib.cairo`](https://github.com/broody/referee/blob/main/dojo/examples/counter/src/lib.cairo)),
+([`dojo/examples/counter/src/lib.cairo`](https://github.com/broody/arbiter/blob/main/dojo/examples/counter/src/lib.cairo)),
 abridged. The interface names your types. Each entrypoint is one call into the
 binding.
 
@@ -101,7 +101,7 @@ pub trait ICounterChannel<T> {
 
 #[dojo::contract]
 pub mod channel {
-    use referee_dojo::channel as binding;
+    use arbiter_dojo::channel as binding;
     // …
 
     #[abi(embed_v0)]
@@ -242,8 +242,8 @@ or matchmaker, not from these events:
 
 From JS, read a game with `getChannel` (the decoded `ChannelGame`), and its
 terms with `decodeTerms` over the `terms` view (see
-[@referee/sdk/proving](/reference/proving)). Rewards read
-`referee_dojo::channel::result(world, game_id)`, which is `Some(outcome)` once
+[@arbiter/sdk/proving](/reference/proving)). Rewards read
+`arbiter_dojo::channel::result(world, game_id)`, which is `Some(outcome)` once
 the game is `SETTLED`.
 
 :::warning

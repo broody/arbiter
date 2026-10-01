@@ -1,13 +1,13 @@
-# @referee/sdk/store
+# @arbiter/sdk/store
 
 Durable client sessions: each game's transcript, the last step the client signed for each seat, and the client's session keys, in a small async key-value backend. `SessionStore.move` makes the [signing guard](/concepts/signing-safety) survive restarts, second tabs and stale copies, and in a timed game it keeps the steps that still await the referee's stamp.
 
 ```js
-import { SessionStore, indexedDbBackend, memoryBackend, stringify, parse } from '@referee/sdk/store'
-import { fileBackend } from '@referee/sdk/store/file' // Node only
+import { SessionStore, indexedDbBackend, memoryBackend, stringify, parse } from '@arbiter/sdk/store'
+import { fileBackend } from '@arbiter/sdk/store/file' // Node only
 ```
 
-Source: [`sdk/src/store.mjs`](https://github.com/broody/referee/blob/main/sdk/src/store.mjs) and [`sdk/src/store-file.mjs`](https://github.com/broody/referee/blob/main/sdk/src/store-file.mjs). See [Build the client](/guide/client).
+Source: [`sdk/src/store.mjs`](https://github.com/broody/arbiter/blob/main/sdk/src/store.mjs) and [`sdk/src/store-file.mjs`](https://github.com/broody/arbiter/blob/main/sdk/src/store-file.mjs). See [Build the client](/guide/client).
 
 ## Backends
 
@@ -24,7 +24,7 @@ A backend is an async key-value store of plain data: objects, arrays, strings, n
 | Backend | Signature | Where |
 | --- | --- | --- |
 | [`memoryBackend`](#memorybackend) | `()` | In memory, for tests and short-lived clients. |
-| [`indexedDbBackend`](#indexeddbbackend) | `(name = 'referee', { indexedDB = globalThis.indexedDB } = {})` | An IndexedDB database, for browsers. |
+| [`indexedDbBackend`](#indexeddbbackend) | `(name = 'arbiter', { indexedDB = globalThis.indexedDB } = {})` | An IndexedDB database, for browsers. |
 | [`fileBackend`](#filebackend) | `(dir)`, async | A directory of JSON files, for Node. |
 
 ### memoryBackend
@@ -38,7 +38,7 @@ An IndexedDB database named `name`, at version 1, with one object store, `record
 ### fileBackend
 
 ```js
-import { fileBackend } from '@referee/sdk/store/file'
+import { fileBackend } from '@arbiter/sdk/store/file'
 
 const backend = await fileBackend('./sessions')
 // ...
@@ -129,7 +129,7 @@ A transcript that an older SDK saved whole, as `{ record, seq, transcript }` und
 ### Example
 
 ```js
-import { SessionStore, indexedDbBackend } from '@referee/sdk/store'
+import { SessionStore, indexedDbBackend } from '@arbiter/sdk/store'
 import { counter } from './counter.mjs' // your game codec
 
 const store = new SessionStore(indexedDbBackend())

@@ -1,14 +1,14 @@
-# referee prover
+# arbiter prover
 
-Self-hosted native proofs for referee games. `@referee/sdk/proving` sends a
+Self-hosted native proofs for arbiter games. `@arbiter/sdk/proving` sends a
 session's settlement to a `starknet_proveTransaction` endpoint. By default that
 is StarkWare's hosted alpha prover; this directory runs the same endpoint
 yourself:
 
 | Process | What it is |
 | --- | --- |
-| backend | StarkWare's `starknet_transaction_prover` (the service behind the hosted prover), built from source at the sequencer revision in [`pins.json`](pins.json), with referee's [memory patches](#memory). It runs the adapter's virtual transaction in the virtual OS and proves it with Stwo in process. **PROOF1.** |
-| gateway | [`server.mjs`](server.mjs): the same JSON-RPC API in front of the backend. It admits only referee settlements (below), queues and rate-limits them, proves each on its own [isolated worker](#isolation), and maps capacity errors. |
+| backend | StarkWare's `starknet_transaction_prover` (the service behind the hosted prover), built from source at the sequencer revision in [`pins.json`](pins.json), with arbiter's [memory patches](#memory). It runs the adapter's virtual transaction in the virtual OS and proves it with Stwo in process. **PROOF1.** |
+| gateway | [`server.mjs`](server.mjs): the same JSON-RPC API in front of the backend. It admits only arbiter settlements (below), queues and rate-limits them, proves each on its own [isolated worker](#isolation), and maps capacity errors. |
 
 Point a client at the gateway: `proveSession({ proverUrl: 'http://host:3100', ... })`.
 Nothing else changes: the proof, its facts and the `settle` call are exactly
@@ -24,7 +24,7 @@ Before a request takes a proving slot, the gateway checks:
 - it is a zero-fee virtual `INVOKE_V3` against a `{ block_hash }` or
   `{ block_number }`, with calldata under `max_calldata` felts;
 - at that block, the sender's class is in `adapter_classes` (an allowlist of
-  referee adapter classes, like the channel's own);
+  arbiter adapter classes, like the channel's own);
 - that adapter pins `virtual_os_program`, the program the backend runs, so the
   proof can settle.
 
@@ -203,7 +203,7 @@ TARGET_CPU=native prover/build.sh
 ```
 
 The build clones the pinned sequencer and the four proving dependencies it
-locks into `~/.cache/referee-prover` (`REFEREE_PROVER_BUILD`), applies
+locks into `~/.cache/arbiter-prover` (`ARBITER_PROVER_BUILD`), applies
 [`patches/`](patches), builds the backend with in-process Stwo proving against
 the patched copies, installs the Sierra compiler it uses at runtime, and
 records the build (including the patches' hashes) in `build.json`.
@@ -221,7 +221,7 @@ Copy [`config.example.json`](config.example.json) and set:
 | `max_concurrent`, `max_queued` | Workers, each proving one job at a time (see [Memory](#memory) for the budget), and waiting requests. |
 | `memory` | `standard` (default) or `bounded`: see [Memory](#memory). |
 | `workers` | `cgroup_root` (`"self"`), `base_port` (3200; worker `i` listens on `base_port + i` on localhost), `job_memory` (by `memory`: 56G or 28G), `job_cpus` (no quota), `pids_max` (1024), `sandbox` (`"cgroup"`, or `"none"` for development): see [Isolation](#isolation). |
-| `build_dir` | The build to run (default `$REFEREE_PROVER_BUILD`, else `~/.cache/referee-prover`). |
+| `build_dir` | The build to run (default `$ARBITER_PROVER_BUILD`, else `~/.cache/arbiter-prover`). |
 | `backend_url` | Instead of workers, forward to a backend you run yourself, without isolation. |
 | `prefetch_state` | Fetch the transaction's state up front with one simulation (default true). |
 | `max_calldata`, `rate_per_minute`, `backend_timeout_ms` | Request size, per-client rate and backend timeout. |
@@ -239,33 +239,33 @@ prefixed `worker-N:`. `GET /health` answers `ok`.
 ## Deploy
 
 Both setups in [`deploy/`](deploy) give the gateway the delegated cgroup its
-workers need, and run it as an unprivileged `referee` user.
+workers need, and run it as an unprivileged `arbiter` user.
 
-**systemd** (recommended): [`referee-prover.service`](deploy/referee-prover.service)
-runs the gateway with `Delegate=yes`. Install the repository at `/opt/referee`
+**systemd** (recommended): [`arbiter-prover.service`](deploy/arbiter-prover.service)
+runs the gateway with `Delegate=yes`. Install the repository at `/opt/arbiter`
 (`npm ci --omit=dev`), build with
-`REFEREE_PROVER_BUILD=/var/lib/referee-prover/build prover/build.sh`, put the
-config at `/etc/referee/prover.json`, and size the unit's `MemoryMax` to the
+`ARBITER_PROVER_BUILD=/var/lib/arbiter-prover/build prover/build.sh`, put the
+config at `/etc/arbiter/prover.json`, and size the unit's `MemoryMax` to the
 workers (`max_concurrent` × `workers.job_memory`, plus the gateway).
 
 **Docker**: [`Dockerfile`](deploy/Dockerfile) builds the backend with
 `build.sh` (build argument `CPU`: `x86-64-v3` by default, or `native`) into an
 image with the gateway. Its [entrypoint](deploy/entrypoint.sh) remounts the
-container's private cgroup namespace writable, hands it to `referee`, and drops
+container's private cgroup namespace writable, hands it to `arbiter`, and drops
 every capability before starting the gateway:
 
 ```bash
-docker build -f prover/deploy/Dockerfile -t referee-prover .
-docker run -d --name referee-prover --cgroupns=private --cap-add SYS_ADMIN \
+docker build -f prover/deploy/Dockerfile -t arbiter-prover .
+docker run -d --name arbiter-prover --cgroupns=private --cap-add SYS_ADMIN \
   --security-opt apparmor=unconfined --network host --memory 120g --memory-swap 120g \
-  -v /etc/referee/prover.json:/etc/referee/prover.json:ro referee-prover
+  -v /etc/arbiter/prover.json:/etc/arbiter/prover.json:ro arbiter-prover
 ```
 
 `SYS_ADMIN` (and, on AppArmor hosts, `apparmor=unconfined`) is only for the
 remount; `--network host` lets the gateway reach a local RPC node and listen
 on its configured port.
 
-Checked 2026-09-27: the image (`x86-64-v3`) ran its gateway as `referee` with
+Checked 2026-09-27: the image (`x86-64-v3`) ran its gateway as `arbiter` with
 no capabilities and proved the 529-step game on a worker in 26.6 s (24.8 s
 with a `native` build), and the unit's cgroup settings, as a user service,
 proved the 319-step game; both proofs were byte-identical to native builds'.
@@ -276,14 +276,14 @@ JSON-RPC 2.0 on `/`:
 - `starknet_proveTransaction { block_id, transaction }` returns
   `{ proof, proof_facts, l2_to_l1_messages }`, as the hosted prover does;
 - `starknet_specVersion` is the backend's version;
-- `referee_info` returns the chain, OS program, allowlisted classes, proof paths,
+- `arbiter_info` returns the chain, OS program, allowlisted classes, proof paths,
   memory mode, workers (ready, busy, restarts) and limits.
 
 | Code | Meaning |
 | --- | --- |
 | `24` | Block not found |
 | `1000` | Not a zero-fee INVOKE_V3, malformed, or calldata too large (settle in checkpoints) |
-| `1100` | Sender is not an allowlisted referee adapter |
+| `1100` | Sender is not an allowlisted arbiter adapter |
 | `1101` | The adapter pins another virtual OS program |
 | `1102` | The transaction exceeds PROOF1; settle in checkpoints |
 | `1103` | The proving job failed: out of memory, timed out, or its backend stopped (`data.reason`); retry later |
@@ -299,7 +299,7 @@ The network does not accept PROOF2 yet (expected about 2026-10-10). Then a
 large-path backend joins this one: Templar's virtual-OS runner and
 bounded-memory prover (`broody/proving`), which fit a full proof in about
 28 GiB. The gateway will route a job that overflows PROOF1 (code `1102` today)
-to it. `referee_adapter` already accepts PROOF2 facts. If PROOF2 proofs attest
+to it. `arbiter_adapter` already accepts PROOF2 facts. If PROOF2 proofs attest
 the newer virtual OS program rather than the one adapters pin today, each game
 deploys one new adapter instance pinning it and allowlists it; channels and
 games are unaffected.

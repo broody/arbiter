@@ -1,27 +1,27 @@
-# Cairo: referee
+# Cairo: arbiter
 
-The `referee` crate ([`core/`](https://github.com/broody/referee/blob/main/core/src/lib.cairo)) is the game-agnostic protocol: the `GameRules` trait, the envelope around a game's state, the hashes every signature covers, signed replay, time rules, and the channel state machine as pure functions. This page lists every public item, for game authors and for anyone writing a binding.
+The `arbiter` crate ([`core/`](https://github.com/broody/arbiter/blob/main/core/src/lib.cairo)) is the game-agnostic protocol: the `GameRules` trait, the envelope around a game's state, the hashes every signature covers, signed replay, time rules, and the channel state machine as pure functions. This page lists every public item, for game authors and for anyone writing a binding.
 
 The crate has no Dojo or Starknet storage dependency. It declares `cairo-version = "2.13.1"` and builds on both Dojo's Cairo (2.13) and the proof adapter's (2.18). Crates in this repository depend on it by path:
 
 ```toml
 [dependencies]
-referee = { path = "../../core" }
+arbiter = { path = "../../core" }
 ```
 
 | Module | Contents |
 | --- | --- |
-| `referee::rules` | `GameRules` |
-| `referee::types` | Data types and seat, outcome and reason constants |
-| `referee::protocol` | Hashes, signature checks, randomness, replay |
-| `referee::clocks` | `ClockRules` and the standard time control |
-| `referee::channel` | The channel state machine |
+| `arbiter::rules` | `GameRules` |
+| `arbiter::types` | Data types and seat, outcome and reason constants |
+| `arbiter::protocol` | Hashes, signature checks, randomness, replay |
+| `arbiter::clocks` | `ClockRules` and the standard time control |
+| `arbiter::channel` | The channel state machine |
 
-The crate root re-exports `GameRules`, every type and constant in `types`, `PROTOCOL_VERSION`, every public function in `protocol`, and `Channel`, `StateRef` and `state_ref` from `channel`. The channel's status constants and transition functions are reached through `referee::channel`, and everything in `clocks`, including `MAX_CLOCK_MS`, through `referee::clocks`.
+The crate root re-exports `GameRules`, every type and constant in `types`, `PROTOCOL_VERSION`, every public function in `protocol`, and `Channel`, `StateRef` and `state_ref` from `channel`. The channel's status constants and transition functions are reached through `arbiter::channel`, and everything in `clocks`, including `MAX_CLOCK_MS`, through `arbiter::clocks`.
 
 ## GameRules
 
-What a game implements ([`rules.cairo`](https://github.com/broody/referee/blob/main/core/src/rules.cairo)). Every function must be deterministic and must panic on an illegal action. The same rules run in the Dojo channel's onchain replay and in the proving program. See [Write the rules](/guide/rules).
+What a game implements ([`rules.cairo`](https://github.com/broody/arbiter/blob/main/core/src/rules.cairo)). Every function must be deterministic and must panic on an illegal action. The same rules run in the Dojo channel's onchain replay and in the proving program. See [Write the rules](/guide/rules).
 
 ### Associated types
 
@@ -45,13 +45,13 @@ What a game implements ([`rules.cairo`](https://github.com/broody/referee/blob/m
 
 | Item | Contract |
 | --- | --- |
-| `impl Time: ClockRules<Self::State>` | How the game's clocks run when it is timed, e.g. `referee::clocks::StandardTime<State>`. Every game names one; untimed games never call it. See [The clocks module](#the-clocks-module). |
+| `impl Time: ClockRules<Self::State>` | How the game's clocks run when it is timed, e.g. `arbiter::clocks::StandardTime<State>`. Every game names one; untimed games never call it. See [The clocks module](#the-clocks-module). |
 
 ### Functions
 
 | Function | Contract |
 | --- | --- |
-| `init(config: @Config) -> State` | The opening state. `open` calls it, so `referee_dojo`'s `open_game` rejects an invalid config before the game opens. |
+| `init(config: @Config) -> State` | The opening state. `open` calls it, so `arbiter_dojo`'s `open_game` rejects an invalid config before the game opens. |
 | `load(config: @Config, state: @State, witness: Witness) -> Scratch` | Check `witness` against `config` and `state`, and build scratch memory. Replay calls it once, with the start state. |
 | `apply(config: @Config, ref scratch: Scratch, state: State, seat: u8, action: Action) -> (State, Option<u8>)` | Apply `seat`'s action. Returns the new state and, if the action needs shared randomness, the seat that must reveal before play continues. In a game that takes its randomness from the referee, the referee reveals instead, whichever seat is named. |
 | `resolve(config: @Config, ref scratch: Scratch, state: State, seed: felt252) -> State` | Complete the pending randomness request with the agreed seed. Games that never request randomness can panic here. |
@@ -64,7 +64,7 @@ The protocol enforces part of this contract during replay: `Move::Play` panics w
 
 ## Types
 
-Defined in [`types.cairo`](https://github.com/broody/referee/blob/main/core/src/types.cairo). Every struct and enum derives `Copy`, `Drop`, `Serde`, `PartialEq` and `Debug`.
+Defined in [`types.cairo`](https://github.com/broody/arbiter/blob/main/core/src/types.cairo). Every struct and enum derives `Copy`, `Drop`, `Serde`, `PartialEq` and `Debug`.
 
 ### Constants
 
@@ -187,7 +187,7 @@ A STARK-curve ECDSA signature: `r: felt252`, `s: felt252`. The zero signature (`
 
 ## Protocol functions
 
-Defined in [`protocol.cairo`](https://github.com/broody/referee/blob/main/core/src/protocol.cairo). Functions that take `impl R: GameRules` are called with the rules as a generic argument, e.g. `replay::<MyRules>(...)`. Trait bounds on `R`'s associated types (`Serde`, `Copy`, `Drop`, `Destruct`) are omitted below. See [Steps and transcripts](/concepts/protocol).
+Defined in [`protocol.cairo`](https://github.com/broody/arbiter/blob/main/core/src/protocol.cairo). Functions that take `impl R: GameRules` are called with the rules as a generic argument, e.g. `replay::<MyRules>(...)`. Trait bounds on `R`'s associated types (`Serde`, `Copy`, `Drop`, `Destruct`) are omitted below. See [Steps and transcripts](/concepts/protocol).
 
 ### Hashes
 
@@ -209,17 +209,17 @@ fn stamp_hash<impl R: GameRules>(context: felt252, seq: u32, transcript: felt252
 | Function | Hashes | Used for |
 | --- | --- | --- |
 | `signing_hash` | Poseidon of `fields`, masked to 250 bits. | Every signed message: STARK signatures need a message below 2^251. |
-| `context_hash` | Poseidon of `TAG, 'REFEREE_CHANNEL_V1', PROTOCOL_VERSION, RULES_VERSION` and the serialized terms. | The channel's `context`; bound into every signed message. |
-| `state_hash` | Poseidon of `TAG, 'REFEREE_STATE_V1'` and the serialized envelope. | Anchors, candidates, checkpoints and proofs. |
-| `action_hash` | `signing_hash` of `TAG, 'REFEREE_ACTION_V1', context, seq, transcript` and the serialized step. | The message a seat signs for a step. It binds the transcript, not the state, and omits the seat, which the state determines. |
-| `checkpoint_hash` | `signing_hash` of `TAG, 'REFEREE_CHECKPOINT_V1', context, epoch, state`. | Every seat's approval of a state, which commits it at once. |
-| `reopen_hash` | `signing_hash` of `TAG, 'REFEREE_REOPEN_V1', context, epoch, state`. | Every seat's approval to leave forced play from the anchor `state`. |
-| `live_hash` | `signing_hash` of `TAG, 'REFEREE_LIVE_V1', context, epoch, deadline`. | A timed game's referee shows it is live during the dispute with this `epoch` and `deadline` (`channel::acknowledge`). |
-| `referee_resume_hash` | `signing_hash` of `TAG, 'REFEREE_RESUME_V1', context, epoch, state`. | A timed game's referee returns it from forced play to offchain play on its own, from the anchor `state` (`channel::resume`). |
-| `tip_hash` | `signing_hash` of `TAG, 'REFEREE_TIP_V1', chain_id, channel, game_id, tip`. | The referee commits its hash-chain tip to one game. It names the game by its ids, since the tip is part of the terms the context hashes: the referee signs it before the seats sign the terms, and `open_game` checks the signature. A tip a seat made up would let that seat know every roll. |
-| `terms_message` | The SNIP-12 (revision 1) message hash of the SDK's `termsTypedData`, as starknet.js computes it for `account`: `poseidon('StarkNet Message', domain, account, message)`, with the domain `StarknetDomain { name: 'referee', version: 1, chainId: chain_id, revision: 1 }` and the message `Game { game: TAG, game_id, context }`. | What each seat's wallet signs to agree to a game. `referee_dojo`'s `open_game` passes it to the seat's account (`is_valid_signature`). Not masked: wallets sign it, not session keys. |
-| `void_hash` | `signing_hash` of `TAG, 'REFEREE_VOID_V1', context, epoch, state`. | Every seat's approval to void a game whose roll waits for a referee that is down, from the anchor `state` (`channel::void`). |
-| `stamp_hash` | `signing_hash` of `TAG, 'REFEREE_STAMP_V1', context, seq, transcript` and the serialized clock. | The referee's attestation after each step. The last one covers every earlier stamp, since the clocks depend on all of them. |
+| `context_hash` | Poseidon of `TAG, 'ARBITER_CHANNEL_V1', PROTOCOL_VERSION, RULES_VERSION` and the serialized terms. | The channel's `context`; bound into every signed message. |
+| `state_hash` | Poseidon of `TAG, 'ARBITER_STATE_V1'` and the serialized envelope. | Anchors, candidates, checkpoints and proofs. |
+| `action_hash` | `signing_hash` of `TAG, 'ARBITER_ACTION_V1', context, seq, transcript` and the serialized step. | The message a seat signs for a step. It binds the transcript, not the state, and omits the seat, which the state determines. |
+| `checkpoint_hash` | `signing_hash` of `TAG, 'ARBITER_CHECKPOINT_V1', context, epoch, state`. | Every seat's approval of a state, which commits it at once. |
+| `reopen_hash` | `signing_hash` of `TAG, 'ARBITER_REOPEN_V1', context, epoch, state`. | Every seat's approval to leave forced play from the anchor `state`. |
+| `live_hash` | `signing_hash` of `TAG, 'ARBITER_LIVE_V1', context, epoch, deadline`. | A timed game's referee shows it is live during the dispute with this `epoch` and `deadline` (`channel::acknowledge`). |
+| `referee_resume_hash` | `signing_hash` of `TAG, 'ARBITER_RESUME_V1', context, epoch, state`. | A timed game's referee returns it from forced play to offchain play on its own, from the anchor `state` (`channel::resume`). |
+| `tip_hash` | `signing_hash` of `TAG, 'ARBITER_TIP_V1', chain_id, channel, game_id, tip`. | The referee commits its hash-chain tip to one game. It names the game by its ids, since the tip is part of the terms the context hashes: the referee signs it before the seats sign the terms, and `open_game` checks the signature. A tip a seat made up would let that seat know every roll. |
+| `terms_message` | The SNIP-12 (revision 1) message hash of the SDK's `termsTypedData`, as starknet.js computes it for `account`: `poseidon('StarkNet Message', domain, account, message)`, with the domain `StarknetDomain { name: 'arbiter', version: 1, chainId: chain_id, revision: 1 }` and the message `Game { game: TAG, game_id, context }`. | What each seat's wallet signs to agree to a game. `arbiter_dojo`'s `open_game` passes it to the seat's account (`is_valid_signature`). Not masked: wallets sign it, not session keys. |
+| `void_hash` | `signing_hash` of `TAG, 'ARBITER_VOID_V1', context, epoch, state`. | Every seat's approval to void a game whose roll waits for a referee that is down, from the anchor `state` (`channel::void`). |
+| `stamp_hash` | `signing_hash` of `TAG, 'ARBITER_STAMP_V1', context, seq, transcript` and the serialized clock. | The referee's attestation after each step. The last one covers every earlier stamp, since the clocks depend on all of them. |
 
 ### Checks and signatures
 
@@ -246,8 +246,8 @@ fn seed<impl R: GameRules>(context: felt252, seq: u32, requester: felt252, revea
 
 | Function | Behavior |
 | --- | --- |
-| `rng_next` | One hash-chain link: Poseidon of `'REFEREE_RNG_V1', value`. A reveal `v` is valid when `rng_next(v)` equals the revealer's current head: a seat's (`rng_heads`), or the referee's (`rng_referee`). |
-| `seed` | Poseidon of `TAG, 'REFEREE_SEED_V1', context, seq, requester, revealer`: the seed handed to `GameRules::resolve`. Replay passes the request's `Pending.seq`, the requester's revealed value and the revealer's value. The revealer is a seat, or the referee when the game takes its randomness from it. |
+| `rng_next` | One hash-chain link: Poseidon of `'ARBITER_RNG_V1', value`. A reveal `v` is valid when `rng_next(v)` equals the revealer's current head: a seat's (`rng_heads`), or the referee's (`rng_referee`). |
+| `seed` | Poseidon of `TAG, 'ARBITER_SEED_V1', context, seq, requester, revealer`: the seed handed to `GameRules::resolve`. Replay passes the request's `Pending.seq`, the requester's revealed value and the revealer's value. The revealer is a seat, or the referee when the game takes its randomness from it. |
 
 ### Envelope and seats
 
@@ -336,7 +336,7 @@ The clock charge goes to the seat on the clock (the payer, `due` before the step
 
 ## The clocks module
 
-`referee::clocks` ([`clocks.cairo`](https://github.com/broody/referee/blob/main/core/src/clocks.cairo)) holds time rules: how a timed game's clocks run. The protocol keeps the mechanics: stamps, the turn's `used`, pauses, reveals, flags and attestations ([Each step](#each-step)). A game's `ClockRules` decide what each seat has and what a finished turn costs. `StandardTime` covers per-turn timers, delay, Fischer increments and Japanese byo-yomi. See [Clocks and the referee](/concepts/clocks).
+`arbiter::clocks` ([`clocks.cairo`](https://github.com/broody/arbiter/blob/main/core/src/clocks.cairo)) holds time rules: how a timed game's clocks run. The protocol keeps the mechanics: stamps, the turn's `used`, pauses, reveals, flags and attestations ([Each step](#each-step)). A game's `ClockRules` decide what each seat has and what a finished turn costs. `StandardTime` covers per-turn timers, delay, Fischer increments and Japanese byo-yomi. See [Clocks and the referee](/concepts/clocks).
 
 ### Constants
 
@@ -351,7 +351,7 @@ The clock charge goes to the seat on the clock (the payer, `due` before the step
 
 | Function | Contract |
 | --- | --- |
-| `check(settings: Span<felt252>)` | Panic on settings a game could not be played under. `check_clock` calls it, so `open` and `referee_dojo`'s `open_game` do too. |
+| `check(settings: Span<felt252>)` | Panic on settings a game could not be played under. `check_clock` calls it, so `open` and `arbiter_dojo`'s `open_game` do too. |
 | `open(settings: Span<felt252>, seats: u8) -> Span<felt252>` | Each seat's clocks when the game opens. |
 | `limit(settings: Span<felt252>, clock: Span<felt252>, seat: u8, state: @S) -> u64` | Time `seat` can use in a turn that starts with `clock`. Past it, the seat has flagged. |
 | `settle(settings: Span<felt252>, clock: Span<felt252>, seat: u8, used: u64, reveal: bool, state: @S) -> Span<felt252>` | End a turn in which `seat` used `used`, or its answer to a reveal (`reveal`), and return the clocks the next turn starts with. |
@@ -361,7 +361,7 @@ fn decode<T, +Serde<T>, +Drop<T>>(data: Span<felt252>) -> T;
 fn encode<T, +Serde<T>>(value: @T) -> Span<felt252>;
 ```
 
-`decode` deserializes `data`, which must hold exactly one `T`, and panics with `'Invalid clock data'` otherwise. `encode` serializes a value. A second rule set, where the time a seat uses flows to its opponent, is [`examples/counter/src/hourglass.cairo`](https://github.com/broody/referee/blob/main/examples/counter/src/hourglass.cairo).
+`decode` deserializes `data`, which must hold exactly one `T`, and panics with `'Invalid clock data'` otherwise. `encode` serializes a value. A second rule set, where the time a seat uses flows to its opponent, is [`examples/counter/src/hourglass.cairo`](https://github.com/broody/arbiter/blob/main/examples/counter/src/hourglass.cairo).
 
 ### StandardTime
 
@@ -396,8 +396,8 @@ fn encode<T, +Serde<T>>(value: @T) -> Span<felt252>;
 A Fischer 3+2 time control, for example:
 
 ```cairo
-use referee::TimeControl;
-use referee::clocks::{Standard, encode};
+use arbiter::TimeControl;
+use arbiter::clocks::{Standard, encode};
 
 let clock = TimeControl {
     referee: referee_key,
@@ -408,7 +408,7 @@ let clock = TimeControl {
 
 ## The channel module
 
-`referee::channel` ([`channel.cairo`](https://github.com/broody/referee/blob/main/core/src/channel.cairo)) is the channel state machine as pure functions. Storage, caller authentication, proof checks and signature checks belong to the binding (for example [`referee_dojo`](/reference/dojo)), which passes in the caller's seat, the block time and number, whether a submission carried every seat's approval, whether the game is timed, and, when it opens, whether it takes its randomness from its referee. See [The channel and disputes](/concepts/channel).
+`arbiter::channel` ([`channel.cairo`](https://github.com/broody/arbiter/blob/main/core/src/channel.cairo)) is the channel state machine as pure functions. Storage, caller authentication, proof checks and signature checks belong to the binding (for example [`arbiter_dojo`](/reference/dojo)), which passes in the caller's seat, the block time and number, whether a submission carried every seat's approval, whether the game is timed, and, when it opens, whether it takes its randomness from its referee. See [The channel and disputes](/concepts/channel).
 
 ### Constants
 
@@ -491,9 +491,9 @@ stateDiagram-v2
 
 `resign` settles from any live status. `FORCED` covers the pause: while the anchor's `due` is `REFEREE`, only `rolled`, `resume`, `void` and `resign` apply.
 
-## referee_testing
+## arbiter_testing
 
-The `referee_testing` crate ([`testing/`](https://github.com/broody/referee/blob/main/testing/src/lib.cairo)) holds test-only helpers. They take private keys: never use them in a contract.
+The `arbiter_testing` crate ([`testing/`](https://github.com/broody/arbiter/blob/main/testing/src/lib.cairo)) holds test-only helpers. They take private keys: never use them in a contract.
 
 | Function | Behavior |
 | --- | --- |

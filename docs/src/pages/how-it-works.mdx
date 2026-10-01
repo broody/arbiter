@@ -162,7 +162,7 @@ Details: [The channel and disputes](/concepts/channel).
 
 ```mermaid
 flowchart TD
-  S["Seat builds a step:<br/>Play(action), PlayRandom, Reveal,<br/>Recommit, Resign"] --> M["message = signing_hash(TAG, 'REFEREE_ACTION_V1',<br/>context, seq, transcript, move)"]
+  S["Seat builds a step:<br/>Play(action), PlayRandom, Reveal,<br/>Recommit, Resign"] --> M["message = signing_hash(TAG, 'ARBITER_ACTION_V1',<br/>context, seq, transcript, move)"]
   M --> G["sign with the seat's session key"]
   G --> T["send to the other seat<br/>(or the keeper)"]
   T --> V["receiver: check the signature<br/>against the seat's key in the terms"]

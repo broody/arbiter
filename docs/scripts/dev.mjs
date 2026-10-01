@@ -15,7 +15,7 @@ const port = at === -1 ? 5173 : Number(process.argv[at + 1])
 
 const server = await createServer({
   configFile: false,
-  plugins: [react(), vocs(), { name: 'referee-docs:mermaid', config: () => ({ optimizeDeps: { include: ['mermaid'] } }) }],
+  plugins: [react(), vocs(), { name: 'arbiter-docs:mermaid', config: () => ({ optimizeDeps: { include: ['mermaid'] } }) }],
   server: { port },
 })
 await server.listen()

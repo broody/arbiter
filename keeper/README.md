@@ -1,6 +1,6 @@
-# referee keeper
+# arbiter keeper
 
-One service that keeps referee games moving when players can't or won't:
+One service that keeps arbiter games moving when players can't or won't:
 
 | Part | What it does |
 | --- | --- |
@@ -13,12 +13,12 @@ One service that keeps referee games moving when players can't or won't:
 KEEPER_PRIVATE_KEY=0x... node keeper/server.mjs keeper/config.local.json   # see config.example.json
 ```
 
-Clients use `@referee/sdk/keeper`:
+Clients use `@arbiter/sdk/keeper`:
 
 ```js
 const keeper = new KeeperClient('https://keeper.example');
 await keeper.register(session, { authorizations });      // once: each wallet's signature over the terms
-const record = await store.move(session, step, key);     // @referee/sdk/store
+const record = await store.move(session, step, key);     // @arbiter/sdk/store
 await keeper.send(session, record.seq);                  // our step
 await keeper.pull(session, { wait: 30, store });         // the other seat's, verified
 const restored = await keeper.load(game, terms);         // a new device
@@ -40,7 +40,7 @@ await keeper.submit(session, { store });                 // every pending step, 
 - It can't forge a step, because it keeps only steps whose signatures verify.
   Every client verifies again whatever it pulls.
 - It can delay or withhold steps. Both players keep their own copies
-  (`@referee/sdk/store`), so it's never the only copy.
+  (`@arbiter/sdk/store`), so it's never the only copy.
 - It holds no player keys. Its account pays only for `submit_history`,
   `resolve`, the adapter's `settle`, `open_game` on the seats' own wallet
   signatures, and the referee's `acknowledge` and `resume_by_referee`, which
@@ -74,7 +74,7 @@ await keeper.submit(session, { store });                 // every pending step, 
   can check it before it pairs a game here.
 - **Signed terms.** A game no channel holds is admitted on its seats' wallet
   signatures: each seat's wallet signs the terms (`termsTypedData(game,
-  terms)` in `@referee/sdk`, SNIP-12), and `register` sends the signatures in
+  terms)` in `@arbiter/sdk`, SNIP-12), and `register` sends the signatures in
   seat order (`authorizations`). The keeper checks each against the seat's
   account contract (`is_valid_signature`, through `rpc_url`; without one it
   checks nothing) and keeps them with the game. The terms' context binds
@@ -239,7 +239,7 @@ would send.
 ## HTTP API
 
 The API speaks JSON, with BigInts encoded as `{ "$n": "<decimal>" }`
-(`stringify`/`parse` in `@referee/sdk/store`). Errors look like
+(`stringify`/`parse` in `@arbiter/sdk/store`). Errors look like
 `{ error: { message, data } }` and carry status 400, 403, 404, 409, 413, 429, 502 or 503.
 
 | Request | Body / query | Answer |
@@ -287,12 +287,12 @@ each entry's `max_steps`. Steps to a closed game get 409.
     `from_block`, or at the chain's head the first time, and resumes where it
     stopped.
   - The game's system exposes `open_game`, `acknowledge`,
-    `resume_by_referee` and `terms`, as referee_dojo's helpers name them.
+    `resume_by_referee` and `terms`, as arbiter_dojo's helpers name them.
   - Hooks: the module may export, next to the codec, `admit(ids, terms, {
     provider })`, the priority of a new game for the reserved slots (Surround
     ranks rated games first), and `afterSettle(ids, channel, { provider })`,
     the calls to send with the resolve that settles a game (Surround's `rate`).
-- `store`: the file store directory (`@referee/sdk/store/file`, one process
+- `store`: the file store directory (`@arbiter/sdk/store/file`, one process
   per directory).
 - `settle: false` stops the keeper from submitting finished games itself.
 - `max_open_games` (default 10000; formerly `max_games`), `reserved_games`

@@ -1,4 +1,4 @@
-# Referee design
+# Arbiter design
 
 Status: **draft, 2026-10-01**. Built and tested: the core crate (protocol
 version 6, optional referee clocks, randomness from the referee and channel
@@ -7,7 +7,7 @@ terms, the proof adapter, the JS SDK mirror, the keeper, and the counter
 example as both a pure game and a Dojo world.
 Everything marked *planned* is not.
 
-Referee lets two players play a turn-based game offchain with signed moves and
+Arbiter lets two players play a turn-based game offchain with signed moves and
 settle the result on Starknet. There is no transaction per move. A game supplies
 its rules once, in Cairo. The same code validates moves in clients, replays
 disputes onchain, and runs inside the Stwo proof that settles the game.
@@ -20,11 +20,11 @@ Hashfront (`~/development/hashfront`, a tactics game with combat randomness).
 | Layer | Status | Depends on | Purpose |
 |---|---|---|---|
 | `core` (Cairo) | built | nothing | `GameRules`, protocol envelope, hashing, signatures, replay, forced steps, randomness, referee clocks |
-| channel state machine (`referee::channel`) | built | `core` | Pure functions: open, receive a candidate, dispute, acknowledge, resolve, forced play, a posted roll, void, timeout, resume, resign |
-| `referee_dojo` (Cairo) | built | `core`, Dojo | `ChannelTerms`/`ChannelState`/`ChannelRng`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint, including `open_game`, which opens a game on every seat's wallet signature over its terms, `acknowledge`, `resume_by_referee`, `roll` and `void`. Games list the models in `build-external-contracts` |
-| `referee_testing` (Cairo) | built | `core` | Test-only STARK-curve signer and hash-chain helper |
-| `referee_adapter` (Cairo 2.18) | built, tested with mocked proof facts | `core` | Generic logic for a SNIP-36 account contract that proves a replay in the virtual OS and relays it to the channel |
-| `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, clocks and `Referee`, fixtures, Poseidon in WebAssembly; native proving client (`@referee/sdk/proving`); session store and signing guard (`@referee/sdk/store`) |
+| channel state machine (`arbiter::channel`) | built | `core` | Pure functions: open, receive a candidate, dispute, acknowledge, resolve, forced play, a posted roll, void, timeout, resume, resign |
+| `arbiter_dojo` (Cairo) | built | `core`, Dojo | `ChannelTerms`/`ChannelState`/`ChannelRng`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint, including `open_game`, which opens a game on every seat's wallet signature over its terms, `acknowledge`, `resume_by_referee`, `roll` and `void`. Games list the models in `build-external-contracts` |
+| `arbiter_testing` (Cairo) | built | `core` | Test-only STARK-curve signer and hash-chain helper |
+| `arbiter_adapter` (Cairo 2.18) | built, tested with mocked proof facts | `core` | Generic logic for a SNIP-36 account contract that proves a replay in the virtual OS and relays it to the channel |
+| `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, clocks and `Referee`, fixtures, Poseidon in WebAssembly; native proving client (`@arbiter/sdk/proving`); session store and signing guard (`@arbiter/sdk/store`) |
 | keeper (`keeper/`) | built, tested on Katana | `sdk` | Archives and forwards verified steps, records equivocation, answers disputes, resolves and settles, referees timed games and gives them their randomness |
 
 `core` has no Dojo or storage dependency and builds on both Cairo 2.13 (Dojo)
@@ -97,7 +97,7 @@ Surround Go stone is 3 felts of calldata; in v1 it was 10 (`{ seat, action,
 entropy }` with a fixed-width action, plus a signature per step).
 
 **Messages.** A step's message is
-`signing_hash(TAG, 'REFEREE_ACTION_V1', context, seq, transcript, move)`.
+`signing_hash(TAG, 'ARBITER_ACTION_V1', context, seq, transcript, move)`.
 `PROTOCOL_VERSION` 6 is in the context hash, so older signatures never
 verify under it.
 - It binds the transcript, not the full state. State is determined by the
@@ -112,7 +112,7 @@ verify under it.
   tip)`, and the seats sign `void_hash(context, epoch, state)` to void one
   whose roll waits (see Referee randomness).
 - All digests are domain-separated by the game's `TAG` and a
-  `REFEREE_*_V1` tag, and masked to 250 bits for STARK-curve ECDSA.
+  `ARBITER_*_V1` tag, and masked to 250 bits for STARK-curve ECDSA.
 - One message is signed by wallets, not session keys: each seat's wallet
   signs the terms to open the game, as SNIP-12 typed data
   (`terms_message`; see Opening by signatures).
@@ -136,10 +136,10 @@ dispute candidates, so consecutive self-signed steps never outrank a branch the
 opponent acknowledged. The referee's steps count for neither seat.
 
 **Randomness.**
-- Each seat commits the tip of a hash chain (`rng_next(v) = poseidon('REFEREE_RNG_V1', v)`).
+- Each seat commits the tip of a hash chain (`rng_next(v) = poseidon('ARBITER_RNG_V1', v)`).
 - When `apply` requests randomness, the actor sends `PlayRandom` with its next
   chain value as `entropy`. The named seat then sends `Reveal`, and the game gets
-  `seed = poseidon(TAG, 'REFEREE_SEED_V1', context, seq, requester, revealer)`.
+  `seed = poseidon(TAG, 'ARBITER_SEED_V1', context, seq, requester, revealer)`.
 - Rolls happen offchain, as ordinary signed steps: there is no VRF or onchain
   beacon. The chain holds the committed tips, in the terms. Replay and proofs
   check each revealed value against its seat's chain and recompute each seed.
@@ -161,7 +161,7 @@ referee's hash chain if the game takes its randomness from it. Players sign
 moves; the referee signs time.
 - **Stamps.** The referee stamps every offchain step with its own clock, in
   milliseconds, and after each step signs
-  `signing_hash(TAG, 'REFEREE_STAMP_V1', context, seq, transcript, clock)`.
+  `signing_hash(TAG, 'ARBITER_STAMP_V1', context, seq, transcript, clock)`.
   Stamps stay out of the transcript, so a seat's signature never waits on the
   referee: a seat signs the rest of its turn from its `tip` while earlier steps
   wait in `pending` for their stamps.
@@ -176,7 +176,7 @@ moves; the referee signs time.
   pauses, so it is the time the game started, as its referee attests. It is
   part of the attested clock and the state hash. Forced play before any stamp
   leaves it 0 until one comes.
-- **Time rules** (`referee::clocks::ClockRules<State>`). A game names its own
+- **Time rules** (`arbiter::clocks::ClockRules<State>`). A game names its own
   with `GameRules::Time`. The protocol keeps the mechanics (stamps, `used`,
   turns, reveals, pauses, flags, attestations); the rules decide what a seat
   has and what a finished turn costs:
@@ -261,7 +261,7 @@ moves; the referee signs time.
   process on one machine. A save writes only the new step, so that stays flat
   through a game: about 14 ms at step 400 on the file store, which rewrote the
   whole transcript on each save and took 18 ms there.
-- **`Referee`** (`@referee/sdk`) stamps steps as they arrive, flags, and
+- **`Referee`** (`@arbiter/sdk`) stamps steps as they arrive, flags, and
   reports the `deadline()` for a timer. Its time resumes at the last stamp when
   it is made, so a restarted referee never charges seats for its own downtime.
 
@@ -278,7 +278,7 @@ moves; the referee signs time.
 ## Channel
 
 This is Surround's state machine, generalized, as pure functions in
-`referee::channel` (`examples/counter/src/channel_tests.cairo`).
+`arbiter::channel` (`examples/counter/src/channel_tests.cairo`).
 - **Statuses:** UNOPENED, ACTIVE, DISPUTE, FORCED, SETTLED. UNOPENED (0) is a
   game id no channel has opened: a binding reads it from empty storage. A game
   opens straight to ACTIVE at epoch 0, with its opening state as anchor and
@@ -327,7 +327,7 @@ fn open_dispute(ref self: ContractState, game_id: felt252, epoch: u32) {
 }
 ```
 
-- The game adds `referee_dojo::models::{m_ChannelTerms, m_ChannelState, m_ProverAllowed,
+- The game adds `arbiter_dojo::models::{m_ChannelTerms, m_ChannelState, m_ProverAllowed,
   e_ChannelUpdated}` to `build-external-contracts`, and `sozo` registers them
   in the game's namespace. A game that takes randomness from its referee adds
   `m_ChannelRng`.
@@ -377,7 +377,7 @@ fn open_dispute(ref self: ContractState, game_id: felt252, epoch: u32) {
 
 ## Proof adapter
 
-`adapter/referee_adapter` holds the logic, and a game's adapter is an
+`adapter/arbiter_adapter` holds the logic, and a game's adapter is an
 immutable `#[starknet::contract(account)]` of about 40 lines
 (`adapter/examples/counter/src/lib.cairo`) that pins the virtual OS program in
 its constructor.
@@ -388,7 +388,7 @@ its constructor.
   - checks the start state against the anchor or the candidate, or for an
     unopened game against `open(terms)` at epoch 0;
   - replays the signed steps with the game's rules;
-  - emits one L2→L1 message: adapter class, `TAG`, `'REFEREE_PROVED_V1'`,
+  - emits one L2→L1 message: adapter class, `TAG`, `'ARBITER_PROVED_V1'`,
     chain, adapter, channel, game, context, epoch, start hash, end hash.
 
   A prover proves this execution.
@@ -406,7 +406,7 @@ its constructor.
   It then calls the channel's `accept_verified`.
 - **No typed interface per game.** The adapter reaches the channel through
   raw syscalls (`snapshot`, `accept_verified`), so it works with any
-  referee_dojo game system.
+  arbiter_dojo game system.
 - **Calldata convention.** A game's adapter declares
   `__execute__(channel, game_id, epoch, start, witness, batch, opening)`
   (no `witness` argument when the game's witness is `()`), where `opening` is
@@ -414,7 +414,7 @@ its constructor.
   opened, and `settle(channel, game_id, epoch, start_hash, end, acks)`, which
   is what the JS proving client builds.
 
-**JS proving client** (`@referee/sdk/proving`), for any game:
+**JS proving client** (`@arbiter/sdk/proving`), for any game:
 - `proveSession({ rpcUrl | provider, proverUrl, session, epoch, expectedClassHash })`
   waits until the state it starts from is 10 blocks deep, checks that the session
   starts at the anchor or the candidate under the current epoch and that the prover is the
@@ -447,9 +447,9 @@ tab, a lost write) that signs again below its last step.
 - Marks are opt-in. A `Session` without them behaves as before, so tests can
   still build forks.
 
-**Session store** (`@referee/sdk/store`). `SessionStore` keeps transcripts,
+**Session store** (`@arbiter/sdk/store`). `SessionStore` keeps transcripts,
 marks and session keys in a backend: `indexedDbBackend` for browsers,
-`fileBackend` (`@referee/sdk/store/file`) for Node, `memoryBackend` for tests.
+`fileBackend` (`@arbiter/sdk/store/file`) for Node, `memoryBackend` for tests.
 - `move` checks the stored mark, signs, and records the new mark in one atomic
   update before it returns the signed step, so two tabs cannot both sign at one
   seq.
@@ -506,7 +506,7 @@ latest verified transcript.
   its opening. Where two branches meet, the one that ranks higher as a
   dispute candidate is kept. Two different steps one seat signed at one seq
   are stored as equivocation evidence.
-- **Transport.** Clients (`@referee/sdk/keeper`) register a session, send
+- **Transport.** Clients (`@arbiter/sdk/keeper`) register a session, send
   steps, and get the other seat's by long poll (`pull`) or a server-sent event
   stream (`follow`). The stream pushes each batch as the archive gets it, with
   no gap between polls, and serves spectators too. Clients verify every step
@@ -609,7 +609,7 @@ randomness instead. It helps 2-seat games, so it came before more than 2 seats
   seat: `TimeControl.rng_tip`, zero when the seats reveal.
 - **The tip is the referee's.** A seat that made the tip up would know every
   roll, so the referee signs it for the one game (`tip_hash`:
-  `'REFEREE_TIP_V1'`, chain id, channel, game id, tip) and the channel checks
+  `'ARBITER_TIP_V1'`, chain id, channel, game id, tip) and the channel checks
   that signature. Clients choose the game id, so the referee signs the tip
   before anyone signs the terms (a keeper serves it, `POST …/tip`). The tip is
   in the terms every wallet signs, and each seat checks the signature first.
@@ -667,7 +667,7 @@ randomness instead. It helps 2-seat games, so it came before more than 2 seats
   gamble onchain while the keeper is down, keep the state to itself and wait
   for the void. The keeper does not post `roll` itself.
 - A pause has an end. The seats can all agree to void the game (they sign
-  `void_hash`, `'REFEREE_VOID_V1'`), and after 3 days anyone can end it void.
+  `void_hash`, `'ARBITER_VOID_V1'`), and after 3 days anyone can end it void.
   Falling back to a seat's reveal instead would let a colluding referee
   re-roll by going quiet. Void only lets it cancel a game, and only by
   stalling visibly for 3 days.
@@ -699,7 +699,7 @@ one transaction. Unanchored games already worked this way offchain
 (`termsTypedData`, checked by the keeper), but their terms name no real
 channel, so they can never settle.
 
-**Opening** (`referee_dojo::channel::open_game(terms, signatures,
+**Opening** (`arbiter_dojo::channel::open_game(terms, signatures,
 referee_signature)`; `open(terms)` stays the core's opening state). It checks:
 - the terms' chain id is the transaction's (`'Wrong chain'`) and their channel
   is this contract (`'Wrong channel'`);
@@ -736,7 +736,7 @@ is refused.
 
 **Signatures.** Each wallet signs `termsTypedData(game, terms)`: SNIP-12
 revision 1, whose hash includes the signer's address. The domain is
-`referee`, version 1, on the terms' chain id, and the message is
+`arbiter`, version 1, on the terms' chain id, and the message is
 `Game { game: TAG, game_id, context }`. The core computes the same hash as
 `terms_message(chain_id, game_id, context, account)`, and the SDK as
 `termsMessageHash(game, terms, account)`. `open_game` calls each account's
@@ -845,7 +845,7 @@ repository, updated in its own pass.
   game opens, so it sends the game's `config` with the request.
 
 **SDK.** `openGameCall(game, terms, signatures, { refereeSignature })` in
-`@referee/sdk/proving` builds `open_game`; `termsMessageHash(game, terms,
+`@arbiter/sdk/proving` builds `open_game`; `termsMessageHash(game, terms,
 account)` is the hash an account checks; `proveSession` proves a game that
 isn't open from its terms and returns `opening: true`; `snapshotIfOpen` reads
 null for a game nobody opened, and `reverted(error, reason)` tells which
@@ -951,7 +951,7 @@ opens and settles three, one of them with its randomness.
 ## More than 2 seats (planned)
 
 *Planned, not built; it would be protocol version 7, after opening by
-signatures (v6, built).* Referee plays exactly 2 seats: `open` asserts `SEATS == 2` in
+signatures (v6, built).* Arbiter plays exactly 2 seats: `open` asserts `SEATS == 2` in
 Cairo and the SDK. This section records what more seats need, found by a spike
 that ran a 3-seat game through v4 on 2026-09-30, and proposes how to build it.
 Hashfront launches with 2 seats, and is the first game planned for more. It
@@ -964,7 +964,7 @@ plays 2 to 4:
 The spike's game, Trio, has the same shape: END passes the turn, and ATTACK
 names a defender, who reveals.
 
-**Surround.** Neither Surround nor referee is in production, so the protocol
+**Surround.** Neither Surround nor arbiter is in production, so the protocol
 may break its API. Surround, 2 seats only, is updated alongside each layer,
 and must:
 - pass its own suites, with the same results;
@@ -1145,24 +1145,24 @@ spike's collusion scenarios become tests that the new rules must reject.
 5. With more than 2 seats, a wallet resign only in forced play.
 6. Hashfront launches with 2 seats and is the first game planned for more.
    Surround stays at 2.
-7. Breaking changes are fine. Neither Surround nor referee is in production,
+7. Breaking changes are fine. Neither Surround nor arbiter is in production,
    and Surround is updated alongside.
 8. Hashfront rates games by finishing place, so outcomes carry places.
 
 ## Roadmap
 
 1. ~~Channel state machine as pure functions.~~ Done.
-2. ~~`referee_dojo` binding and a counter Dojo system.~~ Done
+2. ~~`arbiter_dojo` binding and a counter Dojo system.~~ Done
    (`dojo/examples/counter`, tested in a Dojo test world).
-3. ~~Adapter logic (`adapter/referee_adapter`) and a counter adapter.~~ Done,
+3. ~~Adapter logic (`adapter/arbiter_adapter`) and a counter adapter.~~ Done,
    tested with snforge-mocked proof facts. Still to do: an end-to-end native
    proof of a counter game against a real prover.
-4. Port Surround onto referee, keeping its test suites, and re-measure proofs.
+4. Port Surround onto arbiter, keeping its test suites, and re-measure proofs.
 5. Hashfront rules crate and client integration.
-6. ~~SDK proof builders.~~ Done (`@referee/sdk/proving`).
+6. ~~SDK proof builders.~~ Done (`@arbiter/sdk/proving`).
 7. ~~Self-hosted PROOF1 prover.~~ Done (`prover/`: upstream transaction prover
    plus an allowlisting gateway). PROOF2 large path once the network accepts it.
-8. ~~Keeper.~~ Done: `@referee/sdk/store` persists sessions and guards
+8. ~~Keeper.~~ Done: `@arbiter/sdk/store` persists sessions and guards
    signing, and `keeper/` archives and forwards steps and answers disputes,
    resolves and settles (tested on Katana). Still to do: the proof path against
    a live prover, and cooperative checkpoint approvals (`acks`) through the

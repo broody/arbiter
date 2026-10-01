@@ -1,12 +1,12 @@
-# @referee/sdk/keeper
+# @arbiter/sdk/keeper
 
-A client for a referee [keeper](/infra/keeper)'s HTTP API: archive a session, send our steps, fetch the other seat's by long poll or follow them as a stream, restore a game on a new device, and, in a timed game, submit our steps for the keeper to stamp and fetch the keeper's signed randomness tip. Game clients use it as their transport.
+A client for an arbiter [keeper](/infra/keeper)'s HTTP API: archive a session, send our steps, fetch the other seat's by long poll or follow them as a stream, restore a game on a new device, and, in a timed game, submit our steps for the keeper to stamp and fetch the keeper's signed randomness tip. Game clients use it as their transport.
 
 ```js
-import { KeeperClient } from '@referee/sdk/keeper'
+import { KeeperClient } from '@arbiter/sdk/keeper'
 ```
 
-Source: [`sdk/src/keeper.mjs`](https://github.com/broody/referee/blob/main/sdk/src/keeper.mjs). The keeper cannot forge steps, since this client verifies each step it applies, but it can withhold them, so a client keeps its own copy with [`@referee/sdk/store`](/reference/store). The routes are in [Keeper HTTP API](/reference/keeper-api).
+Source: [`sdk/src/keeper.mjs`](https://github.com/broody/arbiter/blob/main/sdk/src/keeper.mjs). The keeper cannot forge steps, since this client verifies each step it applies, but it can withhold them, so a client keeps its own copy with [`@arbiter/sdk/store`](/reference/store). The routes are in [Keeper HTTP API](/reference/keeper-api).
 
 ## Constructor
 
@@ -19,7 +19,7 @@ new KeeperClient(url, { fetch = globalThis.fetch } = {})
 | `url` | | The keeper's base URL. A trailing `/` is dropped. |
 | `fetch` | `globalThis.fetch` | The `fetch` to send requests with. |
 
-Requests and answers are JSON with `BigInt`s as `{ "$n": "<decimal>" }` (`stringify` and `parse` from `@referee/sdk/store`). A game is addressed by `ids`, any object with `channel` and `game_id`, such as its terms.
+Requests and answers are JSON with `BigInt`s as `{ "$n": "<decimal>" }` (`stringify` and `parse` from `@arbiter/sdk/store`). A game is addressed by `ids`, any object with `channel` and `game_id`, such as its terms.
 
 ## Methods
 
@@ -44,7 +44,7 @@ await keeper.register(session, { authorizations }) // a game no channel holds ye
 await keeper.register(session)                     // a game a channel already holds
 ```
 
-A game opens onchain only when it first needs the chain, so a game usually registers before any channel holds it (see [Keeper](/infra/keeper#games-no-channel-holds)). Such a game is admitted only with each seat's wallet signature over `termsTypedData(game, terms)` from [`@referee/sdk`](/reference/sdk), in seat order, as `authorizations`: the same signatures `open_game` checks. The keeper checks each against the seat's account contract and keeps them with the game, to open it when it settles it. Without them it answers 403. A game on a real channel must start at its opening. The same holds for a keeper entry with `anchored: false`, whose games never touch the chain.
+A game opens onchain only when it first needs the chain, so a game usually registers before any channel holds it (see [Keeper](/infra/keeper#games-no-channel-holds)). Such a game is admitted only with each seat's wallet signature over `termsTypedData(game, terms)` from [`@arbiter/sdk`](/reference/sdk), in seat order, as `authorizations`: the same signatures `open_game` checks. The keeper checks each against the seat's account contract and keeps them with the game, to open it when it settles it. Without them it answers 403. A game on a real channel must start at its opening. The same holds for a keeper entry with `anchored: false`, whose games never touch the chain.
 
 ### tip
 
@@ -52,14 +52,14 @@ A game opens onchain only when it first needs the chain, so a game usually regis
 const { rng_tip, signature } = await keeper.tip({ channel: CHANNEL, game_id: gameId })
 ```
 
-Asks a keeper that gives randomness for its tip for one game: `rng_tip`, the tip of the referee's hash chain for that game, and `signature`, the referee's signature over `tipHash(game, chain_id, channel, game_id, rng_tip)` from [`@referee/sdk`](/reference/sdk#hashing-and-signing). The same game always gets the same tip.
+Asks a keeper that gives randomness for its tip for one game: `rng_tip`, the tip of the referee's hash chain for that game, and `signature`, the referee's signature over `tipHash(game, chain_id, channel, game_id, rng_tip)` from [`@arbiter/sdk`](/reference/sdk#hashing-and-signing). The same game always gets the same tip.
 
 Call it before the seats sign the terms, and pass the game's `config`: `keeper.tip(ids, { config })`. No channel holds the game yet, so the keeper can't read the config from one. The seats put `rng_tip` in the terms (`clock.rng_tip`), each checks the signature before its wallet signs them, and `open_game` takes the signature (`openGameCall`'s `refereeSignature`) and checks it again. See [Add a clock](/guide/clocks#take-randomness-from-the-referee).
 
 For a game a channel already holds, `config` is not needed: the keeper reads it from the channel, and answers only if the terms name this keeper's referee key with a non-zero `rng_tip`.
 
 ```js
-import { tipHash, verify } from '@referee/sdk'
+import { tipHash, verify } from '@arbiter/sdk'
 
 const { rng_tip, signature } = await keeper.tip({ channel, game_id }, { config })
 const signed = verify(tipHash(counter, chain_id, channel, game_id, rng_tip), signature, refereeKey) // the referee's public key
@@ -148,8 +148,8 @@ For example, a step that conflicts with the keeper's branch fails with status 40
 A two-player game through a keeper. Each seat runs the same loop with its own store and key:
 
 ```js
-import { SessionStore, indexedDbBackend } from '@referee/sdk/store'
-import { KeeperClient } from '@referee/sdk/keeper'
+import { SessionStore, indexedDbBackend } from '@arbiter/sdk/store'
+import { KeeperClient } from '@arbiter/sdk/keeper'
 import { counter } from './counter.mjs' // your game codec
 
 const store = new SessionStore(indexedDbBackend())

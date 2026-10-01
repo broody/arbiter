@@ -1,9 +1,9 @@
 # Prover
 
 Games settled with native proofs need a `starknet_proveTransaction` endpoint.
-By default that's StarkWare's hosted prover. [`prover/`](https://github.com/broody/referee/tree/main/prover)
+By default that's StarkWare's hosted prover. [`prover/`](https://github.com/broody/arbiter/tree/main/prover)
 runs the same endpoint yourself. The full operating manual is
-[`prover/README.md`](https://github.com/broody/referee/blob/main/prover/README.md).
+[`prover/README.md`](https://github.com/broody/arbiter/blob/main/prover/README.md).
 This page is the overview.
 
 ## What it is
@@ -11,7 +11,7 @@ This page is the overview.
 | Process | What it is |
 | --- | --- |
 | backend | StarkWare's `starknet_transaction_prover`, the service behind the hosted prover, built from source at the sequencer revision pinned in `pins.json`. It runs the adapter's virtual transaction in the virtual OS and proves it with Stwo in process (`PROOF1`) |
-| gateway | [`server.mjs`](https://github.com/broody/referee/blob/main/prover/server.mjs): the same JSON-RPC API in front of the backend. It admits only referee settlements, queues and rate-limits them, and runs each backend worker in its own cgroup |
+| gateway | [`server.mjs`](https://github.com/broody/arbiter/blob/main/prover/server.mjs): the same JSON-RPC API in front of the backend. It admits only arbiter settlements, queues and rate-limits them, and runs each backend worker in its own cgroup |
 
 Clients point at the gateway and change nothing else:
 
@@ -31,7 +31,7 @@ proving slot, the gateway checks that:
 - it is a zero-fee virtual `INVOKE_V3` against a `{ block_hash }` or
   `{ block_number }`, with calldata under `max_calldata` felts;
 - at that block, the sender's class is in `adapter_classes`, an allowlist of
-  referee adapters like the channel's own;
+  arbiter adapters like the channel's own;
 - that adapter pins `virtual_os_program`, the program the backend runs, so the
   proof can settle.
 

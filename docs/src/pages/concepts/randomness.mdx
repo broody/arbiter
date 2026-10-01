@@ -1,7 +1,7 @@
 # Randomness
 
 Games with dice, shuffles or hit chances need randomness that neither player can
-predict or bias, without an oracle. Referee builds it from committed hash
+predict or bias, without an oracle. Arbiter builds it from committed hash
 chains: each roll mixes one fresh value from the seat that acts and one from a
 revealer. The revealer is the other seat by default. A timed game can have its
 referee reveal instead, so no seat has to be online for a roll (see
@@ -13,7 +13,7 @@ Each seat picks a random `seed` and computes a chain:
 
 ```text
 c0 = seed
-c(k+1) = rng_next(ck) = poseidon('REFEREE_RNG_V1', ck)
+c(k+1) = rng_next(ck) = poseidon('ARBITER_RNG_V1', ck)
 tip = c(len)
 ```
 
@@ -24,7 +24,7 @@ which starts at the tip and moves down with each reveal. Nobody can compute the
 next value from the head, because that would mean inverting Poseidon.
 
 ```js
-import { rngChain } from '@referee/sdk'
+import { rngChain } from '@arbiter/sdk'
 const chain = rngChain(seed, 64)   // chain[64] is the tip; reveal chain[63], chain[62], …
 ```
 
@@ -41,7 +41,7 @@ sequenceDiagram
   A->>B: PlayRandom((action, a = Alice's next chain value))
   Note over A,B: pending: Bob must reveal,<br/>nothing else can happen
   B->>A: Reveal(b = Bob's next chain value)
-  Note over A,B: seed = poseidon(TAG, 'REFEREE_SEED_V1', context, seq, a, b)<br/>resolve(seed) finishes the action
+  Note over A,B: seed = poseidon(TAG, 'ARBITER_SEED_V1', context, seq, a, b)<br/>resolve(seed) finishes the action
 ```
 
 1. Alice's action needs randomness: your `apply` returns `Some(other_seat)`.
@@ -104,7 +104,7 @@ sequenceDiagram
   Note over R: Reveal(r = the referee's<br/>next chain value)
   R->>A: both steps, stamped and attested
   R->>B: both steps, stamped and attested
-  Note over A,B: seed = poseidon(TAG, 'REFEREE_SEED_V1', context, seq, a, r)<br/>resolve(seed) finishes the action
+  Note over A,B: seed = poseidon(TAG, 'ARBITER_SEED_V1', context, seq, a, r)<br/>resolve(seed) finishes the action
 ```
 
 1. Alice sends her action as `PlayRandom` with her next chain value, as
@@ -133,7 +133,7 @@ The tip must be the referee's. A tip a seat made up would let that seat know
 every roll. So the referee signs its tip for one game:
 
 ```text
-message = signing_hash(TAG, 'REFEREE_TIP_V1', chain_id, channel, game_id, tip)
+message = signing_hash(TAG, 'ARBITER_TIP_V1', chain_id, channel, game_id, tip)
 ```
 
 The message names the game by its ids, because the tip is part of the terms

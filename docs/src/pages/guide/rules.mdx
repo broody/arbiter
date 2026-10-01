@@ -8,7 +8,7 @@ each part of the trait.
 
 ## Set up the package
 
-Rules live in their own Cairo package that depends only on `referee`. Keep Dojo
+Rules live in their own Cairo package that depends only on `arbiter`. Keep Dojo
 and Starknet storage out of it, so the same crate builds for the Dojo channel
 (Cairo 2.13) and for the proof adapter (Cairo 2.18).
 
@@ -20,7 +20,7 @@ edition = "2024_07"
 cairo-version = "2.13.1"
 
 [dependencies]
-referee = { git = "https://github.com/broody/referee.git", rev = "<commit>" }
+arbiter = { git = "https://github.com/broody/arbiter.git", rev = "<commit>" }
 
 [dev-dependencies]
 cairo_test = "2.13.1"
@@ -72,7 +72,7 @@ The counter's state, config and action are plain structs deriving `Serde`.
 Their serialization is what gets hashed, signed and replayed:
 
 ```cairo
-use referee::GameRules;
+use arbiter::GameRules;
 
 pub const ADD: u8 = 0;
 pub const GAMBLE: u8 = 1;
@@ -117,7 +117,7 @@ pub impl CounterRules of GameRules {
     const TAG: felt252 = 'COUNTER';
     const RULES_VERSION: u32 = 1;
     const SEATS: u8 = 2;
-    impl Time = referee::clocks::StandardTime<Counter>;
+    impl Time = arbiter::clocks::StandardTime<Counter>;
 ```
 
 - `TAG` domain-separates every hash the game produces: contexts, states, step
@@ -125,7 +125,7 @@ pub impl CounterRules of GameRules {
 - `RULES_VERSION` is part of the context hash. Change it whenever a rule
   changes, so that old signatures can't replay under new rules.
 - `SEATS` must be 2 today. `open` rejects anything else.
-- `Time` names the game's time rules, a `referee::clocks::ClockRules`. They
+- `Time` names the game's time rules, a `arbiter::clocks::ClockRules`. They
   apply only to games whose terms carry a clock. `StandardTime` covers per-turn
   timers, Fischer increments and byo-yomi; a game can write its own (see
   [Add a clock](/guide/clocks#time-rules)).
@@ -227,7 +227,7 @@ never requests randomness can panic here.
     }
 
     fn adjudicate(config: @Config, state: @Counter) -> (u8, u8) {
-        (referee::DRAW, LIMIT)
+        (arbiter::DRAW, LIMIT)
     }
 }
 ```
@@ -300,7 +300,7 @@ Test the rules on their own with `apply_steps`, which applies unsigned steps
 from the opening state:
 
 ```cairo
-use referee::{Move, apply_steps, open};
+use arbiter::{Move, apply_steps, open};
 
 fn run(steps: Array<Move<Action>>) -> Envelope<Counter> {
     apply_steps::<CounterRules>(CONTEXT, @terms(), open::<CounterRules>(@terms()), (), steps.span(), array![].span())

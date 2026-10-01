@@ -76,7 +76,7 @@ or from the current candidate, so each segment extends the one before:
 3. Once the finished segment is the candidate and the window has passed,
    `resolve` settles the game.
 
-`disputeAnswer(session, channel, { maxSteps })` in `@referee/sdk` builds the
+`disputeAnswer(session, channel, { maxSteps })` in `@arbiter/sdk` builds the
 next segment: the session rebased on the channel's candidate when its history
 holds it, otherwise on the anchor, cut to `maxSteps` steps, or `null` when
 nothing there outranks the candidate. A keeper settles long games this way,
@@ -106,7 +106,7 @@ with segments of at most `proof_max_steps` steps through a prover, or
 The adapter's `__execute__` emits exactly one L2→L1 message:
 
 ```text
-[adapter class, TAG, 'REFEREE_PROVED_V1', chain id, adapter, channel, game id,
+[adapter class, TAG, 'ARBITER_PROVED_V1', chain id, adapter, channel, game id,
  context, epoch, start state hash, end state hash]
 ```
 

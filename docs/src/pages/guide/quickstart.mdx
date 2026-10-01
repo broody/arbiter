@@ -1,7 +1,7 @@
 # Quickstart
 
 Run the counter game end to end: first in Node with no chain at all, then on a
-local Starknet with real transactions. The counter is a complete referee game:
+local Starknet with real transactions. The counter is a complete arbiter game:
 seats take turns adding 1 to 3 to a shared total, a `GAMBLE` adds a die roll,
 and whoever reaches the target wins.
 
@@ -18,8 +18,8 @@ and whoever reaches the target wins.
 ### Install
 
 ```bash
-git clone https://github.com/broody/referee
-cd referee
+git clone https://github.com/broody/arbiter
+cd arbiter
 npm install
 ```
 
@@ -115,7 +115,7 @@ keeper/katana.sh
 ```
 
 This starts a Katana node, deploys the counter's Dojo world and runs
-[`keeper/katana.mjs`](https://github.com/broody/referee/blob/main/keeper/katana.mjs)
+[`keeper/katana.mjs`](https://github.com/broody/arbiter/blob/main/keeper/katana.mjs)
 with real transactions. Every game starts offchain: Alice's and Bob's
 wallets sign its terms, and nothing is onchain until the game first needs the
 chain. It takes a minute or two:

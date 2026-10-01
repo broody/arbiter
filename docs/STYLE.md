@@ -1,4 +1,4 @@
-# Writing the referee docs
+# Writing the arbiter docs
 
 The site is [Vocs](https://vocs.dev) v2: pages are MDX in `src/pages`, and the
 sidebar is in `vocs.config.ts`. `npm run build` fails on dead links.
@@ -9,7 +9,7 @@ sidebar is in `vocs.config.ts`. `npm run build` fails on dead links.
   reader ("you"); concepts and reference describe the system.
 - Every claim comes from the source in this repository. Don't document an API,
   option or behavior you haven't read in the code; link to the file when it helps
-  (`https://github.com/broody/referee/blob/main/<path>`).
+  (`https://github.com/broody/arbiter/blob/main/<path>`).
 - Name things as the code does: `Session.receive`, `submit_history`,
   `support_turn`. Use code formatting for identifiers, values and paths.
 - The protocol supports 2 seats today; N-player support is in progress. Say
