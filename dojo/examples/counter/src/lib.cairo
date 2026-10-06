@@ -1,8 +1,11 @@
 //! The counter game as a Dojo world. The whole channel system is one line per
 //! entrypoint on top of `arbiter_dojo::channel`.
-use arbiter::{Batch, Envelope, Move, Signature, Terms};
+use arbiter::{Approval, Batch, Envelope, Move, Signature, Terms};
 use arbiter_counter::{Action, Config, Counter};
 use arbiter_dojo::models::ChannelGame;
+
+/// The longest a delegation `open_game_delegable` takes may still have to run.
+pub const DELEGATION_SECONDS: u64 = 7 * 24 * 3600;
 
 #[starknet::interface]
 pub trait ICounterChannel<T> {
@@ -14,6 +17,12 @@ pub trait ICounterChannel<T> {
         terms: Terms<Config>,
         signatures: Span<Span<felt252>>,
         referee_signature: Signature,
+    );
+    /// Open a game as `open_game` does, each seat agreeing with its wallet's
+    /// signature or with a key its wallet delegated for at most
+    /// `DELEGATION_SECONDS` more.
+    fn open_game_delegable(
+        ref self: T, terms: Terms<Config>, approvals: Span<Approval>, referee_signature: Signature,
     );
     fn accept_verified(
         ref self: T,
@@ -60,11 +69,12 @@ pub trait ICounterChannel<T> {
 
 #[dojo::contract]
 pub mod channel {
-    use arbiter::{Batch, Envelope, Move, Signature, Terms};
+    use arbiter::{Approval, Batch, Envelope, Move, Signature, Terms};
     use arbiter_counter::{Action, Config, Counter, CounterRules};
     use arbiter_dojo::channel as binding;
     use arbiter_dojo::models::ChannelGame;
     use dojo::world::WorldStorage;
+    use super::DELEGATION_SECONDS;
 
     #[abi(embed_v0)]
     impl CounterChannelImpl of super::ICounterChannel<ContractState> {
@@ -76,6 +86,18 @@ pub mod channel {
         ) {
             let mut world = self.world_default();
             binding::open_game::<CounterRules>(ref world, terms, signatures, referee_signature);
+        }
+
+        fn open_game_delegable(
+            ref self: ContractState,
+            terms: Terms<Config>,
+            approvals: Span<Approval>,
+            referee_signature: Signature,
+        ) {
+            let mut world = self.world_default();
+            binding::open_game_delegable::<
+                CounterRules,
+            >(ref world, terms, approvals, referee_signature, DELEGATION_SECONDS);
         }
 
         fn accept_verified(

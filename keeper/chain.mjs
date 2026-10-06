@@ -13,7 +13,7 @@ import { contractCall, getChannel, historyCall, proveSession, reverted } from '.
 /** Default entrypoint names: arbiter_dojo's (e.g. the counter's system). */
 export const ENTRYPOINTS = { get_channel: 'get_channel', submit_history: 'submit_history', resolve: 'resolve',
   acknowledge: 'acknowledge', resume_by_referee: 'resume_by_referee', terms: 'terms', force: 'force', roll: 'roll',
-  open_game: 'open_game' };
+  open_game: 'open_game', open_game_delegable: 'open_game_delegable' };
 
 /** `ChannelUpdated.kind` values (arbiter_dojo::models). 1 and 2, a join and a cancel, are retired. */
 export const UPDATES = { OPENED: 0, DISPUTED: 3, RECEIVED: 4, RESOLVED: 5, FORCED: 6, RESUMED: 7,

@@ -16,12 +16,13 @@ pub use channel::{Channel, StateRef, state_ref};
 
 pub use protocol::{
     PROTOCOL_VERSION, action_hash, actor, apply_steps, approve_all, check_clock, checkpoint_hash,
-    context_hash, due, force, forfeit, game_id_of, live_hash, open, referee_resume_hash,
-    reopen_hash, replay, rng_next, roll, seed, signing_hash, stamp_hash, state_hash, terms_message,
-    tip_hash, verify, void_hash,
+    context_hash, delegation_message, due, force, forfeit, game_id_of, live_hash, open,
+    referee_resume_hash, reopen_hash, replay, rng_next, roll, seed, signing_hash, stamp_hash,
+    state_hash, terms_message, tip_hash, verify, void_hash,
 };
 pub use rules::GameRules;
 pub use types::{
-    Batch, Clock, DRAW, Envelope, Move, NO_SEAT, Outcome, Pending, REASON_ABANDON, REASON_RESIGN,
-    REASON_TIMEOUT, REASON_VOID, REFEREE, Signature, Terms, TimeControl,
+    Approval, Batch, Clock, DRAW, Delegated, Envelope, Move, NO_SEAT, Outcome, Pending,
+    REASON_ABANDON, REASON_RESIGN, REASON_TIMEOUT, REASON_VOID, REFEREE, Signature, Terms,
+    TimeControl,
 };

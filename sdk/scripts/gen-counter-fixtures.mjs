@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { typedData } from 'starknet';
 import {
   MOVE_FLAG, MOVE_PLAY, MOVE_PLAY_RANDOM, MOVE_RECOMMIT, MOVE_REVEAL, MOVE_START, REFEREE, RngChain, Session, applyStep,
-  checkpointHash, contextHash, flag, hex, liveHash, open, play, playRandom, publicKey, recommit, refereeResumeHash, reveal,
+  checkpointHash, contextHash, delegationMessageHash, flag, hex, liveHash, open, play, playRandom, publicKey, recommit, refereeResumeHash, reveal,
   rngChain, sign, start, stateHash, tag, termsTypedData, tipHash, verify, voidHash,
 } from '../src/index.mjs';
 
@@ -22,6 +22,7 @@ const privateKeys = [0x1a2b3cn, 0x4d5e6fn];
 const chains = [rngChain(0x5eed0n, RNG_LEN), rngChain(0x5eed1n, RNG_LEN)];
 const recommitChain = rngChain(0x5eed2n, RNG_LEN);
 const config = { target: 20 };
+const DELEGATE_KEY = publicKey(0xde1e9a7en), DELEGATION_EXPIRES = 1_700_604_800n;
 const terms = {
   chain_id: tag('SN_TEST'), channel: 0xc4a11e1n, game_id: 1n, prover: 0xad0b7e5n,
   response_seconds: 3600, clock: null,
@@ -251,6 +252,13 @@ pub const TIP_HASH: felt252 = ${h(tipHash(counter, terms.chain_id, terms.channel
 pub const VOID_HASH: felt252 = ${h(voidHash(counter, context, 2, finalHash))};
 /// What seat 0's wallet signs to agree to the terms (SNIP-12, termsTypedData in the SDK).
 pub const TERMS_MESSAGE: felt252 = ${h(BigInt(typedData.getMessageHash(termsTypedData(counter, terms), terms.players[0])))};
+/// What seat 0's wallet signs to let \`DELEGATE_KEY\` agree to games in its place
+/// on the channel until \`DELEGATION_EXPIRES\` (SNIP-12, delegationTypedData in
+/// the SDK).
+pub const DELEGATE_KEY: felt252 = ${h(DELEGATE_KEY)};
+pub const DELEGATION_EXPIRES: u64 = ${DELEGATION_EXPIRES};
+pub const DELEGATION_MESSAGE: felt252 = ${h(delegationMessageHash(counter,
+    { chain_id: terms.chain_id, channel: terms.channel, key: DELEGATE_KEY, expires_at: DELEGATION_EXPIRES }, terms.players[0]))};
 
 pub fn terms() -> Terms<Config> {
     ${termsCairo(terms)}

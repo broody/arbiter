@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import { dirname } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { Session, gameIdOf, hex, publicKey, termsTypedData } from '../../sdk/src/index.mjs';
+import {
+  Session, delegatedApproval, delegationTypedData, gameIdOf, hex, publicKey, termsTypedData,
+} from '../../sdk/src/index.mjs';
 import { KeeperClient } from '../../sdk/src/keeper.mjs';
 import { SessionStore, memoryBackend, parse, stringify } from '../../sdk/src/store.mjs';
 import { loadConfig, startKeeper } from '../server.mjs';
@@ -241,4 +243,35 @@ test('config: per-entry settings, old names, and the game module\'s hooks', asyn
   await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [{ ...GAME, world: '0x1' }] }, { base }), /needs its namespace/);
   await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [{ ...GAME, export: 'hourglassTime' }] }, { base }),
     /no game codec named hourglassTime/);
+});
+
+test('where its channel takes delegations, a seat may agree with a key its wallet delegated', async () => {
+  const chain = fakeChain();
+  const unopened = own({ ...terms(), players: wallets.map(walletAddress) });
+  const session = new Session(counter, unopened);
+  session.move(add(3), keys[0]);
+  const bob = walletSign(wallets[1], termsTypedData(counter, unopened));
+  // Alice's wallet delegates a key until `expiresAt`, and the key signs `signed`'s terms.
+  const DELEGATE = 0xde1en;
+  const alice = (expiresAt, { wallet = wallets[0], channel = unopened.channel, signed = unopened } = {}) => {
+    const delegation = { chain_id: unopened.chain_id, channel, key: publicKey(DELEGATE), expires_at: expiresAt };
+    return delegatedApproval(counter, signed, 0,
+      { privateKey: DELEGATE, expiresAt, delegation: walletSign(wallet, delegationTypedData(counter, delegation)) });
+  };
+  const now = chain.time;
+  // An entry whose channel takes none refuses it.
+  const plain = await keeper({}, chain);
+  try {
+    await assert.rejects(plain.client.register(session, { authorizations: [alice(now + 60), bob] }),
+      /Seat 0's wallet did not sign/);
+  } finally { await plain.close(); }
+  const k = await keeper({ games: [{ ...GAME, delegation_seconds: 3600 }] }, chain);
+  try {
+    // Expired, too long, delegated by another wallet or for another channel, or the key's signature over other terms.
+    for (const refused of [alice(now), alice(now + 3601), alice(now + 60, { wallet: wallets[1] }),
+      alice(now + 60, { channel: 0x99n }), alice(now + 60, { signed: own(unopened, 1n) })]) {
+      await assert.rejects(k.client.register(session, { authorizations: [refused, bob] }), /Seat 0's wallet did not sign/);
+    }
+    assert.equal((await k.client.register(session, { authorizations: [alice(now + 3600), bob] })).created, true);
+  } finally { await k.close(); }
 });

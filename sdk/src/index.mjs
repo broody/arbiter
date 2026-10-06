@@ -176,6 +176,85 @@ export const termsMessageHash = (game, terms, account) =>
   BigInt(typedData.getMessageHash(termsTypedData(game, terms), hex(account)));
 
 /**
+ * What a seat's wallet signs once to let `key` agree to games' terms in its
+ * place on `channel` until `expires_at` (Unix seconds): SNIP-12 typed data,
+ * which the wallet shows with the game, channel, key and expiry. A channel
+ * that takes delegated approvals (arbiter_dojo's `open_game_delegable`)
+ * checks it with the account's `is_valid_signature` (`delegation_message` in
+ * Cairo), and so does a keeper before it holds a game.
+ */
+export function delegationTypedData(game, { chain_id, channel, key, expires_at }) {
+  return {
+    types: {
+      StarknetDomain: [
+        { name: 'name', type: 'shortstring' }, { name: 'version', type: 'shortstring' },
+        { name: 'chainId', type: 'shortstring' }, { name: 'revision', type: 'shortstring' },
+      ],
+      Delegation: [{ name: 'game', type: 'shortstring' }, { name: 'channel', type: 'ContractAddress' },
+        { name: 'key', type: 'felt' }, { name: 'expires_at', type: 'timestamp' }],
+    },
+    primaryType: 'Delegation',
+    domain: { name: 'arbiter', version: '1', chainId: shortString.decodeShortString(hex(chain_id)), revision: '1' },
+    message: { game: game.tag, channel: hex(channel), key: hex(key), expires_at: String(expires_at) },
+  };
+}
+
+/** The SNIP-12 message hash the wallet at `account` signs over `delegationTypedData` (`delegation_message` in Cairo). */
+export const delegationMessageHash = (game, delegation, account) =>
+  BigInt(typedData.getMessageHash(delegationTypedData(game, delegation), hex(account)));
+
+/**
+ * A seat's delegated approval of `terms`: `delegation`, its wallet's signature
+ * over `delegationTypedData` for the public key of `privateKey` until
+ * `expiresAt`, and that key's signature over the terms message the wallet
+ * would have signed. A channel that takes delegated approvals accepts it in
+ * place of the wallet's signature.
+ */
+export const delegatedApproval = (game, terms, seat, { privateKey, expiresAt, delegation }) => ({
+  key: publicKey(privateKey), expires_at: BigInt(expiresAt), delegation,
+  signature: sign(termsMessageHash(game, terms, terms.players[seat]), privateKey),
+});
+
+/** Whether a seat's approval is delegated (`delegatedApproval`) rather than its wallet's signature. */
+export const isDelegated = approval => approval != null && !Array.isArray(approval) && approval.delegation !== undefined;
+
+// A signature as a wallet returns it (an array of felts) or `{ r, s }`, as felts.
+const signatureFelts = signature => (Array.isArray(signature) ? signature.map(felt) : encodeSignature(signature));
+
+/**
+ * Seats' approvals as `Span<Approval>` calldata (`open_game_delegable`): each
+ * its wallet's signature (an array, or `{ r, s }`) or a delegated approval.
+ */
+export const encodeApprovals = approvals => [BigInt(approvals.length), ...approvals.flatMap(approval => {
+  if (!isDelegated(approval)) {
+    const signature = signatureFelts(approval);
+    return [0n, BigInt(signature.length), ...signature];
+  }
+  const delegation = signatureFelts(approval.delegation);
+  return [1n, felt(approval.key), BigInt(approval.expires_at), BigInt(delegation.length), ...delegation,
+    ...encodeSignature(approval.signature)];
+})];
+
+/**
+ * Check a seat's approval of `terms` as its channel would: its wallet's
+ * signature through `verifyMessage(account, typedData, signature)` (the
+ * account's `is_valid_signature`), or, where the channel takes delegations
+ * of at most `maxLifetime` seconds (0: none), one that expires after `now`
+ * (Unix seconds) and within `maxLifetime`, signed by the wallet, with the
+ * delegated key's signature over the terms.
+ */
+export async function verifyApproval(game, terms, seat, approval, { verifyMessage, now, maxLifetime = 0 }) {
+  const player = terms.players[seat];
+  if (!isDelegated(approval)) return Boolean(await verifyMessage(player, termsTypedData(game, terms), approval));
+  const expires = BigInt(approval.expires_at), at = BigInt(now);
+  if (!maxLifetime || at >= expires || expires - at > BigInt(maxLifetime)) return false;
+  const [r, s] = signatureFelts(approval.signature);
+  if (!verify(termsMessageHash(game, terms, player), { r, s }, felt(approval.key))) return false;
+  const delegation = { chain_id: terms.chain_id, channel: terms.channel, key: approval.key, expires_at: expires };
+  return Boolean(await verifyMessage(player, delegationTypedData(game, delegation), approval.delegation));
+}
+
+/**
  * A timed game's clock (`Clock`): `{ seats, used, stamp, started }`, each
  * seat's clocks as the game's time rules keep them, the time used in the
  * current turn, the last stamp and the game's first stamp, in milliseconds.

@@ -1,11 +1,12 @@
 use arbiter::{
     Batch, Envelope, Move, REASON_RESIGN, Signature, apply_steps, approve_all, checkpoint_hash,
-    context_hash, force, live_hash, open, referee_resume_hash, replay, rng_next, state_hash,
-    terms_message,
+    context_hash, delegation_message, force, live_hash, open, referee_resume_hash, replay, rng_next,
+    state_hash, terms_message,
 };
 use crate::fixtures::{
-    CHECKPOINT, CONTEXT, LIVE_HASH, REFEREE_RESUME_HASH, RNG_LEN, SEED_0, SEED_1, STATE_HASH,
-    TERMS_MESSAGE, acks, expected, finals, signatures, steps, terms,
+    CHECKPOINT, CONTEXT, DELEGATE_KEY, DELEGATION_EXPIRES, DELEGATION_MESSAGE, LIVE_HASH,
+    REFEREE_RESUME_HASH, RNG_LEN, SEED_0, SEED_1, STATE_HASH, TERMS_MESSAGE, acks, expected, finals,
+    signatures, steps, terms,
 };
 use crate::{ADD, Action, Counter, CounterRules, GAMBLE};
 
@@ -271,4 +272,27 @@ fn terms_message_matches_sdk() {
     assert!(
         terms_message::<CounterRules>(t.chain_id, t.game_id + 1, CONTEXT, account) != TERMS_MESSAGE,
     );
+}
+
+#[test]
+fn delegation_message_matches_sdk() {
+    // What a wallet signs to let a key agree to terms in its place: the SDK's
+    // `delegationTypedData`, hashed as starknet.js does for that account.
+    let t = terms();
+    let (chain, channel, account) = (t.chain_id, t.channel, *t.players.at(0));
+    let (key, expires) = (DELEGATE_KEY, DELEGATION_EXPIRES);
+    assert_eq!(
+        delegation_message::<CounterRules>(chain, channel, key, expires, account),
+        DELEGATION_MESSAGE,
+    );
+    // Another key, expiry, channel or account signs another message.
+    let others = array![
+        delegation_message::<CounterRules>(chain, channel, key + 1, expires, account),
+        delegation_message::<CounterRules>(chain, channel, key, expires + 1, account),
+        delegation_message::<CounterRules>(chain, channel + 1, key, expires, account),
+        delegation_message::<CounterRules>(chain, channel, key, expires, *t.players.at(1)),
+    ];
+    for other in others {
+        assert!(other != DELEGATION_MESSAGE);
+    }
 }

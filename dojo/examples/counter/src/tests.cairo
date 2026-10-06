@@ -1,10 +1,10 @@
 use arbiter::channel::{ACTIVE, DISPUTE, FORCED, PAUSE_SECONDS, SETTLED};
 use arbiter::clocks::{Standard, encode};
 use arbiter::{
-    Batch, Envelope, Move, REASON_ABANDON, REASON_TIMEOUT, REASON_VOID, REFEREE, Signature, Terms,
-    TimeControl, action_hash, actor, apply_steps, checkpoint_hash, context_hash, force, game_id_of,
-    live_hash, open, referee_resume_hash, reopen_hash, roll, stamp_hash, state_hash, terms_message,
-    tip_hash, void_hash,
+    Approval, Batch, Delegated, Envelope, Move, REASON_ABANDON, REASON_TIMEOUT, REASON_VOID,
+    REFEREE, Signature, Terms, TimeControl, action_hash, actor, apply_steps, checkpoint_hash,
+    context_hash, delegation_message, force, game_id_of, live_hash, open, referee_resume_hash,
+    reopen_hash, roll, stamp_hash, state_hash, terms_message, tip_hash, void_hash,
 };
 use arbiter_counter::{ADD, Action, Config, Counter, CounterRules, GAMBLE};
 use arbiter_dojo::channel::read;
@@ -25,7 +25,7 @@ use starknet::syscalls::{deploy_syscall, get_class_hash_at_syscall};
 use starknet::testing::{set_account_contract_address, set_block_timestamp, set_contract_address};
 use starknet::{ContractAddress, SyscallResultTrait, get_tx_info};
 use crate::account::TestAccount;
-use crate::{ICounterChannelDispatcher, ICounterChannelDispatcherTrait, channel};
+use crate::{DELEGATION_SECONDS, ICounterChannelDispatcher, ICounterChannelDispatcherTrait, channel};
 
 const PK_A: felt252 = 0x1a2b3c;
 const PK_B: felt252 = 0x4d5e6f;
@@ -39,6 +39,9 @@ const TARGET: u8 = 20;
 /// The wallets' own keys, apart from the per-game session keys.
 const WALLET_A: felt252 = 0xa11ce5;
 const WALLET_B: felt252 = 0xb0b5;
+/// A key Alice's wallet delegates, apart from her wallet and session keys.
+const DELEGATE_A: felt252 = 0xde1e9a7e;
+const NOW: u64 = 1_700_000_000;
 
 /// A test wallet (`TestAccount`) deployed from zero with `salt`, at the
 /// address Starknet derives for it.
@@ -172,6 +175,41 @@ fn wallet_signature(terms: @Terms<Config>, seat: u32, key: felt252) -> Span<felt
     >(*terms.chain_id, *terms.game_id, context, *terms.players.at(seat));
     let signature = sign(message, key);
     array![signature.r, signature.s].span()
+}
+
+/// Seat `seat`'s agreement to `terms` with `delegate`'s signature: its wallet
+/// (`wallet_key`) delegated `delegate` on `channel` until `expires_at`.
+fn delegated(
+    terms: @Terms<Config>,
+    seat: u32,
+    wallet_key: felt252,
+    delegate: felt252,
+    channel: felt252,
+    expires_at: u64,
+) -> Approval {
+    let player = *terms.players.at(seat);
+    let key = public_key(delegate);
+    let delegation = sign(
+        delegation_message::<CounterRules>(*terms.chain_id, channel, key, expires_at, player),
+        wallet_key,
+    );
+    let context = context_hash::<CounterRules>(terms);
+    let message = terms_message::<CounterRules>(*terms.chain_id, *terms.game_id, context, player);
+    Approval::Delegated(
+        Delegated {
+            key,
+            expires_at,
+            delegation: array![delegation.r, delegation.s].span(),
+            signature: sign(message, delegate),
+        },
+    )
+}
+
+/// Alice agrees with the key her wallet delegated on `game`'s channel until
+/// `expires_at`, Bob with his wallet.
+fn alice_delegated(terms: @Terms<Config>, expires_at: u64) -> Span<Approval> {
+    let alice = delegated(terms, 0, WALLET_A, DELEGATE_A, *terms.channel, expires_at);
+    array![alice, Approval::Wallet(wallet_signature(terms, 1, WALLET_B))].span()
 }
 
 /// Both wallets' signatures over `terms`.
@@ -369,6 +407,75 @@ fn terms_for_another_chain_do_not_open_here() {
     let game = trusting();
     let terms = Terms { chain_id: 'SN_OTHER', ..terms_for(game, Option::None) };
     game.open_game(terms, signed_by_both(@terms), no_tip());
+}
+
+#[test]
+fn a_seat_agrees_with_a_key_its_wallet_delegated() {
+    let game = trusting();
+    let terms = terms_for(game, blitz());
+    set_block_timestamp(NOW);
+    game.open_game_delegable(terms, alice_delegated(@terms, NOW + DELEGATION_SECONDS), no_tip());
+    assert_eq!(game.get_channel(GAME_ID()).status, ACTIVE);
+    assert_eq!(game.terms(GAME_ID()), terms);
+}
+
+#[test]
+#[should_panic(expected: ('Delegation expired', 'ENTRYPOINT_FAILED'))]
+fn a_delegation_ends_when_it_expires() {
+    let game = trusting();
+    let terms = terms_for(game, Option::None);
+    set_block_timestamp(NOW);
+    game.open_game_delegable(terms, alice_delegated(@terms, NOW), no_tip());
+}
+
+#[test]
+#[should_panic(expected: ('Delegation too long', 'ENTRYPOINT_FAILED'))]
+fn a_delegation_runs_no_longer_than_its_channel_allows() {
+    let game = trusting();
+    let terms = terms_for(game, Option::None);
+    set_block_timestamp(NOW);
+    game
+        .open_game_delegable(
+            terms, alice_delegated(@terms, NOW + DELEGATION_SECONDS + 1), no_tip(),
+        );
+}
+
+#[test]
+#[should_panic(expected: ('Invalid wallet signature', 'ENTRYPOINT_FAILED'))]
+fn only_the_seats_own_wallet_delegates() {
+    let game = trusting();
+    let terms = terms_for(game, Option::None);
+    set_block_timestamp(NOW);
+    // Bob's wallet delegates a key for Alice.
+    let alice = delegated(@terms, 0, WALLET_B, DELEGATE_A, terms.channel, NOW + 60);
+    let approvals = array![alice, Approval::Wallet(wallet_signature(@terms, 1, WALLET_B))];
+    game.open_game_delegable(terms, approvals.span(), no_tip());
+}
+
+#[test]
+#[should_panic(expected: ('Invalid wallet signature', 'ENTRYPOINT_FAILED'))]
+fn a_delegation_holds_on_its_own_channel_only() {
+    let game = trusting();
+    let terms = terms_for(game, Option::None);
+    set_block_timestamp(NOW);
+    let alice = delegated(@terms, 0, WALLET_A, DELEGATE_A, 'OTHER', NOW + 60);
+    let approvals = array![alice, Approval::Wallet(wallet_signature(@terms, 1, WALLET_B))];
+    game.open_game_delegable(terms, approvals.span(), no_tip());
+}
+
+#[test]
+#[should_panic(expected: ('Invalid session signature', 'ENTRYPOINT_FAILED'))]
+fn a_delegated_key_agrees_only_to_the_terms_it_signed() {
+    let game = trusting();
+    let signed = terms_for(game, Option::None);
+    let terms = Terms { config: Config { target: TARGET + 1 }, ..signed };
+    set_block_timestamp(NOW);
+    // Alice's key signed other terms; Bob's wallet signed these.
+    let approvals = array![
+        *alice_delegated(@signed, NOW + 60).at(0),
+        Approval::Wallet(wallet_signature(@terms, 1, WALLET_B)),
+    ];
+    game.open_game_delegable(terms, approvals.span(), no_tip());
 }
 
 #[test]

@@ -118,6 +118,27 @@ pub fn terms_message<impl R: GameRules>(
     poseidon_hash_span(array!['StarkNet Message', domain, account, game].span())
 }
 
+/// SNIP-12 (revision 1) type hash of `Delegation(game: shortstring, channel:
+/// ContractAddress, key: felt, expires_at: timestamp)`, as the SDK's
+/// `delegationTypedData` defines it.
+const DELEGATION_TYPE_HASH: felt252 =
+    0x2c0b236fc2b6526aa6f0967b9e5dd238d1ee1c66a493c3f16231710a6fd8ee4;
+
+/// The SNIP-12 message hash the wallet at `account` signs to let `key` agree
+/// to games' terms in its place on `channel` until `expires_at` (Unix
+/// seconds): the SDK's `delegationTypedData`. A channel that takes delegated
+/// approvals (arbiter_dojo's `open_game_delegable`) then accepts `key`'s
+/// signature over the terms message (`terms_message`) for that seat.
+pub fn delegation_message<impl R: GameRules>(
+    chain_id: felt252, channel: felt252, key: felt252, expires_at: u64, account: felt252,
+) -> felt252 {
+    let domain = poseidon_hash_span(array![DOMAIN_TYPE_HASH, 'arbiter', 1, chain_id, 1].span());
+    let delegation = poseidon_hash_span(
+        array![DELEGATION_TYPE_HASH, R::TAG, channel, key, expires_at.into()].span(),
+    );
+    poseidon_hash_span(array!['StarkNet Message', domain, account, delegation].span())
+}
+
 /// Message every seat signs to void a game whose roll waits for a referee that
 /// is down (`channel::void`), from the anchor `state`.
 pub fn void_hash<impl R: GameRules>(context: felt252, epoch: u32, state: felt252) -> felt252 {

@@ -751,6 +751,21 @@ return 1). The context binds the channel, the game id and every term, session
 keys included, so the signatures bind each wallet to its key as `create` and
 `join` did onchain. An account must be deployed to be checked.
 
+**Delegated approvals.** A game whose players sign in once rather than once
+per game opens with `open_game_delegable(terms, approvals, referee_signature,
+max_lifetime)` instead. Each seat's `Approval` is its wallet's signature, as
+above, or `Delegated { key, expires_at, delegation, signature }`: the wallet
+signed `delegationTypedData(game, { chain_id, channel, key, expires_at })`
+once (`Delegation { game: TAG, channel, key, expires_at }` in the same
+domain; `delegation_message` in Cairo), and `key` signs the terms message the
+wallet would have, as a session key signs steps. It holds while the block's
+time is before `expires_at`, at most `max_lifetime` seconds away, so a
+delegation signed for longer is refused rather than trusted. The channel
+chooses the lifetime and opts in; `open_game` keeps taking wallets only. The
+key never moves stones: the terms still name a fresh session key per game.
+A stolen delegated key can agree to games for its wallet until it expires;
+whoever admits games (a matchmaker, say) revokes keys sooner by refusing them.
+
 **Bundled with the first call.** Whatever call first needs the chain goes in
 one transaction with `open_game`, as a multicall:
 - a cooperative settlement (`submit_history` with approvals, or the adapter's

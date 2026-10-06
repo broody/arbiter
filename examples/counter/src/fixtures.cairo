@@ -42,6 +42,13 @@ pub const VOID_HASH: felt252 = 0x367e95121fb171847c6f6a6a5d402fcd6dfb525272058cf
 /// What seat 0's wallet signs to agree to the terms (SNIP-12, termsTypedData in the SDK).
 pub const TERMS_MESSAGE: felt252 =
     0x5ce00094984d737f3e5b4bdd986e733710d072a661e1fba20bafbbea3b13616;
+/// What seat 0's wallet signs to let `DELEGATE_KEY` agree to games in its place
+/// on the channel until `DELEGATION_EXPIRES` (SNIP-12, delegationTypedData in
+/// the SDK).
+pub const DELEGATE_KEY: felt252 = 0x724ea6e7679ac3e7b2b9f2a97ace4bd1c1b57354ecf73e70f665094cb2eb600;
+pub const DELEGATION_EXPIRES: u64 = 1700604800;
+pub const DELEGATION_MESSAGE: felt252 =
+    0x762919ff17d50f90bb48d7a18db1f8b1a31c79edb84aee0099bf50a6376fcdb;
 
 pub fn terms() -> Terms<Config> {
     Terms {

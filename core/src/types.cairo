@@ -23,6 +23,27 @@ pub struct Signature {
     pub s: felt252,
 }
 
+/// How a seat agrees to a game's terms, where its channel takes delegated
+/// approvals (arbiter_dojo's `open_game_delegable`): its wallet's signature
+/// over the terms message, as its account checks it, or a key its wallet
+/// delegated.
+#[derive(Copy, Drop, Serde, PartialEq, Debug)]
+pub enum Approval {
+    Wallet: Span<felt252>,
+    Delegated: Delegated,
+}
+
+/// `key`'s signature over a game's terms message, and the wallet's signature
+/// over the delegation that lets `key` sign for it until `expires_at` (Unix
+/// seconds, `delegation_message`).
+#[derive(Copy, Drop, Serde, PartialEq, Debug)]
+pub struct Delegated {
+    pub key: felt252,
+    pub expires_at: u64,
+    pub delegation: Span<felt252>,
+    pub signature: Signature,
+}
+
 /// A timed game's time control, bound into its terms: the referee's public key,
 /// which signs stamps and flags, the settings of the game's `ClockRules`,
 /// serialized, and the tip of the referee's own hash chain when the game takes

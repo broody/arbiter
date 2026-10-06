@@ -22,10 +22,12 @@
 // A game module may export, next to its codec, `admit(ids, terms)`, which
 // ranks a new game for the keeper's reserved capacity, `afterSettle(ids,
 // channel)`, which returns calls to send with the resolve that settles a game,
-// and `openCall(ids, terms, { signatures, refereeSignature, extras })`, the
-// call that opens a game no channel holds yet when the channel's own
-// `open_game` won't do, from what it registered with (`extras` is opaque to
-// the keeper). Each also gets `{ provider }`.
+// and `openCall(ids, terms, { signatures, approvals, refereeSignature,
+// extras })`, the call that opens a game no channel holds yet when the
+// channel's own `open_game` won't do, from what it registered with: each
+// seat's approval (`signatures` holds them as arrays when every one is its
+// wallet's), and `extras`, which is opaque to the keeper. Each also gets
+// `{ provider }`.
 //
 //   node keeper/server.mjs CONFIG_JSON      (see config.example.json)
 //
@@ -43,7 +45,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { felt, gameIdOf, hex, open, stateHash, tag, termsTypedData } from '../sdk/src/index.mjs';
+import { felt, gameIdOf, hex, open, stateHash, tag, verifyApproval } from '../sdk/src/index.mjs';
 import { parse, stringify } from '../sdk/src/store.mjs';
 import { fileBackend } from '../sdk/src/store-file.mjs';
 import { Archive, KeeperError, fail } from './archive.mjs';
@@ -68,6 +70,7 @@ const settings = (g, config) => ({
   proof_max_steps: g.proof_max_steps ?? config.proof_max_steps ?? null,
   start_grace_seconds: g.start_grace_seconds ?? config.start_grace_seconds ?? DEFAULTS.start_grace_seconds,
   answer_margin_seconds: g.answer_margin_seconds ?? config.answer_margin_seconds ?? DEFAULTS.answer_margin_seconds,
+  delegation_seconds: g.delegation_seconds ?? 0,
 });
 
 /**
@@ -119,18 +122,21 @@ export async function loadConfig(raw, { base = process.cwd(), env = process.env 
 }
 
 /**
- * Check that each seat's wallet signed the terms of a game no channel holds:
- * one signature per player, in seat order, valid for `termsTypedData`.
+ * Check that each seat agreed to the terms of a game no channel holds, as its
+ * channel will: one approval per player, in seat order, each its wallet's
+ * signature over `termsTypedData`, or, where the entry takes delegations
+ * (`delegation_seconds`), a delegated approval valid at the chain's time.
  */
-async function verifyAuthorizations(chain, game, terms, authorizations) {
+async function verifyAuthorizations(chain, entry, terms, authorizations) {
   if (!Array.isArray(authorizations) || authorizations.length !== terms.players.length)
     fail(403, 'A game no channel holds needs each seat\'s wallet signature over its terms');
   // The channel opens a game only under its seats' id: hold no game it never could.
   if (felt(terms.game_id) !== gameIdOf(terms.players, terms.keys)) fail(403, 'The game id is not its seats\' (gameIdOf)');
-  const typedData = termsTypedData(game, terms);
-  for (const [seat, player] of terms.players.entries()) {
+  const options = { verifyMessage: (...a) => chain.verifyMessage(...a), now: await chain.now(),
+    maxLifetime: entry.delegation_seconds };
+  for (const seat of terms.players.keys()) {
     let valid = false;
-    try { valid = await chain.verifyMessage(player, typedData, authorizations[seat]); } catch {}
+    try { valid = await verifyApproval(entry.game, terms, seat, authorizations[seat], options); } catch {}
     if (!valid) fail(403, `Seat ${seat}'s wallet did not sign these terms`);
   }
 }
@@ -168,7 +174,7 @@ export async function startKeeper(config, { backend, chain, now = Date.now, log 
         // A game no channel holds yet starts at its opening, on its wallets' signatures.
         if (entry.anchored && stateHash(entry.game, session.start) !== stateHash(entry.game, open(entry.game, session.terms)))
           fail(409, 'A game no channel has opened starts at its opening');
-        await verifyAuthorizations(chain, entry.game, session.terms, authorizations);
+        await verifyAuthorizations(chain, entry, session.terms, authorizations);
         return { opened: false };
       }
       if (felt(channel.context) !== session.context) fail(409, 'The terms differ from the channel onchain');

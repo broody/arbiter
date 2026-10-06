@@ -13,8 +13,9 @@
 // its `settle` then goes in one transaction with `open_game`.
 import { RpcProvider } from 'starknet';
 import {
-  ZERO_SIGNATURE, batchOf, contextHash, decodeChannelGame, decodeSnapshot, encodeBatch, encodeEnvelope, encodeSignature,
-  encodeSignatures, encodeTerms, encodeWitness, felt, hex, open, proofMessageHash, proofPayload, replay, stateHash, tag,
+  ZERO_SIGNATURE, batchOf, contextHash, decodeChannelGame, decodeSnapshot, encodeApprovals, encodeBatch, encodeEnvelope,
+  encodeSignature, encodeSignatures, encodeTerms, encodeWitness, felt, hex, open, proofMessageHash, proofPayload, replay,
+  stateHash, tag,
 } from './index.mjs';
 
 const check = (condition, message) => { if (!condition) throw Error(message); };
@@ -125,6 +126,16 @@ export const historyCall = (session, epoch, { acks = NO_ACKS, entrypoint = 'subm
 export const openGameCall = (game, terms, signatures, { refereeSignature = ZERO_SIGNATURE, entrypoint = 'open_game' } = {}) =>
   contractCall(terms.channel, entrypoint, [...encodeTerms(game, terms), BigInt(signatures.length),
     ...signatures.flatMap(signature => [BigInt(signature.length), ...signature.map(felt)]), ...encodeSignature(refereeSignature)]);
+
+/**
+ * A channel's `open_game_delegable` call: `openGameCall` with each seat's
+ * approval, its wallet's signature or a delegated approval
+ * (`delegatedApproval`), for a channel that takes delegations.
+ */
+export const openGameDelegableCall = (game, terms, approvals,
+  { refereeSignature = ZERO_SIGNATURE, entrypoint = 'open_game_delegable' } = {}) =>
+  contractCall(terms.channel, entrypoint, [...encodeTerms(game, terms), ...encodeApprovals(approvals),
+    ...encodeSignature(refereeSignature)]);
 
 /** A game's `get_channel(game_id)`: arbiter_dojo's `ChannelGame` model, decoded. */
 export async function getChannel(provider, game, channel, gameId, { block = 'latest', entrypoint = 'get_channel' } = {}) {

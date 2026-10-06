@@ -15,8 +15,10 @@
 // It submits a segment by onchain replay (`submit_history`) when short, or by
 // a native proof through the game's adapter. Forced play and timeouts
 // otherwise need a player's wallet, so the keeper waits them out.
-import { Session, ZERO_SIGNATURE, disputeAnswer, due, felt, hex, open, rebase, stateHash } from '../sdk/src/index.mjs';
-import { openGameCall } from '../sdk/src/proving.mjs';
+import {
+  Session, ZERO_SIGNATURE, disputeAnswer, due, felt, hex, isDelegated, open, rebase, stateHash,
+} from '../sdk/src/index.mjs';
+import { openGameCall, openGameDelegableCall } from '../sdk/src/proving.mjs';
 import { KeeperError, gameKey } from './archive.mjs';
 
 /** Channel statuses (arbiter::channel). A game id no channel has opened reads as UNOPENED. */
@@ -156,10 +158,11 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
     return { tx, via, from: base.start.seq, steps: base.steps.length };
   }
 
-  // A game's `open_game` call, from the wallet signatures it was registered
-  // with and, when it takes its randomness from this keeper's referee, the
-  // referee's signature over its tip. A game module's `openCall` builds it
-  // instead when it has one, with what the game registered with (`extras`).
+  // A game's `open_game` call, from the seats' approvals it was registered
+  // with (`open_game_delegable` when any is delegated) and, when it takes its
+  // randomness from this keeper's referee, the referee's signature over its
+  // tip. A game module's `openCall` builds it instead when it has one, with
+  // what the game registered with (`extras`).
   async function openCall(entry, ids, terms) {
     const authorizations = await archive.authorizations(ids);
     if (!authorizations) throw Error('No wallet signatures to open the game with');
@@ -172,8 +175,16 @@ export function startWatcher({ archive, chain, entries, intervalMs = 15000, sett
       if (felt(tip) !== signed.rng_tip) throw Error('The game\'s randomness tip is not this referee\'s');
       refereeSignature = signed.signature;
     }
-    const signatures = authorizations.map(a => (Array.isArray(a) ? a : [a.r, a.s]));
-    if (entry.openCall) return entry.openCall(ids, terms, { signatures, refereeSignature, extras: await archive.extras(ids) });
+    const delegated = authorizations.some(isDelegated);
+    const signatures = delegated ? null : authorizations.map(a => (Array.isArray(a) ? a : [a.r, a.s]));
+    if (entry.openCall) {
+      return entry.openCall(ids, terms,
+        { signatures, approvals: authorizations, refereeSignature, extras: await archive.extras(ids) });
+    }
+    if (delegated) {
+      return openGameDelegableCall(entry.game, terms, authorizations,
+        { refereeSignature, entrypoint: entry.entrypoints.open_game_delegable });
+    }
     return openGameCall(entry.game, terms, signatures, { refereeSignature, entrypoint: entry.entrypoints.open_game });
   }
 

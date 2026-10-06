@@ -293,10 +293,16 @@ each entry's `max_steps`. Steps to a closed game get 409.
     provider })`, the priority of a new game for the reserved slots (Surround
     ranks rated games first), `afterSettle(ids, channel, { provider })`, the
     calls to send with the resolve that settles a game (Surround's `rate`), and
-    `openCall(ids, terms, { signatures, refereeSignature, extras, provider })`,
-    the call that opens a game no channel holds yet when the channel's own
-    `open_game` won't do, from the `extras` the game registered with (Surround
-    opens a rated game with its ticket).
+    `openCall(ids, terms, { signatures, approvals, refereeSignature, extras,
+    provider })`, the call that opens a game no channel holds yet when the
+    channel's own `open_game` won't do, from the `extras` the game registered
+    with (Surround opens a rated game with its ticket). `approvals` are the
+    seats' as registered; `signatures` holds them as arrays when every one is
+    a wallet's.
+  - `delegation_seconds` (default 0: none): the longest delegation the
+    entry's channel takes (`open_game_delegable`). A game no channel holds
+    then registers on a seat's delegated approval (`delegatedApproval`) too,
+    checked at the chain's time, and opens through `open_game_delegable`.
 - `store`: the file store directory (`@arbiter/sdk/store/file`, one process
   per directory).
 - `settle: false` stops the keeper from submitting finished games itself.

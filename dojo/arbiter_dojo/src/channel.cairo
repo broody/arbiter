@@ -3,9 +3,10 @@
 //! prover checks and signature checks. A game system calls one helper per
 //! entrypoint, e.g. `arbiter_dojo::channel::open_game::<MyRules>(ref world, ...)`.
 use arbiter::{
-    Batch, Channel, Envelope, GameRules, Move, Outcome, Signature, Terms, TimeControl, approve_all,
-    channel as machine, checkpoint_hash, context_hash, game_id_of, live_hash, open,
-    referee_resume_hash, reopen_hash, replay, state_ref, terms_message, tip_hash, verify, void_hash,
+    Approval, Batch, Channel, Envelope, GameRules, Move, Outcome, Signature, Terms, TimeControl,
+    approve_all, channel as machine, checkpoint_hash, context_hash, delegation_message, game_id_of,
+    live_hash, open, referee_resume_hash, reopen_hash, replay, state_ref, terms_message, tip_hash,
+    verify, void_hash,
 };
 use core::ec::EcPointTrait;
 use core::num::traits::Zero;
@@ -40,6 +41,43 @@ pub fn open_game<
     signatures: Span<Span<felt252>>,
     referee_signature: Signature,
 ) {
+    let mut approvals = array![];
+    for signature in signatures {
+        approvals.append(Approval::Wallet(*signature));
+    }
+    opened::<R>(ref world, terms, approvals.span(), referee_signature, 0);
+}
+
+/// Open a game as `open_game` does, each seat agreeing with its wallet's
+/// signature or with a key its wallet delegated on this channel
+/// (`delegation_message`) until a time at most `max_lifetime` seconds away. A
+/// channel opts in so its players' wallets sign once per sign-in rather than
+/// once per game; a stolen key can then agree to games for its wallet until
+/// the delegation expires.
+pub fn open_game_delegable<
+    impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Serde<R::State>, +Drop<R::State>,
+>(
+    ref world: WorldStorage,
+    terms: Terms<R::Config>,
+    approvals: Span<Approval>,
+    referee_signature: Signature,
+    max_lifetime: u64,
+) {
+    assert(max_lifetime != 0, 'Invalid delegation lifetime');
+    opened::<R>(ref world, terms, approvals, referee_signature, max_lifetime);
+}
+
+// `open_game`, with delegated approvals for at most `max_lifetime` seconds (0:
+// wallets only).
+fn opened<
+    impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Serde<R::State>, +Drop<R::State>,
+>(
+    ref world: WorldStorage,
+    terms: Terms<R::Config>,
+    approvals: Span<Approval>,
+    referee_signature: Signature,
+    max_lifetime: u64,
+) {
     let game_id = terms.game_id;
     let chain_id = get_tx_info().chain_id;
     assert(terms.chain_id == chain_id, 'Wrong chain');
@@ -52,7 +90,7 @@ pub fn open_game<
     assert(terms.players.len() == 2 && terms.keys.len() == 2, 'Wrong seat count');
     // The id is the seats': no one but these two wallets can take it.
     assert(game_id == game_id_of(terms.players, terms.keys), 'Invalid game id');
-    assert(signatures.len() == 2, 'Wrong signature count');
+    assert(approvals.len() == 2, 'Wrong signature count');
     let player_0 = address(*terms.players.at(0));
     let player_1 = address(*terms.players.at(1));
     assert(player_0.is_non_zero() && player_1.is_non_zero(), 'Invalid players');
@@ -87,9 +125,8 @@ pub fn open_game<
     let context = context_hash::<R>(@terms);
     let mut seat: u32 = 0;
     for player in terms.players {
-        accepted(
-            *player, terms_message::<R>(chain_id, game_id, context, *player), *signatures.at(seat),
-        );
+        let message = terms_message::<R>(chain_id, game_id, context, *player);
+        approved::<R>(*player, message, *approvals.at(seat), chain_id, terms.channel, max_lifetime);
         seat += 1;
     }
     let channel = machine::open(
@@ -500,6 +537,33 @@ fn is_base(game: @ChannelGame, hash: felt252) -> bool {
 
 fn keys(game: @ChannelGame) -> Span<felt252> {
     array![*game.key_0, *game.key_1].span()
+}
+
+// A seat's agreement to the terms (`message`): its wallet's signature, or a key
+// its wallet delegated on `channel` for at most `max_lifetime` seconds more,
+// and that key's signature.
+fn approved<impl R: GameRules>(
+    player: felt252,
+    message: felt252,
+    approval: Approval,
+    chain_id: felt252,
+    channel: felt252,
+    max_lifetime: u64,
+) {
+    match approval {
+        Approval::Wallet(signature) => accepted(player, message, signature),
+        Approval::Delegated(delegated) => {
+            assert(max_lifetime != 0, 'Delegation not accepted');
+            let now = get_block_timestamp();
+            assert(now < delegated.expires_at, 'Delegation expired');
+            assert(delegated.expires_at - now <= max_lifetime, 'Delegation too long');
+            let delegation = delegation_message::<
+                R,
+            >(chain_id, channel, delegated.key, delegated.expires_at, player);
+            accepted(player, delegation, delegated.delegation);
+            verify(delegated.key, message, delegated.signature);
+        },
+    }
 }
 
 // A seat's wallet signature over the terms, as its account checks it (SNIP-6):

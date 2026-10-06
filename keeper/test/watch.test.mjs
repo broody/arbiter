@@ -439,8 +439,8 @@ test('a game module\'s openCall opens the game from what it registered with', as
   assert.deepEqual(await archive.extras(archive.ids(CHANNEL, 7n)), { ticket: '0x7', signature: ['0x1', '0x2'] });
   await round();
   assert.deepEqual(chain.sent[0].open, { entrypoint: 'open_rated', calldata: [7] });
-  assert.deepEqual(seen, [[7n, { signatures: [[1n, 2n], [3n, 4n]], refereeSignature: ZERO_SIGNATURE,
-    extras: { ticket: '0x7', signature: ['0x1', '0x2'] } }]]);
+  assert.deepEqual(seen, [[7n, { signatures: [[1n, 2n], [3n, 4n]], approvals: [[1n, 2n], [3n, 4n]],
+    refereeSignature: ZERO_SIGNATURE, extras: { ticket: '0x7', signature: ['0x1', '0x2'] } }]]);
 });
 
 test('a game nobody opened, unfinished, is left alone', async () => {
@@ -469,4 +469,16 @@ test('an unanchored game is never looked up onchain', async () => {
   await round();
   assert.equal(reads, 0);
   assert.deepEqual([chain.sent, logs], [[], []]);
+});
+
+test('a game a seat agreed to with a delegated key opens through open_game_delegable', async () => {
+  const chain = fakeChain();
+  const { archive, round } = await watching(chain);
+  const delegated = { key: 5n, expires_at: 2000n, delegation: [6n, 7n], signature: { r: 8n, s: 9n } };
+  await archive.register(played(FINISHED).export(), [delegated, [3n, 4n]]);
+  await round();
+  const { entrypoint, calldata } = chain.sent[0].open;
+  assert.equal(entrypoint, 'open_game_delegable');
+  // Each seat's approval, the delegated one tagged 1 and the wallet's 0, then no referee signature.
+  assert.deepEqual(calldata.slice(-15).map(BigInt), [2n, 1n, 5n, 2000n, 2n, 6n, 7n, 8n, 9n, 0n, 2n, 3n, 4n, 0n, 0n]);
 });
