@@ -39,7 +39,7 @@ test('an allowlisted adapter reaches the backend and gets its proof', async () =
     const info = await rpc(s.gateway.url, 'arbiter_info', []);
     assert.deepEqual(info.adapter_classes, [hex(CLASS)]);
     assert.deepEqual(info.proof_paths, ['PROOF1']);
-    assert.equal(info.memory, 'standard');
+    assert.equal(info.memory, 'bounded');
     assert.equal(s.logs.at(-1).outcome, 'proved');
   } finally { await s.close(); }
 });
@@ -116,8 +116,8 @@ test('clients are rate limited', async () => {
 test('the memory mode must be one the backend has', () => {
   const base = { rpc_url: 'http://node', backend_url: 'http://backend', chain_id: 'SN_SEPOLIA',
     virtual_os_program: hex(OS), adapter_classes: [hex(CLASS)] };
-  assert.equal(loadConfig(base).memory, 'standard');
-  assert.equal(loadConfig({ ...base, memory: 'bounded' }).memory, 'bounded');
+  assert.equal(loadConfig(base).memory, 'bounded');
+  assert.equal(loadConfig({ ...base, memory: 'standard' }).memory, 'standard');
   assert.throws(() => loadConfig({ ...base, memory: 'tiny' }), /memory must be one of standard, bounded/);
   assert.throws(() => loadConfig({ ...base, memory: 'toString' }), /memory must be one of/);
 });

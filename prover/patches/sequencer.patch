@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index dd459f4..bb3ee75 100644
+index dd459f4..4c016c2 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -4260,7 +4260,6 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
@@ -136,16 +136,30 @@ index dd459f4..bb3ee75 100644
   "rstest",
   "serde",
   "starknet-types-core",
-@@ -13157,7 +13176,7 @@ dependencies = [
+@@ -13151,18 +13170,21 @@ dependencies = [
+  "clap",
+  "flate2",
+  "futures",
++ "hex",
+  "http 1.3.1",
+  "http-body-util",
+  "indexmap 2.14.0",
   "jsonrpsee",
   "jsonschema",
++ "libc",
   "mockito",
 - "privacy-circuit-verify",
 + "privacy-circuit-verify 1.2.2 (git+https://github.com/starkware-libs/proving-utils?tag=v0.14.3-rust-bump)",
   "privacy-prove",
   "reqwest 0.12.24",
   "rstest",
-@@ -13239,7 +13258,6 @@ dependencies = [
+  "serde",
+  "serde_json",
++ "sha2 0.10.9",
+  "shared_execution_objects",
+  "starknet-rust",
+  "starknet-rust-core 0.16.0",
+@@ -13239,7 +13261,6 @@ dependencies = [
  [[package]]
  name = "stwo"
  version = "2.2.0"
@@ -153,7 +167,7 @@ index dd459f4..bb3ee75 100644
  dependencies = [
   "blake2",
   "blake3",
-@@ -13290,7 +13308,6 @@ dependencies = [
+@@ -13290,7 +13311,6 @@ dependencies = [
  [[package]]
  name = "stwo-cairo-adapter"
  version = "1.2.2"
@@ -161,7 +175,7 @@ index dd459f4..bb3ee75 100644
  dependencies = [
   "anyhow",
   "bincode 2.0.1",
-@@ -13315,7 +13332,6 @@ dependencies = [
+@@ -13315,7 +13335,6 @@ dependencies = [
  [[package]]
  name = "stwo-cairo-common"
  version = "1.2.2"
@@ -169,7 +183,7 @@ index dd459f4..bb3ee75 100644
  dependencies = [
   "bytemuck",
   "itertools 0.12.1",
-@@ -13334,7 +13350,6 @@ dependencies = [
+@@ -13334,7 +13353,6 @@ dependencies = [
  [[package]]
  name = "stwo-cairo-prover"
  version = "1.2.2"
@@ -177,7 +191,7 @@ index dd459f4..bb3ee75 100644
  dependencies = [
   "anyhow",
   "bytemuck",
-@@ -13367,7 +13382,6 @@ dependencies = [
+@@ -13367,7 +13385,6 @@ dependencies = [
  [[package]]
  name = "stwo-cairo-serialize"
  version = "1.2.2"
@@ -185,7 +199,7 @@ index dd459f4..bb3ee75 100644
  dependencies = [
   "starknet-ff",
   "stwo",
-@@ -13377,7 +13391,6 @@ dependencies = [
+@@ -13377,7 +13394,6 @@ dependencies = [
  [[package]]
  name = "stwo-cairo-serialize-derive"
  version = "1.2.2"
@@ -193,7 +207,7 @@ index dd459f4..bb3ee75 100644
  dependencies = [
   "quote",
   "syn 2.0.110",
-@@ -13386,7 +13399,6 @@ dependencies = [
+@@ -13386,7 +13402,6 @@ dependencies = [
  [[package]]
  name = "stwo-constraint-framework"
  version = "2.2.0"
@@ -234,11 +248,202 @@ index 8e92f4b..7074458 100644
 +circuit-verifier = { path = "../stwo-circuits/crates/circuit_verifier" }
 +circuits = { path = "../stwo-circuits/crates/circuits" }
 +circuits-stark-verifier = { path = "../stwo-circuits/crates/stark_verifier" }
+diff --git a/crates/starknet_transaction_prover/Cargo.toml b/crates/starknet_transaction_prover/Cargo.toml
+index 1447e9d..cac56dc 100644
+--- a/crates/starknet_transaction_prover/Cargo.toml
++++ b/crates/starknet_transaction_prover/Cargo.toml
+@@ -24,14 +24,17 @@ cairo-lang-utils.workspace = true
+ cairo-vm.workspace = true
+ clap = { workspace = true, features = ["derive", "env"] }
+ futures.workspace = true
++hex.workspace = true
+ http.workspace = true
+ http-body-util.workspace = true
+ indexmap.workspace = true
+ jsonrpsee = { workspace = true, features = ["macros", "server"] }
++libc = "0.2"
+ privacy-prove = { workspace = true, optional = true }
+ reqwest = { workspace = true, features = ["json"] }
+ serde = { workspace = true, features = ["derive"] }
+ serde_json.workspace = true
++sha2.workspace = true
+ shared_execution_objects.workspace = true
+ starknet-rust.workspace = true
+ starknet-rust-core.workspace = true
+@@ -58,6 +61,10 @@ tracing.workspace = true
+ tracing-subscriber = { workspace = true, features = ["env-filter"] }
+ url.workspace = true
+ 
++[[bin]]
++name = "prove_pie"
++required-features = ["stwo_proving"]
++
+ [dev-dependencies]
+ apollo_starknet_os_program.workspace = true
+ assert_matches.workspace = true
+diff --git a/crates/starknet_transaction_prover/src/bin/prove_pie.rs b/crates/starknet_transaction_prover/src/bin/prove_pie.rs
+new file mode 100644
+index 0000000..718c7b7
+--- /dev/null
++++ b/crates/starknet_transaction_prover/src/bin/prove_pie.rs
+@@ -0,0 +1,139 @@
++//! Proves Cairo PIEs dumped by the backend (`PROVER_PIE_DUMP`) offline, as the backend proves
++//! them, and prints one JSON line per proof on stdout: proof and facts hashes for identity
++//! checks, time and peak memory. No node is needed, so a recorded settlement can be proved again
++//! long after its block has left the node's storage-proof window.
++//!
++//!   prove_pie [--repeat N] PIE.zip...
++//!
++//! The memory mode comes from the backend's environment variables (`PROVER_LOW_MEMORY` and the
++//! rest). Each tracing line on stderr starts with the process's resident and peak memory in MiB,
++//! so the log also shows which proving phase sets the peak; `PROVE_PIE_LOG` (an `EnvFilter`)
++//! adds the prover crates' spans, e.g. `info,stwo=info,stwo_cairo_prover=info`. The peak is reset
++//! before each proof.
++
++use std::path::PathBuf;
++use std::time::Instant;
++
++use cairo_vm::vm::runners::cairo_pie::CairoPie;
++use sha2::{Digest, Sha256};
++use starknet_api::transaction::fields::VIRTUAL_SNOS;
++use starknet_transaction_prover::proving::prover::{
++    prepare_recursive_prover_precomputes,
++    prove_blocking,
++};
++use tracing::field::{Field, Visit};
++use tracing_subscriber::layer::{Context, SubscriberExt};
++use tracing_subscriber::registry::LookupSpan;
++use tracing_subscriber::util::SubscriberInitExt;
++use tracing_subscriber::{EnvFilter, Layer};
++
++/// `(VmRSS, VmHWM)` in MiB.
++fn memory_mib() -> (u64, u64) {
++    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
++    let field = |name: &str| {
++        status
++            .lines()
++            .find_map(|line| line.strip_prefix(name))
++            .and_then(|rest| rest.split_whitespace().next()?.parse::<u64>().ok())
++            .map_or(0, |kib| kib / 1024)
++    };
++    (field("VmRSS:"), field("VmHWM:"))
++}
++
++fn reset_peak() {
++    // Writing 5 to clear_refs resets VmHWM to the current resident size.
++    let _ = std::fs::write("/proc/self/clear_refs", "5");
++}
++
++struct MemoryLayer {
++    start: Instant,
++}
++
++impl MemoryLayer {
++    fn line(&self, target: &str, text: &str) {
++        let (rss, hwm) = memory_mib();
++        eprintln!("{:8.3}s [rss {rss} hwm {hwm}] {target}: {text}", self.start.elapsed().as_secs_f64());
++    }
++}
++
++impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for MemoryLayer {
++    fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
++        if let Some(span) = ctx.span(id) {
++            self.line(span.metadata().target(), &format!("> {}", span.name()));
++        }
++    }
++
++    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
++        struct Message(String);
++        impl Visit for Message {
++            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
++                if self.0.is_empty() || field.name() == "message" {
++                    self.0 = format!("{value:?}");
++                }
++            }
++        }
++        let mut message = Message(String::new());
++        event.record(&mut message);
++        self.line(event.metadata().target(), &message.0);
++    }
++}
++
++fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
++    hex::encode(Sha256::digest(bytes))
++}
++
++fn main() -> Result<(), Box<dyn std::error::Error>> {
++    let mut args = std::env::args().skip(1).peekable();
++    let mut repeat = 1;
++    if args.peek().map(String::as_str) == Some("--repeat") {
++        args.next();
++        repeat = args.next().ok_or("--repeat needs a count")?.parse()?;
++    }
++    let pies: Vec<PathBuf> = args.map(PathBuf::from).collect();
++    if pies.is_empty() {
++        return Err("usage: prove_pie [--repeat N] PIE.zip...".into());
++    }
++    tracing_subscriber::registry()
++        .with(
++            MemoryLayer { start: Instant::now() }
++                .with_filter(EnvFilter::new(std::env::var("PROVE_PIE_LOG").unwrap_or_else(|_| {
++                    "warn,starknet_transaction_prover=info,privacy_prove=info".into()
++                }))),
++        )
++        .init();
++
++    let started = Instant::now();
++    let precomputes = prepare_recursive_prover_precomputes()?;
++    let precompute_ms = started.elapsed().as_millis();
++
++    for round in 1..=repeat {
++        for path in &pies {
++            let pie = CairoPie::read_zip_file(path)?;
++            let n_steps = pie.execution_resources.n_steps;
++            reset_peak();
++            let started = Instant::now();
++            let output = prove_blocking(pie, &precomputes)?;
++            let prove_ms = started.elapsed().as_millis();
++            let (rss_mib, peak_mib) = memory_mib();
++            let facts = output.program_output.try_into_proof_facts(VIRTUAL_SNOS)?;
++            // The same hashes as the bench client's: the proof's base64 string and the facts as
++            // unprefixed lowercase hex in a JSON array.
++            let proof_base64 = serde_json::to_value(&output.proof)?;
++            let facts_hex: Vec<String> = facts.0.iter().map(|felt| format!("{felt:x}")).collect();
++            let row = serde_json::json!({
++                "pie": path.file_name().map(|name| name.to_string_lossy()),
++                "round": round,
++                "n_steps": n_steps,
++                "proof_bytes": output.proof.0.len(),
++                "proof_sha256": sha256_hex(proof_base64.as_str().unwrap_or_default()),
++                "facts_sha256": sha256_hex(serde_json::to_string(&facts_hex)?),
++                "prove_ms": prove_ms,
++                "precompute_ms": precompute_ms,
++                "peak_mib": peak_mib,
++                "rss_after_mib": rss_mib,
++            });
++            println!("{row}");
++        }
++    }
++    Ok(())
++}
+diff --git a/crates/starknet_transaction_prover/src/proving.rs b/crates/starknet_transaction_prover/src/proving.rs
+index 7c5bd4f..6ae6fd2 100644
+--- a/crates/starknet_transaction_prover/src/proving.rs
++++ b/crates/starknet_transaction_prover/src/proving.rs
+@@ -4,7 +4,7 @@
+ //! on-chain verification.
+ 
+ #[cfg(feature = "stwo_proving")]
+-pub(crate) mod prover;
++pub mod prover;
+ pub mod virtual_snos_prover;
+ 
+ #[cfg(test)]
 diff --git a/crates/starknet_transaction_prover/src/proving/prover.rs b/crates/starknet_transaction_prover/src/proving/prover.rs
-index a6f457f..caed134 100644
+index a6f457f..c5da847 100644
 --- a/crates/starknet_transaction_prover/src/proving/prover.rs
 +++ b/crates/starknet_transaction_prover/src/proving/prover.rs
-@@ -5,12 +5,79 @@
+@@ -5,15 +5,82 @@
  use std::sync::Arc;
  
  use cairo_vm::vm::runners::cairo_pie::CairoPie;
@@ -263,12 +468,12 @@ index a6f457f..caed134 100644
 +///     `N > 0`, keep coefficients instead of expanded evaluations and compute FRI quotients
 +///     `N` columns at a time.
 +/// - Otherwise (default): upstream behavior, with precomputes built once and shared.
-+pub(crate) enum RecursiveProverPrecomputes {
++pub enum RecursiveProverPrecomputes {
 +    Cached(Arc<privacy_prove::RecursiveProverPrecomputes>),
 +    LowMemory(LowMemoryOptions),
 +}
 +
-+pub(crate) fn prepare_recursive_prover_precomputes()
++pub fn prepare_recursive_prover_precomputes()
 +-> Result<Arc<RecursiveProverPrecomputes>, Box<dyn std::error::Error>> {
 +    let flag = |name: &str, default: bool| -> Result<bool, Box<dyn std::error::Error>> {
 +        match std::env::var(name).as_deref() {
@@ -318,32 +523,78 @@ index a6f457f..caed134 100644
 +
  /// Output from the prover containing the proof and associated program output.
  #[derive(Debug, Clone)]
- pub(crate) struct ProverOutput {
-@@ -22,13 +89,22 @@ pub(crate) struct ProverOutput {
+-pub(crate) struct ProverOutput {
++pub struct ProverOutput {
+     /// The proof packed as bytes.
+     pub proof: Proof,
+     /// Raw program output from the bootloader (first element is number of tasks).
+@@ -22,20 +89,59 @@ pub(crate) struct ProverOutput {
  
  /// Proves a Cairo PIE using the privacy recursive prover.
  ///
 -/// Calls `privacy_recursive_prove` with the CairoPie and precomputed data on a blocking thread.
-+/// Calls `privacy_recursive_prove` (or its low-memory variant) with the CairoPie on a blocking
-+/// thread.
++/// Calls [`prove_blocking`] with the CairoPie on a blocking thread.
  pub(crate) async fn prove(
      cairo_pie: CairoPie,
      precomputes: Arc<RecursiveProverPrecomputes>,
  ) -> Result<ProverOutput, ProvingError> {
-     let proof_output = tokio::task::spawn_blocking(move || {
+-    let proof_output = tokio::task::spawn_blocking(move || {
 -        privacy_recursive_prove(cairo_pie, precomputes).map_err(|e| e.to_string())
-+        match precomputes.as_ref() {
-+            RecursiveProverPrecomputes::Cached(shared) => {
-+                privacy_recursive_prove(cairo_pie, shared.clone())
-+            }
-+            RecursiveProverPrecomputes::LowMemory(options) => {
-+                privacy_recursive_prove_low_memory(cairo_pie, *options)
-+            }
+-    })
+-    .await
+-    .map_err(ProvingError::TaskJoin)?
+-    .map_err(ProvingError::ProverExecution)?;
++    tokio::task::spawn_blocking(move || prove_blocking(cairo_pie, &precomputes))
++        .await
++        .map_err(ProvingError::TaskJoin)?
++}
++
++/// Proves a Cairo PIE on the current thread with `privacy_recursive_prove` (or its low-memory
++/// variant).
++///
++/// With `PROVER_PIE_DUMP=DIR`, the PIE is first written to `DIR` as a zip, so the proof can be
++/// repeated offline with the `prove_pie` binary, without the node. With `PROVER_MALLOC_TRIM=1`,
++/// glibc returns the proof's freed memory to the system once the proof is done.
++pub fn prove_blocking(
++    cairo_pie: CairoPie,
++    precomputes: &RecursiveProverPrecomputes,
++) -> Result<ProverOutput, ProvingError> {
++    if let Some(dir) = std::env::var_os("PROVER_PIE_DUMP") {
++        dump_pie(&cairo_pie, std::path::Path::new(&dir));
++    }
++    let proof_output = match precomputes {
++        RecursiveProverPrecomputes::Cached(shared) => {
++            privacy_recursive_prove(cairo_pie, shared.clone())
 +        }
-+        .map_err(|e| e.to_string())
-     })
-     .await
-     .map_err(ProvingError::TaskJoin)?
++        RecursiveProverPrecomputes::LowMemory(options) => {
++            privacy_recursive_prove_low_memory(cairo_pie, *options)
++        }
++    }
++    .map_err(|e| ProvingError::ProverExecution(e.to_string()));
++    #[cfg(target_env = "gnu")]
++    if std::env::var_os("PROVER_MALLOC_TRIM").is_some_and(|value| value == "1") {
++        // SAFETY: malloc_trim only releases free heap memory.
++        unsafe { libc::malloc_trim(0) };
++    }
++    let proof_output = proof_output?;
+ 
+     let proof = Proof::from(proof_output.proof);
+     let program_output = ProgramOutput::from(proof_output.output_preimage);
+ 
+     Ok(ProverOutput { proof, program_output })
+ }
++
++fn dump_pie(cairo_pie: &CairoPie, dir: &std::path::Path) {
++    let millis = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map(|d| d.as_millis())
++        .unwrap_or_default();
++    let path = dir.join(format!("pie-{millis}-{}.zip", cairo_pie.execution_resources.n_steps));
++    match std::fs::create_dir_all(dir).and_then(|()| cairo_pie.write_zip_file(&path, false)) {
++        Ok(()) => info!("Cairo PIE written to {}", path.display()),
++        Err(error) => tracing::warn!("Cairo PIE not written to {}: {error}", path.display()),
++    }
++}
 diff --git a/crates/starknet_transaction_prover/src/proving/prover_test.rs b/crates/starknet_transaction_prover/src/proving/prover_test.rs
 index 1fb1e8a..bfb7690 100644
 --- a/crates/starknet_transaction_prover/src/proving/prover_test.rs

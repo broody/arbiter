@@ -52,13 +52,14 @@ proofs, so only memory and time differ:
 
 | `memory` | Largest game (529 steps): peak | Proof time |
 | --- | ---: | ---: |
-| `standard` (default) | about 40 GiB | about 15 s |
-| `bounded` | about 22 GiB | about 30 s |
+| `standard` | about 40 GiB | about 14 s |
+| `bounded` (default) | about 9 GiB | about 19 s |
 
-Use `standard` where memory allows. `bounded` fits smaller hosts, and gives
-memory back between proofs. Each worker proves one job at a time in its own
-cgroup, with a memory limit. A job that runs out of memory fails alone, and its
-worker restarts.
+`standard` has the lower latency for one job. On a large machine, several
+`bounded` workers match its throughput on half the memory, and `bounded` fits
+hosts that `standard` does not. Each worker proves one job at a time in its
+own cgroup, with a memory limit. A job that runs out of memory fails alone, and
+its worker restarts.
 
 ## Run it
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Build the PROOF1 backend: StarkWare's starknet_transaction_prover (the service
 # behind the hosted Sepolia prover) at the sequencer revision pinned in pins.json,
-# with in-process Stwo proving and arbiter's bounded-memory patches (patches/,
-# off unless the backend runs with PROVER_LOW_MEMORY=1). Output:
-# $BUILD_DIR/bin/starknet_transaction_prover, the Sierra compiler under
-# $BUILD_DIR/tools, and $BUILD_DIR/build.json.
+# with in-process Stwo proving and arbiter's patches (patches/: the memory modes,
+# allocator trim and PIE dump in the README, each off unless the backend's
+# environment turns it on). Output:
+# $BUILD_DIR/bin/starknet_transaction_prover, $BUILD_DIR/bin/prove_pie (proves a
+# PIE the backend dumped with PROVER_PIE_DUMP, offline; see README), the Sierra
+# compiler under $BUILD_DIR/tools, and $BUILD_DIR/build.json.
 #
 #   prover/build.sh
 #
@@ -65,6 +67,7 @@ if [ -n "${TARGET_CPU:-}" ]; then
 fi
 env "${cpu_flags[@]}" cargo +"$TOOLCHAIN" build --release --locked -p starknet_transaction_prover --features stwo_proving
 install -m 0755 target/release/starknet_transaction_prover "$BUILD_DIR/bin/starknet_transaction_prover"
+install -m 0755 target/release/prove_pie "$BUILD_DIR/bin/prove_pie"
 
 # The service compiles fetched Sierra classes to CASM with this binary at runtime,
 # found under $CARGO_TOOLS_ROOT.

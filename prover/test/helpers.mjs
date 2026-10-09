@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { hash } from 'starknet';
 import { hex, tag } from '../../sdk/src/index.mjs';
 import { rpc } from '../../sdk/src/proving.mjs';
-import { startGateway } from '../server.mjs';
+import { patchHashes, startGateway } from '../server.mjs';
 
 export const OS = 0x53f6c9fcfd31d27279ff7d7e422b44623550a732b59fe193354a7316a96daa1n;
 export const ADAPTER = 0xad0b7e5n, OTHER = 0xbadn, CLASS = 0xc1a55n;
@@ -59,13 +59,16 @@ export const tx = (overrides = {}) => ({
 export const prove = (url, params) => rpc(url, 'starknet_proveTransaction', params);
 export const code = expected => e => { assert.equal(e.rpcError?.code, expected, JSON.stringify(e.rpcError)); return true; };
 
-/** A build directory whose backend is mock-backend.mjs; `patched` writes a build.json with patches. */
+/**
+ * A build directory whose backend is mock-backend.mjs. `patched` writes a
+ * build.json with the current patches' hashes, or `'stale'` with other ones.
+ */
 export function buildDir({ patched = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'arbiter-prover-test-'));
   mkdirSync(join(dir, 'bin'));
   const mock = fileURLToPath(new URL('./mock-backend.mjs', import.meta.url));
   writeFileSync(join(dir, 'bin/starknet_transaction_prover'), `#!/bin/sh\nexec "${process.execPath}" "${mock}" "$@"\n`, { mode: 0o755 });
-  if (patched) writeFileSync(join(dir, 'build.json'), JSON.stringify({ patches: {} }));
+  if (patched) writeFileSync(join(dir, 'build.json'), JSON.stringify({ patches: patched === 'stale' ? {} : patchHashes() }));
   return dir;
 }
 

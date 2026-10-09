@@ -3,14 +3,14 @@
 // proof does: 0x1 answers, 0x2 hangs, 0x3 exits mid-job, 0x4 allocates memory
 // until it is killed, 0x5 starts a child process (its pid written to
 // $MOCK_PID_DIR/child) and hangs, 0x6 answers after 300 ms. Answers carry the
-// worker's pid (as the proof) and its PROVER_*, MALLOC_* and MAX_CONCURRENT_*
-// environment.
+// worker's pid (as the proof) and its PROVER_*, MALLOC_*, MAX_CONCURRENT_* and
+// RAYON_* environment.
 import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 
-const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(PROVER_|MALLOC_|MAX_CONCURRENT)/.test(k)));
+const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(PROVER_|MALLOC_|MAX_CONCURRENT|RAYON_)/.test(k)));
 const hold = [];
 const server = createServer(async (req, res) => {
   let body = '';

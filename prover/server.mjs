@@ -14,11 +14,12 @@
 //
 // Methods: starknet_specVersion, starknet_proveTransaction, arbiter_info.
 import { createServer } from 'node:http';
-import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { availableParallelism, homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { hash } from 'starknet';
 import { hex, tag } from '../sdk/src/index.mjs';
 import { rpc } from '../sdk/src/proving.mjs';
@@ -35,24 +36,29 @@ const OS_PROGRAM_SELECTOR = hash.getSelectorFromName('os_program');
 
 const DEFAULTS = {
   host: '127.0.0.1', port: 3100, max_concurrent: 1, max_queued: 8, max_calldata: 20000,
-  max_body_bytes: 1 << 20, rate_per_minute: 12, backend_timeout_ms: 600000, memory: 'standard', prefetch_state: true,
+  max_body_bytes: 1 << 20, rate_per_minute: 12, backend_timeout_ms: 600000, memory: 'bounded', prefetch_state: true,
 };
-const WORKER_DEFAULTS = { cgroup_root: 'self', base_port: 3200, job_cpus: null, pids_max: 1024, sandbox: 'cgroup' };
+const WORKER_DEFAULTS = { cgroup_root: 'self', base_port: 3200, job_cpus: null, job_threads: null, pids_max: 1024, sandbox: 'cgroup' };
 
 /**
  * The backend's memory modes (config `memory`): the environment workers start
  * with and each worker's default memory limit (`workers.job_memory`). Both
- * produce the same proofs: `bounded` needs about 45% less memory per proof and
- * proves about 2x slower (README). Both give glibc a fixed 1 MiB mmap
- * threshold, so proving buffers return to the system after each proof instead
- * of accumulating in the heap across proofs.
+ * produce the same proofs: `bounded` keeps polynomial coefficients instead of
+ * expanded columns and needs about a quarter of the memory, for about 1.3x the
+ * proof time (README). It needs a backend built with the current patches.
  */
-const RELEASE_BUFFERS = { MALLOC_MMAP_THRESHOLD_: '1048576' };
 export const MEMORY_MODES = {
-  standard: { env: { ...RELEASE_BUFFERS }, job_memory: '56G' },
-  bounded: { env: { ...RELEASE_BUFFERS, PROVER_LOW_MEMORY: '1', PROVER_BOUNDED_CAIRO_COLUMNS: '16',
-    PROVER_BOUNDED_CIRCUIT_COLUMNS: '16' }, job_memory: '28G' },
+  standard: { env: {}, job_memory: '56G' },
+  bounded: { env: { PROVER_LOW_MEMORY: '1', PROVER_BOUNDED_CAIRO_COLUMNS: '16', PROVER_BOUNDED_CIRCUIT_COLUMNS: '16' },
+    job_memory: '16G', patched: true },
 };
+/**
+ * How a worker gives a proof's buffers back to the system, so that it does not
+ * grow from proof to proof: a backend built with the current patches trims
+ * glibc's heap after each proof; any other gets a fixed 1 MiB mmap threshold,
+ * which costs about 6% of proof time in `standard`.
+ */
+const RELEASE_MEMORY = { trim: { PROVER_MALLOC_TRIM: '1' }, mmap: { MALLOC_MMAP_THRESHOLD_: '1048576' } };
 const SANDBOXES = { cgroup: cgroupSandbox, none: processSandbox };
 
 class RpcError extends Error {
@@ -76,6 +82,10 @@ export function loadConfig(raw) {
     throw Error(`Config memory must be one of ${Object.keys(MEMORY_MODES).join(', ')}`);
   if (!config.backend_url) {
     config.workers = { ...WORKER_DEFAULTS, job_memory: MEMORY_MODES[config.memory].job_memory, ...config.workers };
+    // Workers that share the machine prove faster with a share of its cores each
+    // than with one thread per core each.
+    config.workers.job_threads ??= config.workers.job_cpus ? Math.max(1, Math.round(config.workers.job_cpus))
+      : config.max_concurrent > 1 ? Math.max(1, Math.floor(availableParallelism() / config.max_concurrent)) : null;
     if (!Object.hasOwn(SANDBOXES, config.workers.sandbox))
       throw Error(`Config workers.sandbox must be one of ${Object.keys(SANDBOXES).join(', ')}`);
     config.build_dir ??= process.env.ARBITER_PROVER_BUILD ?? join(homedir(), '.cache/arbiter-prover');
@@ -134,7 +144,8 @@ export async function startGateway(rawConfig, { log = entry => console.log(JSON.
     adapter_classes: [...config.adapter_classes].map(hex), proof_paths: ['PROOF1'], backend_spec_version: backendVersion,
     memory: config.memory, backend: backend.status(),
     limits: { max_concurrent: config.max_concurrent, max_queued: config.max_queued, max_calldata: config.max_calldata,
-      rate_per_minute: config.rate_per_minute, ...(config.workers ? { job_memory: config.workers.job_memory } : {}) },
+      rate_per_minute: config.rate_per_minute,
+      ...(config.workers ? { job_memory: config.workers.job_memory, job_threads: config.workers.job_threads } : {}) },
   });
 
   async function prove(params, client) {
@@ -248,6 +259,21 @@ const FAILURES = {
   unreachable: 'The proving backend stopped answering during the job; retry later',
 };
 
+/** The SHA-256 of each file in prover/patches, as build.sh records them in build.json. */
+export function patchHashes() {
+  const dir = join(dirname(fileURLToPath(import.meta.url)), 'patches');
+  return Object.fromEntries(readdirSync(dir).sort()
+    .map(f => [f, createHash('sha256').update(readFileSync(join(dir, f))).digest('hex')]));
+}
+
+/** Whether the build at `build` has the current patches, older ones, or none. */
+function buildPatches(build) {
+  let recorded;
+  try { recorded = JSON.parse(readFileSync(join(build, 'build.json'), 'utf8')).patches; } catch { return 'none'; }
+  if (!recorded) return 'none';
+  return JSON.stringify(recorded) === JSON.stringify(patchHashes()) ? 'current' : 'stale';
+}
+
 /** `max_concurrent` workers running the backend from `build_dir`, each in its own cgroup. */
 async function workerBackend(config, { log, sandbox }) {
   const { build_dir: build, workers } = config;
@@ -255,15 +281,17 @@ async function workerBackend(config, { log, sandbox }) {
   if (!existsSync(binary)) throw Error(`No backend at ${binary}: run prover/build.sh (or set build_dir)`);
   const mode = MEMORY_MODES[config.memory];
   // An unpatched backend ignores the PROVER_* settings and would prove in standard mode.
-  const patched = (() => { try { return 'patches' in JSON.parse(readFileSync(join(build, 'build.json'), 'utf8')); } catch { return false; } })();
-  if (Object.keys(mode.env).some(k => k.startsWith('PROVER_')) && !patched)
-    throw Error(`memory: ${config.memory} needs a backend built with prover/patches: rerun prover/build.sh`);
+  const patches = buildPatches(build);
+  if (mode.patched && patches !== 'current')
+    throw Error(`memory: ${config.memory} needs a backend built with the ${patches === 'stale' ? 'current ' : ''}prover/patches: rerun prover/build.sh`);
+  const env = { ...mode.env, ...RELEASE_MEMORY[patches === 'current' ? 'trim' : 'mmap'],
+    ...(workers.job_threads ? { RAYON_NUM_THREADS: String(workers.job_threads) } : {}) };
   return startWorkers({
     size: config.max_concurrent, maxQueued: config.max_queued, command: binary, args: ['--no-cors'],
     basePort: workers.base_port, cgroupRoot: workers.cgroup_root, sandbox: sandbox ?? SANDBOXES[workers.sandbox],
     limits: { memory: workers.job_memory, cpus: workers.job_cpus, pids: workers.pids_max },
     env: port => ({
-      ...process.env, ...mode.env, RPC_URL: config.rpc_url, CHAIN_ID: config.chain_id, PROVER_IP: '127.0.0.1',
+      ...process.env, ...env, RPC_URL: config.rpc_url, CHAIN_ID: config.chain_id, PROVER_IP: '127.0.0.1',
       PROVER_PORT: String(port), MAX_CONCURRENT_REQUESTS: '1', PREFETCH_STATE: String(config.prefetch_state),
       CARGO_TOOLS_ROOT: join(build, 'tools'), LOG_FORMAT: process.env.LOG_FORMAT ?? 'json',
       RUST_LOG: process.env.RUST_LOG ?? 'warn,starknet_transaction_prover=info,privacy_prove=info',

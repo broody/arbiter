@@ -21,8 +21,8 @@
 #   MEASURE_PORT             backend port (default 3050)
 #   MEASURE_LOG              backend log (default $ARBITER_PROVER_BUILD/measure/<unit>.log)
 #   MAX_CONCURRENT_REQUESTS  backend concurrency (default 1)
-#   PROVER_*, MALLOC_*       memory mode (README) and allocator settings, passed
-#                            to the backend and recorded in the summary
+#   PROVER_*, MALLOC_*,      memory mode (README), allocator and thread settings,
+#   RAYON_NUM_THREADS        passed to the backend and recorded in the summary
 set -euo pipefail
 rpc="${1:?usage: prover/measure.sh RPC_URL -- CLIENT_COMMAND [ARG ...]}"; shift
 [ "${1:-}" = "--" ] && shift
@@ -65,7 +65,7 @@ alive=true; kill -0 $pid 2>/dev/null || alive=false
 jq -cn --arg build "$BUILD_DIR" --arg log "$log" --argjson client_exit "$client_exit" \
   --argjson startup "$(echo "$ready - $started" | bc)" --argjson idle "$idle" --argjson peak "$peak" \
   --argjson oom_kills "${oom_kills:-0}" --argjson alive "$alive" --arg memory_max "${MEASURE_MEMORY_MAX:-}" \
-  --arg mode "$(env | grep -E '^(PROVER_(LOW_MEMORY|CAIRO_COEFFICIENTS|RECOMPUTE_CAIRO_COMMITMENTS|BOUNDED_[A-Z]+_COLUMNS)|MALLOC_[A-Z_]+)=' | sort | paste -sd' ')" \
+  --arg mode "$(env | grep -E '^(PROVER_(LOW_MEMORY|CAIRO_COEFFICIENTS|RECOMPUTE_CAIRO_COMMITMENTS|BOUNDED_[A-Z]+_COLUMNS|MALLOC_TRIM)|MALLOC_[A-Z_]+|RAYON_NUM_THREADS)=' | sort | paste -sd' ')" \
   --slurpfile events <(jq -c 'select(.fields.os_duration_ms or .fields.prove_duration_ms) | .fields' "$log" 2>/dev/null || true) \
   '{measure: {build: $build, mode: $mode, memory_max: $memory_max, startup_seconds: ($startup * 10 | round / 10),
     idle_gib: ($idle / 1073741824 * 100 | round / 100), peak_gib: ($peak / 1073741824 * 100 | round / 100),

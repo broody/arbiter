@@ -18,7 +18,7 @@ Environment=ARBITER_PROVER_BUILD=/var/lib/arbiter-prover/build
 ExecStart=/usr/bin/node /opt/arbiter/prover/server.mjs /etc/arbiter/prover.json
 Delegate=yes
 # The whole subtree: max_concurrent workers at workers.job_memory each, plus the
-# gateway. Size it to the host (for example 2 x 56G standard workers).
+# gateway. Size it to the host (for example 6 x 16G bounded workers).
 MemoryMax=120G
 MemorySwapMax=0
 Restart=on-failure

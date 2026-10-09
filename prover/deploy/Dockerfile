@@ -25,6 +25,8 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY sdk/src sdk/src
 COPY prover/server.mjs prover/workers.mjs prover/
+# The gateway checks the build against these (build.json).
+COPY prover/patches prover/patches
 COPY --from=build /opt/arbiter-prover/bin /opt/arbiter-prover/bin
 COPY --from=build /opt/arbiter-prover/tools /opt/arbiter-prover/tools
 COPY --from=build /opt/arbiter-prover/build.json /opt/arbiter-prover/

@@ -4,6 +4,7 @@
 // under real cgroups.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { availableParallelism } from 'node:os';
 import { JOB_FAILED, SERVICE_BUSY } from '../server.mjs';
 import { processSandbox } from '../workers.mjs';
 import { alive, childPid, code, job, until, workerGateway } from './helpers.mjs';
@@ -18,11 +19,14 @@ test('each worker proves one job at a time with the memory mode\'s environment',
     const [a, b] = await Promise.all([job(s.gateway.url, '0x6'), job(s.gateway.url, '0x6')]);
     assert.notEqual(a.proof, b.proof, 'two workers served the two jobs');
     assert(Date.now() - started < 550, 'in parallel');
-    assert.deepEqual(a.env, { MALLOC_MMAP_THRESHOLD_: '1048576', MAX_CONCURRENT_REQUESTS: '1', PROVER_BOUNDED_CAIRO_COLUMNS: '16',
-      PROVER_BOUNDED_CIRCUIT_COLUMNS: '16', PROVER_IP: '127.0.0.1', PROVER_LOW_MEMORY: '1', PROVER_PORT: a.env.PROVER_PORT });
+    const threads = String(Math.max(1, Math.floor(availableParallelism() / 2)));
+    assert.deepEqual(a.env, { MAX_CONCURRENT_REQUESTS: '1', PROVER_BOUNDED_CAIRO_COLUMNS: '16', PROVER_BOUNDED_CIRCUIT_COLUMNS: '16',
+      PROVER_IP: '127.0.0.1', PROVER_LOW_MEMORY: '1', PROVER_MALLOC_TRIM: '1', PROVER_PORT: a.env.PROVER_PORT,
+      RAYON_NUM_THREADS: threads });
     const info = await s.info();
     assert.deepEqual(info.backend, { sandbox: 'none', workers: 2, restarts: 0, ready: 2, busy: 0 });
-    assert.equal(info.limits.job_memory, '28G');
+    assert.equal(info.limits.job_memory, '16G');
+    assert.equal(info.limits.job_threads, Number(threads));
   } finally { await s.close(); }
 });
 
@@ -70,8 +74,19 @@ test('a full queue answers busy', async () => {
   } finally { await s.close(); }
 });
 
-test('bounded memory needs a patched build', async () => {
-  await assert.rejects(setup({ config: { memory: 'bounded' }, patched: false }), /needs a backend built with prover\/patches/);
-  const s = await setup({ patched: false });
-  await s.close();
+test('bounded memory, the default, needs a build with the current patches', async () => {
+  await assert.rejects(setup({ patched: false }), /needs a backend built with the prover\/patches/);
+  await assert.rejects(setup({ config: { memory: 'bounded' }, patched: 'stale' }), /built with the current prover\/patches/);
+});
+
+test('standard memory trims the heap with the current patches and sets an mmap threshold otherwise', async () => {
+  for (const [patched, release] of [[true, { PROVER_MALLOC_TRIM: '1' }], ['stale', { MALLOC_MMAP_THRESHOLD_: '1048576' }],
+    [false, { MALLOC_MMAP_THRESHOLD_: '1048576' }]]) {
+    const s = await setup({ config: { memory: 'standard', max_concurrent: 1, workers: { job_cpus: 3 } }, patched });
+    try {
+      const { env } = await job(s.gateway.url);
+      assert.deepEqual(env, { MAX_CONCURRENT_REQUESTS: '1', PROVER_IP: '127.0.0.1', PROVER_PORT: env.PROVER_PORT,
+        RAYON_NUM_THREADS: '3', ...release });
+    } finally { await s.close(); }
+  }
 });

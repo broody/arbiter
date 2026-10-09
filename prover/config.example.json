@@ -8,7 +8,7 @@
     "0x0000000000000000000000000000000000000000000000000000000000000000"
   ],
   "max_concurrent": 1,
-  "memory": "standard",
+  "memory": "bounded",
   "workers": {
     "cgroup_root": "self",
     "base_port": 3200
