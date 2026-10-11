@@ -34,7 +34,9 @@ pub struct Pool {
 }
 
 pub trait RatingRules {
-    /// Domain tag in every ticket digest and admin op, e.g. 'SURROUND'.
+    /// Domain tag in every ticket digest and admin op, e.g. 'SURROUND'. Fixed
+    /// for a contract's life: accepted tickets and queued changes are keyed by
+    /// it, so an upgrade under another tag would strand them.
     const TAG: felt252;
     /// Version of the rules that last updated a player, stored with it
     /// (`params`). Bump it when an update would change.

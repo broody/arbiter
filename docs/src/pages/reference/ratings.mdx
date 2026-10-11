@@ -38,7 +38,7 @@ pub trait RatingRules {
 
 | Item | Contract |
 | --- | --- |
-| `TAG` | Domain tag in every ticket digest and admin op, e.g. `'SURROUND'`. |
+| `TAG` | Domain tag in every ticket digest and admin op, e.g. `'SURROUND'`. Fixed for a contract's life: accepted tickets and queued changes are keyed by it, so an upgrade under another tag strands them. |
 | `VERSION` | Version of the rules that last updated a player, stored with it (`params`) and carried by `RatingUpdated`. Bump it when an update would change. |
 | `REFEREE_RNG` | `true`: rated games take their randomness from the referee (a game with dice). `false`: they never take any. `open_rated_game` enforces it on the clock's `rng_tip`. |
 | `pool(pool)` | A pool's constants, or `None` for a pool the game doesn't have. |

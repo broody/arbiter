@@ -1,8 +1,8 @@
 # Ratings plan: ranked play for arbiter games
 
-Created 2026-10-11. Status: steps 1–6 and 8 built on branches `feat/ratings`
-(arbiter) and `feat/arbiter-ratings` (Surround), not yet merged or deployed;
-step 7's Sepolia redeploy and step 9's review of the code are open. Reviewed by
+Created 2026-10-11. Status: steps 1–6, 8 and 9 done on branches `feat/ratings`
+(arbiter) and `feat/arbiter-ratings` (Surround), not yet merged; step 7's
+Sepolia redeploy follows. Reviewed by
 Fable on 2026-10-11 before implementation: sound, no blockers; its fixes are
 folded in below, and a spike compiled the component and trait on Cairo 2.13.1.
 The source is Surround's ratings (`surround/ratings`, design and evidence in
@@ -20,7 +20,7 @@ Surround's `RANKING_PLAN.md`).
 | 6 Surround | Done: `GoRatingRules`, `SurroundRatings` from the component, the channel on `arbiter_dojo::rated`; 24 ratings and 94 world tests, `vectors.cairo` and `audit_vectors.cairo` regenerate byte-identically; offchain SDK (52), matchmaker (58), anchors (11), web (172, `tsc` clean); a local Devnet game (`smoke.mjs`: 24 transactions, 32 checks) and the event replay (`replay-check.mjs`) pass | Surround keeps `ratings/src/math.cairo` as a thin Go wrapper over the engine, so its vectors and tests run unchanged. Rules version stays 2: the update didn't change. The matchmaker sends `{ ratings, size, komi_half, settings }` beside each ticket, and every party that builds terms checks them against the ticket's hashes (`ratedTerms`). Its HTTP API renamed `rank_tenths` to `shown`, `ratings` is a required config key, and its snapshot version went to 3, so stored state resets |
 | 7 Measure, deploy | Measured; the Sepolia redeploy waits for the push | `rate_game` on Go's rules: 2.40M (first game) and 2.66M (second), +3.9% and +3.5% (pool keys, the longer digest). A rated 9×9 game (open, settle, rate): 48.24M gas in tests against 48.40M on `main` (−0.3%): `submit_history` −0.6% (the binding writes `Settlement` once), `rate` +1.4% |
 | 8 Docs | Done: DESIGN.md (layers, a Ratings section, decision 4 amended, roadmap 13), README, and the docs site: concept, guide ("Add rated play") and two reference pages, with the binding, glossary and overview pages updated (`npm run build` passes) | The design text above was corrected to the code after the docs pass (config hash tag order, `rated_result`'s `Option`, no `sync` helper, event keys, two test pools) |
-| 9 Review | Open | — |
+| 9 Review | Done (Fable, 2026-10-11): mergeable, no security regression; the component matches `SurroundRatings` v2 line by line, the binding closes rated/unrated confusion, `rated_result` matches Surround's old `rate`, the Go vectors regenerate byte for byte. Fixed from it: a test of `REFEREE_RNG` (`dojo/examples/rated`'s `rolled_channel`, 23 tests), `TAG` documented as fixed for a contract's life, writer grants per model in the channel guide; in Surround, the matchmaker and the web check the ratings address against the channel's, config-hash constants pinned in tests, the store reset noted | — |
 
 Goal: any 2-seat arbiter game gets onchain ratings by implementing one trait,
 the way it gets a channel by implementing `GameRules`. Surround moves onto the

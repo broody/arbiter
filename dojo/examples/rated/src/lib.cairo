@@ -332,4 +332,6 @@ pub mod channel {
 #[cfg(test)]
 mod account;
 #[cfg(test)]
+mod rolled;
+#[cfg(test)]
 mod tests;

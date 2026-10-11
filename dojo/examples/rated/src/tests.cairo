@@ -2,7 +2,7 @@ use arbiter::clocks::{Standard, encode};
 use arbiter::{
     Batch, Envelope, Move, REFEREE, Signature, Terms, TimeControl, action_hash, actor, apply_steps,
     checkpoint_hash, config_hash, context_hash, game_id_of, open, stamp_hash, state_hash,
-    terms_message,
+    terms_message, tip_hash,
 };
 use arbiter_counter::{ADD, Action, Counter};
 use arbiter_dojo::models::{
@@ -26,6 +26,7 @@ use starknet::syscalls::{deploy_syscall, get_class_hash_at_syscall};
 use starknet::testing::{set_account_contract_address, set_block_timestamp, set_contract_address};
 use starknet::{ContractAddress, SyscallResultTrait, get_tx_info};
 use crate::account::TestAccount;
+use crate::rolled::{IRolledChannelDispatcher, IRolledChannelDispatcherTrait, rolled_channel};
 use crate::{
     BLITZ, Config, CounterRatingRules, CounterRatings, IRatedChannelDispatcher,
     IRatedChannelDispatcherTrait, RAPID, RatedCounterRules, channel,
@@ -128,11 +129,14 @@ fn setup() -> (IRatedChannelDispatcher, IRatingsDispatcher, WorldStorage) {
             TestResource::Model(m_RatedGame::TEST_CLASS_HASH),
             TestResource::Event(e_ChannelUpdated::TEST_CLASS_HASH),
             TestResource::Contract(channel::TEST_CLASS_HASH),
+            TestResource::Contract(rolled_channel::TEST_CLASS_HASH),
         ]
             .span(),
     };
     let defs: Span<ContractDef> = [
         ContractDefTrait::new(@"rated", @"channel")
+            .with_writer_of([dojo::utils::bytearray_hash(@"rated")].span()),
+        ContractDefTrait::new(@"rated", @"rolled_channel")
             .with_writer_of([dojo::utils::bytearray_hash(@"rated")].span()),
     ]
         .span();
@@ -551,4 +555,79 @@ fn games_in_two_pools_rate_apart() {
     let bob = ratings.player(RAPID, BOB());
     assert_eq!((bob.losses, bob.games), (1, 1));
     assert_eq!(ratings.player(BLITZ, BOB()).games, 0);
+}
+
+
+/// A world whose second channel, `rolled_channel`, opens rated games whose
+/// referee rolls the dice, under the same ratings contract.
+fn rolled_setup() -> (IRolledChannelDispatcher, IRatingsDispatcher, IRatedChannelDispatcher) {
+    let (game, ratings, world) = setup();
+    let (address, _) = world.dns(@"rolled_channel").unwrap();
+    let rolled = IRolledChannelDispatcher { contract_address: address };
+    rolled.set_ratings(ratings.contract_address);
+    caller(OWNER());
+    ratings.set_channel(address, CHANNEL_ACTIVE);
+    caller(CAROL());
+    (rolled, ratings, game)
+}
+
+/// Alice's and Bob's rated blitz game on `rolled`, its clock carrying `tip`.
+fn rolled_terms(
+    rolled: IRolledChannelDispatcher,
+    ratings: IRatingsDispatcher,
+    game: IRatedChannelDispatcher,
+    tip: felt252,
+) -> (Terms<Config>, Ticket) {
+    let ticket = Ticket { channel: rolled.contract_address, ..ticket_for(game, BLITZ) };
+    let clock = TimeControl { rng_tip: tip, ..blitz_clock().unwrap() };
+    let terms = Terms {
+        channel: rolled.contract_address.into(),
+        clock: Option::Some(clock),
+        ..terms_for(game, keys(), TARGET, ticket_digest(ratings, @ticket)),
+    };
+    (terms, ticket)
+}
+
+fn open_rolled(
+    rolled: IRolledChannelDispatcher,
+    ratings: IRatingsDispatcher,
+    terms: Terms<Config>,
+    ticket: Ticket,
+) {
+    let tip = terms.clock.unwrap().rng_tip;
+    let referee_signature = if tip == 0 {
+        Signature { r: 0, s: 0 }
+    } else {
+        sign(
+            tip_hash::<RatedCounterRules>(terms.chain_id, terms.channel, terms.game_id, tip),
+            PK_REF,
+        )
+    };
+    let signatures = signed_by_both(@terms);
+    caller(CAROL());
+    rolled
+        .open_rated_game(
+            terms,
+            signatures,
+            referee_signature,
+            ticket,
+            sign(ticket_digest(ratings, @ticket), PK_MM),
+        );
+}
+
+#[test]
+fn a_game_rolled_by_its_referee_opens_rated_with_its_tip() {
+    let (rolled, ratings, game) = rolled_setup();
+    let (terms, ticket) = rolled_terms(rolled, ratings, game, chain_value('rolls', RNG_LEN));
+    open_rolled(rolled, ratings, terms, ticket);
+    let digest = ticket_digest(ratings, @ticket);
+    assert_eq!(ratings.ticket_status(digest), (ACCEPTED, terms.game_id));
+}
+
+#[test]
+#[should_panic(expected: ('Rated game needs referee rolls', 'ENTRYPOINT_FAILED'))]
+fn a_game_rolled_by_its_referee_needs_its_tip() {
+    let (rolled, ratings, game) = rolled_setup();
+    let (terms, ticket) = rolled_terms(rolled, ratings, game, 0);
+    open_rolled(rolled, ratings, terms, ticket);
 }

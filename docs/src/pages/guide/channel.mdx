@@ -65,6 +65,10 @@ default = "counter"
 "counter" = ["counter-channel"]
 ```
 
+A game that grants writers per model instead lists `<namespace>-Settlement`
+too, and `<namespace>-RatedGame` with rated play: the binding writes
+`Settlement` in the call that settles a game, which otherwise fails there.
+
 ## Rated or not
 
 Every game implements `arbiter::RatedConfig` for its config. A rated game's
