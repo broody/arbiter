@@ -104,6 +104,17 @@ pub struct Action {
 }
 ```
 
+Every game also implements `arbiter::RatedConfig` for its config, which says
+whether a game is rated. The counter has no rated play, so its configs carry
+no ticket:
+
+```cairo
+pub impl Unrated of arbiter::RatedConfig<Config> {}
+```
+
+See [Rated or not](/guide/channel#rated-or-not) and
+[Add rated play](/guide/ratings).
+
 ### Identity: `TAG`, `RULES_VERSION`, `SEATS`, `Time`
 
 ```cairo

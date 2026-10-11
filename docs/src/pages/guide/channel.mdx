@@ -21,6 +21,7 @@ build-external-contracts = [
     "arbiter_dojo::models::m_ChannelState",
     "arbiter_dojo::models::m_ChannelRng",       # only if games take randomness from their referee
     "arbiter_dojo::models::m_ProverAllowed",
+    "arbiter_dojo::models::m_Settlement",
     "arbiter_dojo::models::e_ChannelUpdated",
 ]
 
@@ -49,6 +50,11 @@ referee's randomness has a third, `ChannelRng`, with the referee's
 hash-chain tip; no other game reads or writes it. `get_channel` returns them
 as one `ChannelGame`.
 
+The call that settles a game also writes `Settlement`: when it settled and by
+which route (a transcript, an onchain resignation or a timeout claim). Every
+game registers it. A game with rated play also registers `m_RatedGame`, which
+holds each rated game's ticket digest (see [Add rated play](/guide/ratings)).
+
 Give the system write access to the namespace in `dojo_<profile>.toml`:
 
 ```toml
@@ -58,6 +64,22 @@ default = "counter"
 [writers]
 "counter" = ["counter-channel"]
 ```
+
+## Rated or not
+
+Every game implements `arbiter::RatedConfig` for its config. A rated game's
+config carries its pairing ticket's digest, and `open_game` refuses one that
+does (`'Rated game needs its ticket'`): it opens only through
+`open_rated_game`, so a seat can't open rated terms as an unrated game. A game
+without rated play writes one line beside its `GameRules`, as the counter does
+([`examples/counter/src/lib.cairo`](https://github.com/broody/arbiter/blob/main/examples/counter/src/lib.cairo)):
+
+```cairo
+/// The counter has no rated play: its configs carry no ticket.
+pub impl Unrated of arbiter::RatedConfig<Config> {}
+```
+
+To add rated play, see [Add rated play](/guide/ratings).
 
 ## The system
 
@@ -162,12 +184,17 @@ A game whose `Witness` isn't `()` adds a `witness` argument to `submit_history`,
 | `allow_prover` | A namespace owner | Allowlists or revokes a proof adapter class |
 | `terms`, `snapshot`, `get_channel` | Anyone (views) | Read the game: its terms; what the adapter proves from (terms, epoch, and the hash and block of the anchor and of the candidate); the whole channel, as a `ChannelGame` |
 
+A game with rated play adds `open_rated_game` (and `open_rated_game_delegable`)
+and `rate`, from `arbiter_dojo::rated`: see [Add rated play](/guide/ratings).
+
 Every submission that changes the channel names the `epoch` it expects. The
 epoch increments whenever the anchor changes, so a stale submission fails with
 `'Stale channel epoch'` instead of landing on a newer state.
 
 ## What `open_game` checks
 
+- The config carries no ticket (`'Rated game needs its ticket'`): rated
+  games open through `open_rated_game`.
 - The terms name this chain (`'Wrong chain'`) and this system (`'Wrong
   channel'`), and a game id that no game has opened (`'Game already open'`)
   and that is the seats': `gameIdOf(players, keys)`, a hash of the wallets and
@@ -246,7 +273,8 @@ From JS, read a game with `getChannel` (the decoded `ChannelGame`), and its
 terms with `decodeTerms` over the `terms` view (see
 [@arbiter/sdk/proving](/reference/proving)). Rewards read
 `arbiter_dojo::channel::result(world, game_id)`, which is `Some(outcome)` once
-the game is `SETTLED`.
+the game is `SETTLED`, and the `Settlement` model says when and how it
+settled.
 
 :::warning
 Check the outcome's `reason` before its `winner`. A void game settles with

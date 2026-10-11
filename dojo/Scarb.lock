@@ -30,8 +30,30 @@ name = "arbiter_dojo"
 version = "0.1.0"
 dependencies = [
  "arbiter",
+ "arbiter_ratings",
  "dojo",
  "dojo_cairo_macros",
+]
+
+[[package]]
+name = "arbiter_rated_dojo"
+version = "0.1.0"
+dependencies = [
+ "arbiter",
+ "arbiter_counter",
+ "arbiter_dojo",
+ "arbiter_ratings",
+ "arbiter_testing",
+ "dojo",
+ "dojo_cairo_macros",
+ "dojo_cairo_test",
+]
+
+[[package]]
+name = "arbiter_ratings"
+version = "0.1.0"
+dependencies = [
+ "arbiter",
 ]
 
 [[package]]

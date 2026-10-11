@@ -115,6 +115,17 @@ keys. It can delay or refuse a proof but can't forge one: Starknet verifies the
 proof, and the adapter checks that it proves exactly the expected transition.
 `submit_history` is always there as a fallback.
 
+## Ratings (rated games only)
+
+A rated game adds the game's ratings contract and its owner, a matchmaker key
+and the referee's clock to what a rating rests on. None of them can change a
+game's result: the channel settles it as any other, and the ratings contract
+rates the result the channel reports, which `arbiter_dojo::rated::rate` reads
+from the channel's own state. The owner also allowlists the channels. The owner sets policy and the rules, behind a
+48-hour timelock once sealed; the matchmaker decides who plays whom and from
+which starting band; the referee's first stamp dates the game. See
+[Ratings](/concepts/ratings#trust-model).
+
 ## Privacy
 
 Transcripts are public by design. The keeper serves them to anyone who asks,

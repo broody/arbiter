@@ -188,3 +188,7 @@ The seat is never part of the step. The state says whose turn it is, so only
 - **A keeper** stores transcripts so players can refresh or switch devices,
   forwards steps between seats, answers disputes for offline players and settles
   finished games. See [Keeper](/infra/keeper).
+- **Ratings.** A game can rate its 2-seat games onchain, in its own ratings
+  contract. Its matchmaker signs a ticket for each rated game, the ticket's
+  digest goes in the terms both wallets sign, and once the game settles anyone
+  reports it for rating. See [Ratings](/concepts/ratings).

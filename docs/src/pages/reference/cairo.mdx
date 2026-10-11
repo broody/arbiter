@@ -12,12 +12,13 @@ arbiter = { path = "../../core" }
 | Module | Contents |
 | --- | --- |
 | `arbiter::rules` | `GameRules` |
+| `arbiter::rated` | `RatedConfig`, `config_hash`, `is_rated_config`: rated or not, in the signed config |
 | `arbiter::types` | Data types and seat, outcome and reason constants |
 | `arbiter::protocol` | Hashes, signature checks, randomness, replay |
 | `arbiter::clocks` | `ClockRules` and the standard time control |
 | `arbiter::channel` | The channel state machine |
 
-The crate root re-exports `GameRules`, every type and constant in `types`, `PROTOCOL_VERSION`, every public function in `protocol`, and `Channel`, `StateRef` and `state_ref` from `channel`. The channel's status constants and transition functions are reached through `arbiter::channel`, and everything in `clocks`, including `MAX_CLOCK_MS`, through `arbiter::clocks`.
+The crate root re-exports `GameRules`, `RatedConfig`, `config_hash` and `is_rated_config`, every type and constant in `types`, `PROTOCOL_VERSION`, every public function in `protocol`, and `Channel`, `StateRef` and `state_ref` from `channel`. The channel's status constants and transition functions are reached through `arbiter::channel`, and everything in `clocks`, including `MAX_CLOCK_MS`, through `arbiter::clocks`.
 
 ## GameRules
 
@@ -61,6 +62,42 @@ What a game implements ([`rules.cairo`](https://github.com/broody/arbiter/blob/m
 | `adjudicate(config: @Config, state: @State) -> (u8, u8)` | `(winner, reason)` for a game stopped at `max_steps`, as `outcome` reports them. |
 
 The protocol enforces part of this contract during replay: `Move::Play` panics with `'Randomness requested'` if `apply` returns a seat, `Move::PlayRandom` panics with `'Unexpected entropy'` if it returns `None` and with `'Invalid reveal seat'` if it names the acting seat or a seat `>= SEATS`, and a result from `outcome` or `adjudicate` panics with `'Invalid winner'` (`winner > SEATS`) or `'Invalid finish reason'` (`reason` outside `1..=127`).
+
+## RatedConfig
+
+Rated or not is part of the terms every seat signs ([`rated.cairo`](https://github.com/broody/arbiter/blob/main/core/src/rated.cairo)): a rated game's config carries its pairing ticket's digest, 0 for an unrated game. Otherwise a seat losing a rated game could open the same signed terms as an unrated one, and its ticket would never be used. Every game implements `RatedConfig` for its config, and `arbiter_dojo`'s `open_game` refuses a nonzero ticket. See [Ratings](/concepts/ratings#rated-or-not-is-in-the-signed-terms).
+
+```cairo
+pub trait RatedConfig<C> {
+    /// The ticket's digest; 0 for an unrated game.
+    fn ticket(self: @C) -> felt252 {
+        0
+    }
+
+    /// The same config with another ticket. Only a game with rated play
+    /// needs it.
+    fn with_ticket(self: @C, ticket: felt252) -> C {
+        core::panic_with_felt252('Not a rated game')
+    }
+}
+```
+
+| Function | Contract | Default |
+| --- | --- | --- |
+| `ticket(self: @C) -> felt252` | The ticket's digest; 0 for an unrated game. | `0` |
+| `with_ticket(self: @C, ticket: felt252) -> C` | The same config with another ticket, and nothing else changed. Only a game with rated play needs it. | Panics `'Not a rated game'` |
+
+A game without rated play keeps both defaults: `impl Unrated of RatedConfig<Config> {}`. A game with rated play adds a ticket field to its config and implements both, as [`dojo/examples/rated`](https://github.com/broody/arbiter/blob/main/dojo/examples/rated/src/lib.cairo) does.
+
+```cairo
+fn config_hash<impl R: GameRules, +RatedConfig<R::Config>>(config: @R::Config) -> felt252;
+fn is_rated_config<C, +RatedConfig<C>, +PartialEq<C>>(config: @C, digest: felt252) -> bool;
+```
+
+| Function | Behavior |
+| --- | --- |
+| `config_hash` | The hash a pairing ticket fixes the config by: Poseidon of `TAG` (the `GameRules` tag), `'ARBITER_CONFIG_V1'` and the config's Serde encoding with its ticket set to 0 (`with_ticket(0)`, called only for a config whose ticket is nonzero). Serde covers every field, so a game can't leave one out. A ticket can't carry the hash of a config that holds its own digest, so the hash leaves the ticket out. |
+| `is_rated_config` | Whether `config` is a rated game's config for ticket `digest`: `digest` is nonzero, `config.ticket()` is `digest`, and `config.with_ticket(0).with_ticket(digest)` equals `config`, so its `with_ticket` changes nothing but the ticket. `arbiter_dojo::rated::open_rated_game` requires it. |
 
 ## Types
 
@@ -184,6 +221,15 @@ A randomness request waiting for `seat` to reveal: a seat, or `REFEREE`.
 ### Signature
 
 A STARK-curve ECDSA signature: `r: felt252`, `s: felt252`. The zero signature (`r = 0`, `s = 0`) means "no signature" wherever the protocol accepts one.
+
+### Approval
+
+How a seat agrees to a game's terms where its channel takes delegated approvals (`arbiter_dojo`'s `open_game_delegable`).
+
+| Variant | Payload | Meaning |
+| --- | --- | --- |
+| `Wallet` | `Span<felt252>` | The wallet's signature over the terms message, as its account checks it. |
+| `Delegated` | `Delegated` | A key the wallet delegated: `key`'s signature over the terms message (`signature`), and the wallet's signature (`delegation`) over the delegation that lets `key` sign for it until `expires_at` (Unix seconds, `delegation_message`). |
 
 ## Protocol functions
 

@@ -1,0 +1,388 @@
+# Add rated play
+
+Ratings are **optional**, and each game opts in. A rated game opens on a pairing ticket your matchmaker signs, and once it settles, its result updates both players' ratings in your game's own ratings contract. This guide adds rated play to a game, step by step. For how ratings work and who is trusted with what, see [Ratings](/concepts/ratings).
+
+The running example is [`dojo/examples/rated`](https://github.com/broody/arbiter/blob/main/dojo/examples/rated/src/lib.cairo): the counter with a ticket in its config, two pools (`'blitz'` and `'rapid'`), its ratings contract, and a channel that opens rated games and reports them. Its tests ([`tests.cairo`](https://github.com/broody/arbiter/blob/main/dojo/examples/rated/src/tests.cairo)) play rated games end to end.
+
+| You write | In the example |
+| --- | --- |
+| A ticket in your config, and `RatedConfig` for it | `Config`, `Rated` |
+| Your `RatingRules` | `CounterRatingRules` |
+| Your ratings contract, from `RatingsComponent` | `CounterRatings` |
+| Channel entrypoints for rated games | `open_rated_game`, `open_rated_game_delegable`, `rate`, `set_ratings` |
+| A matchmaker that signs tickets | Your own service, with `@arbiter/sdk/ratings` |
+
+## Every game: RatedConfig
+
+Every game implements `arbiter::RatedConfig` for its config, rated or not: `arbiter_dojo`'s `open_game` requires it, and refuses a config that carries a ticket. A game without rated play writes one line beside its `GameRules`, as the counter does ([`examples/counter/src/lib.cairo`](https://github.com/broody/arbiter/blob/main/examples/counter/src/lib.cairo)):
+
+```cairo
+/// The counter has no rated play: its configs carry no ticket.
+pub impl Unrated of arbiter::RatedConfig<Config> {}
+```
+
+and registers `m_Settlement` in its world (see [Deploy the channel](/guide/channel#package-setup)). The rest of this guide is for a game with rated play.
+
+:::steps
+
+### Put a ticket in your config
+
+A rated game's config carries the digest of its ticket, 0 for an unrated game. Both wallets sign the terms, config included, so their signatures are their consent to the rating. Add a `ticket` field and implement `RatedConfig` for it:
+
+```cairo
+/// The counter's config, with the ticket of a rated game (0: unrated).
+#[derive(Copy, Drop, Serde, PartialEq, Debug)]
+pub struct Config {
+    pub target: u8,
+    pub ticket: felt252,
+}
+
+pub impl Rated of RatedConfig<Config> {
+    fn ticket(self: @Config) -> felt252 {
+        *self.ticket
+    }
+
+    fn with_ticket(self: @Config, ticket: felt252) -> Config {
+        Config { ticket, ..*self }
+    }
+}
+```
+
+`with_ticket` must change nothing but the ticket: `open_rated_game` checks the round trip and refuses the game otherwise (`'Not the ticket game'`). The config needs `PartialEq` for that check. The ticket can't hold the hash of a config that holds its own digest, so the config hash zeroes the ticket: `config_hash::<MyRules>(@config)`.
+
+Your `GameRules` take this config as before. The example wraps the counter's rules on it (`RatedCounterRules`). Your JS codec encodes the field too: for this config, `encodeConfig: c => [BigInt(c.target), BigInt(c.ticket)]`.
+
+### Write your RatingRules
+
+`RatingRules` is what your game decides about its ratings, compiled into its contract. The example's ([`lib.cairo`](https://github.com/broody/arbiter/blob/main/dojo/examples/rated/src/lib.cairo)) has two pools with the same constants, flat aging with a 30-day half-life, Elo-scale ranks, and bands at 1200, 1500 and 1800:
+
+```cairo
+pub impl CounterRatingRules of RatingRules {
+    const TAG: felt252 = 'RATED_COUNTER';
+    const VERSION: u8 = 1;
+    const REFEREE_RNG: bool = false;
+
+    fn pool(pool: felt252) -> Option<Pool> {
+        if pool != BLITZ && pool != RAPID {
+            return Option::None;
+        }
+        Option::Some(
+            Pool {
+                phi0: 2 * ONE,
+                min_phi: 42949673,
+                mu_min: -34613345405,
+                mu_max: 49447636293,
+                provisional_phi: ONE,
+                settled_games: 10,
+                min_steps: 4,
+                anchor_phi: ONE / 4,
+                anchor_mu_min: -24105722693,
+                anchor_mu_max: 32884882086,
+                max_offset: 400,
+            },
+        )
+    }
+
+    fn start(pool: felt252, band: u8) -> Option<i128> {
+        match band {
+            1 => Option::Some(-7417145753),
+            2 => Option::Some(0),
+            3 => Option::Some(7417145753),
+            _ => Option::None,
+        }
+    }
+
+    fn drift(pool: felt252, mu: i128) -> i128 {
+        drift_of(30 * ONE)
+    }
+
+    fn shown(pool: felt252, mu: i128, offset: i32) -> u16 {
+        elo(mu, offset)
+    }
+}
+```
+
+- `TAG` names your game in every ticket digest and admin op. `VERSION` is stored with each player it updates: bump it when an update would change, and keep the old rules for replays.
+- `REFEREE_RNG` is `true` for a game whose rated games take their randomness from the referee (a game with dice), `false` for one that takes none.
+- Values are Q32.32 (`ONE` is 2^32) logits: μ = (Elo − 1500) / 173.7178. Bands are 1 to 7.
+- Each pool must pass `valid_pool`, or its tickets are refused. Test it, as the ratings' own tests do:
+
+```cairo
+#[test]
+fn every_pool_is_valid() {
+    for pool in array![BLITZ, RAPID] {
+        assert!(valid_pool(@CounterRatingRules::pool(pool).unwrap()));
+    }
+}
+```
+
+Surround's [`GoRatingRules`](https://github.com/broody/surround/blob/main/ratings/src/rules.cairo) is a fuller example: one pool, a drift that depends on rank, and ranks shown as kyu and dan.
+
+### Build your ratings contract
+
+Your ratings contract embeds `RatingsComponent` with your rules in scope. It is a plain Starknet contract, not a Dojo one, so it outlives your Dojo worlds:
+
+```cairo
+/// The counter's ratings contract: the component with its rules.
+#[starknet::contract]
+pub mod CounterRatings {
+    use arbiter_ratings::RatingsComponent;
+    use starknet::ContractAddress;
+    use super::CounterRatingRules;
+
+    component!(path: RatingsComponent, storage: ratings, event: RatingsEvent);
+
+    #[abi(embed_v0)]
+    impl RatingsImpl = RatingsComponent::Ratings<ContractState>;
+    impl RatingsInternal = RatingsComponent::InternalImpl<ContractState>;
+
+    #[storage]
+    struct Storage {
+        #[substorage(v0)]
+        ratings: RatingsComponent::Storage,
+    }
+
+    #[event]
+    #[derive(Drop, starknet::Event)]
+    pub enum Event {
+        #[flat]
+        RatingsEvent: RatingsComponent::Event,
+    }
+
+    #[constructor]
+    fn constructor(ref self: ContractState, owner: ContractAddress) {
+        self.ratings.initializer(owner);
+    }
+}
+```
+
+Keep the events `#[flat]`: the SDK's `decodeEvent` and `fetchRatingEvents` read the first key as the event's selector. Declare the class and deploy one instance for your game, with its owner as the constructor's only argument.
+
+### Wire your channel
+
+Add `arbiter_ratings` to your channel package's dependencies, and register `m_Settlement` and `m_RatedGame` with the rest of arbiter's models, as the example's [`Scarb.toml`](https://github.com/broody/arbiter/blob/main/dojo/examples/rated/Scarb.toml) does:
+
+```toml
+[[target.starknet-contract]]
+sierra = true
+build-external-contracts = [
+    "dojo::world::world_contract::world",
+    "arbiter_dojo::models::m_ChannelTerms",
+    "arbiter_dojo::models::m_ChannelState",
+    "arbiter_dojo::models::m_ChannelRng",
+    "arbiter_dojo::models::m_ProverAllowed",
+    "arbiter_dojo::models::m_Settlement",
+    "arbiter_dojo::models::m_RatedGame",
+    "arbiter_dojo::models::e_ChannelUpdated",
+]
+
+[dependencies]
+arbiter = { git = "https://github.com/broody/arbiter.git", rev = "<commit>" }
+arbiter_dojo = { git = "https://github.com/broody/arbiter.git", rev = "<commit>" }
+arbiter_ratings = { git = "https://github.com/broody/arbiter.git", rev = "<commit>" }
+```
+
+Then add the rated entrypoints, one call each into `arbiter_dojo::rated`, generic over your `GameRules` and your `RatingRules`. The helpers take the ratings contract's address; the example keeps it in the channel's storage, set once by the namespace owner:
+
+```cairo
+fn open_rated_game(
+    ref self: ContractState,
+    terms: Terms<Config>,
+    signatures: Span<Span<felt252>>,
+    ticket: Ticket,
+    signature: Signature,
+) {
+    let mut world = self.world_default();
+    rated::open_rated_game::<
+        RatedCounterRules, CounterRatingRules,
+    >(
+        ref world,
+        self.ratings.read(),
+        terms,
+        signatures,
+        Signature { r: 0, s: 0 },
+        ticket,
+        signature,
+    );
+}
+
+fn rate(
+    ref self: ContractState, game_id: felt252, ticket: Ticket,
+) -> Option<(GameResult, Player, Player)> {
+    let world = self.world_default();
+    rated::rate::<CounterRatingRules>(@world, self.ratings.read(), game_id, ticket)
+}
+
+fn set_ratings(ref self: ContractState, ratings: ContractAddress) {
+    let world = self.world_default();
+    assert(
+        world.dispatcher.is_owner(world.namespace_hash, get_caller_address()),
+        'Only namespace owner',
+    );
+    assert(self.ratings.read().is_zero(), 'Ratings already set');
+    assert(ratings.is_non_zero(), 'Zero ratings');
+    self.ratings.write(ratings);
+}
+```
+
+- `open_rated_game` passes a zero referee signature because the counter takes no randomness. A game with `REFEREE_RNG` passes the referee's signature over its tip, as `open_game` takes it ([Add a clock](/guide/clocks#take-randomness-from-the-referee)).
+- `open_rated_game_delegable` is the same with `open_game_delegable`'s approvals and the longest delegation your channel takes.
+- Keep `open_game` for unrated games: it refuses a config with a ticket (`'Rated game needs its ticket'`).
+- `rate` returns the reported result and both seats' ratings when the contract rated the game. Surround's channel ([`src/systems/channel.cairo`](https://github.com/broody/surround/blob/main/src/systems/channel.cairo)) mirrors them as a Dojo event of its own (`PlayerRank`).
+
+See [Rated games](/reference/dojo#rated-games) for what each helper checks.
+
+### Configure the policy
+
+The ratings contract's owner allows what rated games may use. The example's test setup points its channel at the ratings contract, then allows the channel, a matchmaker key, a referee key, a prover (the tests name the channel itself), a response window, and per pool a clock preset, a config and three starting bands:
+
+```cairo
+game.set_ratings(address);
+game.allow_prover(channel::TEST_CLASS_HASH.try_into().unwrap(), true);
+caller(OWNER());
+ratings.set_channel(contract_address, CHANNEL_ACTIVE);
+ratings.set_matchmaker(public_key(PK_MM));
+ratings.set_referee(public_key(PK_REF));
+ratings.set_prover(contract_address, true);
+ratings.set_response_window(60, 7200);
+for pool in array![BLITZ, RAPID] {
+    ratings.set_clock_preset(pool, settings(), true);
+    ratings.set_config(pool, config_of(TARGET), true);
+    ratings.set_start_bands(pool, 0b1110);
+}
+ratings.set_config(BLITZ, config_of(BLITZ_ONLY), true);
+```
+
+- A clock preset is the serialized settings (`TimeControl.settings`), e.g. `encode(@Standard { ... })` from `arbiter::clocks`. The contract keys it by their Poseidon hash.
+- A config is its hash with the ticket zeroed: the example's `config_of(target)` is `config_hash::<RatedCounterRules>(@Config { target, ticket: 0 })`.
+- `set_start_bands` takes a mask, bit b for band b: `0b1110` allows bands 1, 2 and 3. No band is allowed until it is set, so no new player can be paired before.
+- Optionally, set a rank offset per pool (`set_rank_offset`) and pin anchors (`set_anchor`).
+
+Once the policy is right, call `seal()`. It is irreversible: from then on, a change that loosens policy or trusts more, `upgrade` included, waits 48 hours after the owner queues it, and expires 7 days after. Queue the change's hash, then make the same call:
+
+```cairo
+let op = admin_op::<CounterRatingRules>('set_config', array![RAPID, config].span());
+ratings.queue(op);
+// 48 hours to 7 days later:
+ratings.set_config(RAPID, config, true);
+```
+
+The [administration table](/reference/ratings#administration) lists each entrypoint's arguments for `admin_op`. Tightening, such as revoking a key, applies at once.
+
+### Issue tickets from your matchmaker
+
+Your matchmaker pairs two players and signs a ticket for their game. The ticket fixes the terms by hashes: the config's, with its ticket zeroed, and the clock settings'.
+
+```js
+import { standardTime } from '@arbiter/sdk'
+import { QUEUE, clockHash, configHash, signTicket } from '@arbiter/sdk/ratings'
+
+const config = { target: 20, ticket: 0 }
+const settings = { turn_ms: 30000, bank_ms: 60000, increment_ms: 2000, byoyomi: null }
+const now = Math.floor(Date.now() / 1000)
+const ticket = {
+  chain_id: CHAIN_ID,
+  channel: CHANNEL,
+  player_0: alice, player_1: bob,                  // the seats, in the terms' order
+  pool: 'blitz',
+  config: configHash(game.tag, game.encodeConfig(config)),
+  referee: REFEREE_PUBLIC_KEY,
+  clock: clockHash(standardTime.encodeSettings(settings)),
+  prover: ADAPTER_ADDRESS,
+  response_seconds: 3600,
+  source: QUEUE,
+  band_0: 2, band_1: 2,                            // starting bands; 0 for an anchor
+  matchmaker: MATCHMAKER_PUBLIC_KEY,
+  issued_at: now, expires_at: now + 300,           // at most 900 s apart
+  nonce,
+}
+const signature = signTicket(ticket, 'RATED_COUNTER', RATINGS_ADDRESS, MATCHMAKER_PRIVATE_KEY)
+```
+
+`signTicket` takes your `RatingRules::TAG` and the ratings contract's address; `configHash` takes your `GameRules::TAG`, the codec's `tag`. The game must start, at its referee's first stamp, within the ticket's window.
+
+A band counts only for a player never rated in the pool (`getPlayerRating(...).phi` is `0n`), and must then be one the pool allows. A rated player's ticket still names a band your rules have.
+
+Send each player the ticket, its signature, the config and the clock settings.
+
+### Check the ticket and sign the terms
+
+Each client checks the terms against the ticket's hashes before its wallet signs them, then puts the ticket's digest in the config:
+
+```js
+import { publicKey, standardTime, verify } from '@arbiter/sdk'
+import { clockHash, configHash, ticketDigest } from '@arbiter/sdk/ratings'
+
+const digest = ticketDigest(ticket, 'RATED_COUNTER', RATINGS_ADDRESS)
+if (!verify(digest, signature, MATCHMAKER_PUBLIC_KEY)) throw Error('Not the matchmaker\'s ticket')
+if (configHash(game.tag, game.encodeConfig({ ...config, ticket: 0 })) !== BigInt(ticket.config)) throw Error('Not the ticket config')
+if (clockHash(standardTime.encodeSettings(settings)) !== BigInt(ticket.clock)) throw Error('Not the ticket clock')
+
+const terms = {
+  ...untimedTerms,                                  // chain, channel, game id, keys, tips: see Build the client
+  players: [ticket.player_0, ticket.player_1],
+  prover: ticket.prover,
+  response_seconds: ticket.response_seconds,
+  clock: { referee: ticket.referee, settings },     // a rated game is timed
+  config: { ...config, ticket: digest },            // the wallets' consent to the rating
+}
+```
+
+Then each wallet signs `termsTypedData(game, terms)` and the game is played as any timed game: see [Build the client](/guide/client#2-agree-on-the-terms) and [Add a clock](/guide/clocks). When you register it with a keeper, add what your game module's `openCall` hook needs to open it rated, such as the ticket and its signature, as `extras`:
+
+```js
+await keeper.register(session, { authorizations: signatures, extras: { ticket, signature } })
+```
+
+### Open the rated game
+
+A rated game opens onchain like any other, when it first needs the chain, but through `open_rated_game` with its ticket. From JS, build the call for the example's entrypoint:
+
+```js
+import { encodeSignature, encodeTerms } from '@arbiter/sdk'
+import { contractCall } from '@arbiter/sdk/proving'
+import { ticketFields } from '@arbiter/sdk/ratings'
+
+const open = contractCall(terms.channel, 'open_rated_game', [
+  ...encodeTerms(game, terms),
+  BigInt(signatures.length), ...signatures.flatMap(s => [BigInt(s.length), ...s.map(BigInt)]),
+  ...ticketFields(ticket),
+  ...encodeSignature(signature),
+])
+```
+
+Send it first, in the transaction that settles the game or opens a dispute. A keeper does this through its game module's `openCall` hook, from the `extras` the game registered with: see [Add hooks](/infra/keeper#add-hooks-optional).
+
+`open_rated_game` refuses terms that aren't the ticket's (`'Not the ticket config'`, `'Not the ticket players'`, ...), and the ratings contract refuses a ticket its policy doesn't allow (`'Config not allowed'`, `'Ticket used'`, ...). Either reverts the whole transaction.
+
+### Rate settled games
+
+Once the game settles, anyone reports it with the channel's `rate(game_id, ticket)`. The ticket comes from the matchmaker, or from the ratings contract's `TicketUsed` event:
+
+```js
+import { getPlayerRating, rateCall } from '@arbiter/sdk/ratings'
+
+await account.execute([rateCall(CHANNEL, gameId, ticket)])
+const alice = await getPlayerRating(provider, RATINGS_ADDRESS, 'blitz', ticket.player_0)
+// alice.shown, alice.provisional, alice.games …
+```
+
+`rate` does nothing, and doesn't revert, for a game that isn't settled or isn't rated, so it can go in the transaction that settles the game, after the settlement. A keeper adds it to the transaction that settles the game through its game module's `afterSettle` hook. Each ticket rates once: the contract either updates both seats (`RatingUpdated` twice) or voids the game (`GameVoided`), for example a game shorter than the pool's `min_steps`.
+
+### Audit with a replay
+
+Every rating can be rebuilt from the contract's events. `verifyRatings` replays them under your rules, a JS object that mirrors your `RatingRules`:
+
+```js
+import { fetchRatingEvents, ratingsRules, verifyRatings } from '@arbiter/sdk/ratings'
+
+const onchain = await ratingsRules(provider, RATINGS_ADDRESS)   // { tag, version, refereeRng }, to check MY_RULES against
+const events = await fetchRatingEvents(provider, RATINGS_ADDRESS, DEPLOYMENT_BLOCK)
+const { ok, errors, newcomers, anchors } = verifyRatings(events, MY_RULES)
+```
+
+After an upgrade that bumped `VERSION`, pass the rules of every version, keyed by version: `{ 1: RULES_V1, 2: RULES_V2 }`.
+
+`errors` names each game whose events don't match the update or the chain of states. `newcomers` and `anchors` tell you whether the pool's offset or an anchor's pin needs moving. See [Replay](/reference/ratings-sdk#replay).
+
+:::

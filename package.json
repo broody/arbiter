@@ -1,12 +1,14 @@
 {
   "name": "@arbiter/sdk",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "description": "Signing, transcripts, sessions, channel codecs and native proving for arbiter games.",
   "exports": {
     ".": "./sdk/src/index.mjs",
     "./proving": "./sdk/src/proving.mjs",
+    "./ratings": "./sdk/src/ratings.mjs",
     "./store": "./sdk/src/store.mjs",
     "./store/file": "./sdk/src/store-file.mjs",
     "./keeper": "./sdk/src/keeper.mjs"

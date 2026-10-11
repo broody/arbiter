@@ -26,6 +26,7 @@ tactics game).
 | A Dojo system with one line per channel entrypoint | Optional clocks, kept by a referee, which can also supply the randomness |
 | A proof adapter of about 40 lines, if you settle with proofs | The channel: disputes, forced play, timeouts, resignation, settlement |
 | Your game's UI | A session store with a signing guard, and a keeper that archives moves and answers disputes |
+| Optionally, your rating rules (`RatingRules`) and a matchmaker | Onchain ratings for rated games: pools, matchmaker-signed tickets, AI anchors and a timelocked admin |
 
 The [counter example](https://github.com/broody/arbiter/blob/main/examples/counter/src/lib.cairo)
 is a complete game, with dice, in about 100 lines of Cairo.
@@ -35,10 +36,11 @@ is a complete game, with dice, in about 100 lines of Cairo.
 | Package | Path | What it does |
 | --- | --- | --- |
 | `arbiter` | `core/` | The protocol and the channel's dispute logic as pure Cairo functions. No Dojo. Builds on Cairo 2.13 and 2.18 |
-| `arbiter_dojo` | `dojo/arbiter_dojo/` | Dojo models, the `ChannelUpdated` event, and one helper per channel entrypoint |
+| `arbiter_dojo` | `dojo/arbiter_dojo/` | Dojo models, the `ChannelUpdated` event, and one helper per channel entrypoint, plus rated games (`open_rated_game`, `rate`) |
+| `arbiter_ratings` | `ratings/` | Onchain ratings for 2-seat games: the rating update, pairing tickets, and `RatingsComponent`, which each game builds its own ratings contract from. Cairo 2.13 |
 | `arbiter_adapter` | `adapter/arbiter_adapter/` | The proof adapter: the virtual replay that gets proved, and `settle`. Cairo 2.18 |
 | `arbiter_testing` | `testing/` | A test-only Cairo signer |
-| `@arbiter/sdk` | `sdk/` | The JS protocol: `Session`, hashing, signing, replay, clocks and codecs. Subpaths `/proving`, `/store` and `/keeper` |
+| `@arbiter/sdk` | `sdk/` | The JS protocol: `Session`, hashing, signing, replay, clocks and codecs. Subpaths `/proving`, `/store`, `/keeper` and `/ratings` |
 | keeper | `keeper/` | A service that archives and forwards steps, referees clocks, gives randomness, answers disputes and settles |
 | prover | `prover/` | A self-hosted native prover behind a gateway that proves only arbiter settlements |
 
@@ -46,7 +48,7 @@ is a complete game, with dice, in about 100 lines of Cairo.
 
 | | |
 | --- | --- |
-| Built and tested | Protocol (v6), optional clocks, randomness from the referee, games opened by their players' signatures, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS SDK, session store, keeper, counter example |
+| Built and tested | Protocol (v6), optional clocks, randomness from the referee, games opened by their players' signatures, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS SDK, session store, keeper, onchain ratings, counter example (also as a rated game) |
 | Proven on Sepolia | Surround settles full games with one native proof through `arbiter_adapter` |
 | Tested end to end on Katana | Games opened on wallet signatures, the keeper answering a dispute, opening and settling finished games, refereeing a timed game, and giving a game its randomness |
 | Planned | More than 2 seats (protocol v7, [designed](https://github.com/broody/arbiter/blob/main/DESIGN.md#more-than-2-seats-planned)) |

@@ -32,6 +32,9 @@ pub struct Action {
     pub amount: u8,
 }
 
+/// The counter has no rated play: its configs carry no ticket.
+pub impl Unrated of arbiter::RatedConfig<Config> {}
+
 pub impl CounterRules of GameRules {
     type Config = Config;
     type State = Counter;
@@ -112,5 +115,7 @@ mod clock_tests;
 mod fixtures;
 
 pub mod hourglass;
+#[cfg(test)]
+mod rated_tests;
 #[cfg(test)]
 mod tests;

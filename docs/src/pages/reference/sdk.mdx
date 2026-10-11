@@ -8,6 +8,8 @@ import { Session, play } from '@arbiter/sdk'
 
 Source: [`sdk/src/index.mjs`](https://github.com/broody/arbiter/blob/main/sdk/src/index.mjs). Every hash matches [`core/src/protocol.cairo`](https://github.com/broody/arbiter/blob/main/core/src/protocol.cairo) byte for byte; the counter example's fixtures test that.
 
+Subpaths cover the rest: [`@arbiter/sdk/proving`](/reference/proving) for proofs and channel calls, [`@arbiter/sdk/store`](/reference/store) for durable sessions, [`@arbiter/sdk/keeper`](/reference/keeper-client) for a keeper's API, and [`@arbiter/sdk/ratings`](/reference/ratings-sdk) for ratings: the rating update, pairing tickets and the replay of a ratings contract's events.
+
 ## Values
 
 - Felts are `BigInt`s. Where the SDK checks a felt (`felt`), it accepts anything `BigInt()` accepts and throws `Invalid felt: ${value}` outside the field.

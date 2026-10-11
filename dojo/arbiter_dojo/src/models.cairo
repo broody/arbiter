@@ -130,6 +130,39 @@ pub struct ProverAllowed {
     pub allowed: bool,
 }
 
+/// `Settlement.via` values: how a game settled. A transcript (a replay, a
+/// proof, a dispute's resolution, forced play, a roll or a void) holds every
+/// step; an onchain resignation or abandonment may sit on a stale anchor.
+pub const VIA_TRANSCRIPT: u8 = 1;
+pub const VIA_RESIGN: u8 = 2;
+pub const VIA_TIMEOUT_CLAIM: u8 = 3;
+
+/// When and how a game settled: the block timestamp of the transaction that
+/// settled it, and which kind of transaction it was. The binding writes it
+/// once, from the call that leaves the game settled. Rating reads `via`, and a
+/// game may date what it mints by it.
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct Settlement {
+    #[key]
+    pub game_id: felt252,
+    pub timestamp: u64,
+    pub via: u8,
+}
+
+/// A rated game, opened on a matchmaker's signed ticket
+/// (`rated::open_rated_game`) whose digest both wallets signed in the game's
+/// config. The game's ratings contract holds the ticket under its digest (its
+/// `TicketUsed` event carries the ticket) and rates the game once it settles.
+#[derive(Copy, Drop, Serde, Debug, PartialEq)]
+#[dojo::model]
+pub struct RatedGame {
+    #[key]
+    pub game_id: felt252,
+    /// The ticket's digest.
+    pub ticket: felt252,
+}
+
 #[derive(Copy, Drop, Serde)]
 #[dojo::event]
 pub struct ChannelUpdated {

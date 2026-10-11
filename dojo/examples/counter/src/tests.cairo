@@ -9,8 +9,8 @@ use arbiter::{
 use arbiter_counter::{ADD, Action, Config, Counter, CounterRules, GAMBLE};
 use arbiter_dojo::channel::read;
 use arbiter_dojo::models::{
-    ChannelGame, ChannelRng, e_ChannelUpdated, m_ChannelRng, m_ChannelState, m_ChannelTerms,
-    m_ProverAllowed,
+    ChannelGame, ChannelRng, Settlement, VIA_RESIGN, VIA_TIMEOUT_CLAIM, VIA_TRANSCRIPT,
+    e_ChannelUpdated, m_ChannelRng, m_ChannelState, m_ChannelTerms, m_ProverAllowed, m_Settlement,
 };
 use arbiter_testing::{chain_value, public_key, sign};
 use core::hash::HashStateTrait;
@@ -99,6 +99,7 @@ fn setup() -> (ICounterChannelDispatcher, WorldStorage) {
             TestResource::Model(m_ChannelState::TEST_CLASS_HASH),
             TestResource::Model(m_ChannelRng::TEST_CLASS_HASH),
             TestResource::Model(m_ProverAllowed::TEST_CLASS_HASH),
+            TestResource::Model(m_Settlement::TEST_CLASS_HASH),
             TestResource::Event(e_ChannelUpdated::TEST_CLASS_HASH),
             TestResource::Contract(channel::TEST_CLASS_HASH),
         ]
@@ -582,13 +583,18 @@ fn forced_play_then_timeout() {
     game.force(id, 1, opening(@terms), array![add(3)].span());
     let channel = stored(@world, id);
     assert_eq!(channel.anchor.due, 1);
-    set_block_timestamp(channel.deadline);
+    let deadline = channel.deadline;
+    set_block_timestamp(deadline);
     game.claim_timeout(id, 2);
     let channel = stored(@world, id);
     assert_eq!(channel.status, SETTLED);
     assert_eq!(channel.result.winner, 1);
     // The chain judged it: no referee flagged Bob.
     assert_eq!(channel.result.reason, REASON_ABANDON);
+    // The settlement records an onchain abandonment, which rating treats as a
+    // forfeit.
+    let settlement: Settlement = world.read_model(id);
+    assert_eq!((settlement.timestamp, settlement.via), (deadline, VIA_TIMEOUT_CLAIM));
 }
 
 #[test]
@@ -1126,6 +1132,9 @@ fn a_pause_ends_void_after_three_days() {
     let channel = stored(@world, id);
     assert_eq!((channel.status, channel.result.reason), (SETTLED, REASON_VOID));
     assert_eq!(channel.result.winner, 0);
+    // A void settles too, on the transcript route.
+    let settlement: Settlement = world.read_model(id);
+    assert_eq!(settlement.via, VIA_TRANSCRIPT);
 }
 
 #[test]
@@ -1189,4 +1198,39 @@ fn the_referee_tip_stays_with_the_game_through_forced_play() {
     set_block_timestamp(stored(@world, id).deadline);
     game.void(id, 2, no_approvals());
     assert_eq!(stored(@world, id).referee_tip, tip);
+}
+
+#[test]
+fn a_resignation_records_its_settlement() {
+    let (game, world, id) = started();
+    set_block_timestamp(NOW);
+    caller(ALICE());
+    game.resign(id);
+    let settlement: Settlement = world.read_model(id);
+    assert_eq!((settlement.timestamp, settlement.via), (NOW, VIA_RESIGN));
+    assert_eq!(stored(@world, id).result.winner, 2);
+}
+
+#[test]
+fn a_transcript_records_its_settlement() {
+    let (game, world, id) = started_with(blitz());
+    let terms = game.terms(id);
+    let start = opening(@terms);
+    let (batch, end) = stamp_steps(@terms, start, full_game(), blitz_stamps());
+    let context = context_hash::<CounterRules>(@terms);
+    let acks = approvals(
+        checkpoint_hash::<CounterRules>(context, 0, state_hash::<CounterRules>(@end)),
+    );
+    set_block_timestamp(NOW);
+    caller(CAROL());
+    game.submit_history(id, 0, start, batch, acks);
+    let settlement: Settlement = world.read_model(id);
+    assert_eq!((settlement.timestamp, settlement.via), (NOW, VIA_TRANSCRIPT));
+}
+
+#[test]
+fn an_unsettled_game_has_no_settlement() {
+    let (_, world, id) = started();
+    let settlement: Settlement = world.read_model(id);
+    assert_eq!((settlement.timestamp, settlement.via), (0, 0));
 }

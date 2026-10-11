@@ -1,0 +1,188 @@
+# @arbiter/sdk/ratings
+
+The JS side of [`arbiter_ratings`](/reference/ratings): the integer rating update on a game's rules, pairing tickets, reads and calls on a ratings contract, and a replay that checks every rating from the contract's events. Matchmakers sign tickets with it, clients check them, and indexers and auditors replay ratings.
+
+```js
+import { signTicket, ticketDigest, configHash, clockHash, rateCall, verifyRatings } from '@arbiter/sdk/ratings'
+```
+
+Source: [`sdk/src/ratings.mjs`](https://github.com/broody/arbiter/blob/main/sdk/src/ratings.mjs). The update mirrors [`ratings/src/math.cairo`](https://github.com/broody/arbiter/blob/main/ratings/src/math.cairo) bit for bit: [`sdk/scripts/gen-rating-vectors.mjs`](https://github.com/broody/arbiter/blob/main/sdk/scripts/gen-rating-vectors.mjs) writes the Cairo tests' vectors from it, ticket digest included. See [Ratings](/concepts/ratings).
+
+## Values
+
+- Ratings and deviations are Q32.32 `BigInt`s (`ONE` is 2^32), in logits on Glicko-2's μ scale. Counts, bands and offsets are numbers.
+- A rating is `{ mu, phi, last }`: μ and φ in Q32.32, φ `0n` for a player never rated, `last` in seconds.
+- Pool ids reach a rules object as felts (`BigInt`). The functions here also take them as short strings, such as `'blitz'`, or as `0x` hex strings, as JSON and RPC give felts (`poolId`).
+- Where Cairo panics (a negative `quot`, an unknown pool), these functions throw.
+
+## Rules
+
+A game's ratings follow its `RatingRules`, which this module takes as a rules object, the mirror of the Cairo impl:
+
+| Name | Type | Mirrors |
+| --- | --- | --- |
+| `tag` | string or felt | `RatingRules::TAG`, e.g. `'SURROUND'`. |
+| `version` | number | `RatingRules::VERSION`. |
+| `refereeRng` | boolean | `RatingRules::REFEREE_RNG`. |
+| `pool` | `(id)` | The pool's constants, or `null` for a pool the game doesn't have. |
+| `start` | `(id, band)` | A new player's μ for a starting band, or `null`. |
+| `drift` | `(id, mu)` | c, the growth of φ per √day idle at μ (Q). |
+| `shown` | `(id, mu, offset)` | The rank shown, a number. |
+
+A pool is `{ phi0, minPhi, muMin, muMax, provisionalPhi, settledGames, minSteps, anchorPhi, anchorMuMin, anchorMuMax, maxOffset }`: the Cairo [`Pool`](/reference/ratings#pool)'s fields, with ratings and deviations in Q32.32 `BigInt` and `settledGames`, `minSteps` and `maxOffset` as numbers.
+
+The tests' rules ([`sdk/test/rating-rules.mjs`](https://github.com/broody/arbiter/blob/main/sdk/test/rating-rules.mjs)) mirror the Cairo tests' `TestRules`, a chess-shaped game with two pools:
+
+```js
+import { tag } from '@arbiter/sdk'
+import { ONE, driftOf, elo } from '@arbiter/sdk/ratings'
+
+export const BLITZ = tag('blitz'), RAPID = tag('rapid')
+
+export const testPool = () => ({
+  phi0: 2n * ONE, minPhi: 42949673n, muMin: -34613345405n, muMax: 49447636293n, provisionalPhi: ONE,
+  settledGames: 10, minSteps: 4, anchorPhi: ONE / 4n, anchorMuMin: -24105722693n, anchorMuMax: 32884882086n,
+  maxOffset: 400,
+})
+
+const START = { 1: -17306673424n, 2: -7417145753n, 3: 0n, 4: 7417145753n, 5: 14834291506n, 7: 22251437259n }
+
+export const TEST_RULES = {
+  tag: 'TEST',
+  version: 1,
+  refereeRng: false,
+  pool: id => (id === BLITZ || id === RAPID ? testPool() : null),
+  start: (id, band) => START[band] ?? null,
+  drift: id => (id === BLITZ ? driftOf(30n * ONE) : driftOf(60n * ONE)),
+  shown: (id, mu, offset) => elo(mu, offset),
+}
+```
+
+Keep a game's rules object equal to its Cairo impl: ratings computed under different rules don't replay.
+
+## Constants
+
+| Name | Value | What it is |
+| --- | --- | --- |
+| `ONE` | `1n << 32n` | 1.0 in Q32.32. |
+| `C_HALF_LIFE` | `29408509883171471360n` | 1.15·2·ln 2 scaled by 2^64: c for a half-life of h days (Q) is `div(C_HALF_LIFE, h)`. |
+| `ELO_SCALE` | `746112238643n` | 400 / ln 10 in Q: Elo points per logit. |
+| `BIAS_40` | `1n << 39n` | Signed values are stored biased in 40 bits. |
+| `PHI_LIMIT` | `1n << 34n` | Deviations are stored in 34 bits: below 4. |
+| `PAIRING_V1` | `'ARBITER_PAIRING_V1'` | The ticket digest's domain tag, which versions the ticket's layout. |
+| `TICKET_FORMATS` | `{ [PAIRING_V1]: [...] }` | Ticket layouts by domain tag: the Cairo `Ticket`'s fields in Serde order. |
+| `QUEUE`, `TABLE` | `1`, `2` | A ticket's `source`. |
+| `MAX_TICKET_LIFE` | `900` | Longest a ticket may live, in seconds. |
+| `MAX_CLOCK_SKEW` | `60` | How far apart the clocks dating a rated game may be, in seconds. |
+| `VOID_INVALID`, `VOID_MATCHMAKER`, `VOID_REFEREE`, `VOID_SHORT`, `VOID_ANCHOR` | `1` to `5` | `GameVoided.reason` values. |
+
+## The update
+
+The engine of [`math.cairo`](/reference/ratings#the-engine) on a rules object. `rules` is a rules object, `id` a pool id, and `t` a time in seconds.
+
+| Name | Signature | What it does |
+| --- | --- | --- |
+| `update` | `(rules, id, a, b, result, t)` | One rated game (`math::update`). `a` and `b` are seat 0's and seat 1's ratings (a new player's from `start`); `result` is seat 0's score in half points: 2 seat 0 won, 1 a draw, 0 seat 1 won. Returns `{ a, b, p }`: both new ratings and P(seat 0 wins) before the game, Q. |
+| `updateStates` | `(rules, id, a, b, result, t)` | `update` without `p`, as the contract runs it: `{ a, b }`. |
+| `start` | `(rules, id, band)` | A new player's rating for a starting band, φ `0n`, or `null` for a band the pool lacks. |
+| `age` | `(rules, id, player, t)` | A rated player aged to `t` without a game (`math::age`). |
+| `agedPhi` | `(rules, id, player, t)` | φ aged to `t`; φ0 for a player never rated. |
+| `settled` | `(rules, id, player, games, t)` | `games` at least `settledGames` and aged φ at most `provisionalPhi`. |
+| `provisional` | `(pool, phi, wins, losses)` | φ above the pool's `provisionalPhi`, or no win, or no loss. |
+| `anchorRating` | `(rules, id, mu, t)` | An anchor as a game at `t` sees it: `{ mu, phi: anchorPhi, last: t }`. |
+| `validPool` | `(pool)` | `rules::valid_pool`: the pool fits the packed player state. |
+| `poolOf` | `(rules, id)` | The rules' constants for a pool, normalized. Throws `Unknown pool ${id}`. |
+| `poolId` | `(id)` | A pool id as a felt: a `0x` hex string, number or `BigInt` through `felt`, any other string through `tag`. |
+| `elo` | `(mu, offset = 0)` | `rules::elo`: 1500 + 173.7178·μ, rounded half to even, plus `offset`, held to `0..65535`. |
+| `driftOf` | `(halfLife)` | c for a half-life in days (Q). |
+| `div` | `(n, d)` | n / d rounded half to even. Throws `Division by a non-positive number` for d ≤ 0. |
+| `quot` | `(n, d)` | Floor of n / d. Throws `quot takes n >= 0 and d > 0`. |
+| `sqrt` | `(n)` | The nearest integer to √n; `0n` for n ≤ 0. |
+| `expNeg` | `(x)` | e^(−x) for x ≥ 0, Q. |
+| `sigmoid` | `(z)` | 1 / (1 + e^(−z)), Q. |
+
+## Tickets
+
+A ticket is an object with the Cairo [`Ticket`](/reference/ratings#ticket)'s fields: `{ chain_id, channel, player_0, player_1, pool, config, referee, clock, prover, response_seconds, source, band_0, band_1, matchmaker, issued_at, expires_at, nonce }`. `pool` is a short string or a felt, `config` the game's config hash (`configHash`), and `clock` its clock settings' hash (`clockHash`).
+
+| Name | Signature | What it does |
+| --- | --- | --- |
+| `ticketFields` | `(ticket, domain = PAIRING_V1)` | The ticket's Serde encoding, one felt per field, in order. Throws `Unknown ticket format ${domain}`. |
+| `decodeTicket` | `(values, domain = PAIRING_V1)` | `ticketFields`' inverse, e.g. for a `TicketUsed` event's data. `response_seconds`, `source` and the bands come back as numbers, the rest as `BigInt`. Throws `Truncated encoding` or `Trailing encoding` for the wrong length. |
+| `ticketDigest` | `(ticket, rulesTag, ratingsAddress, domain = PAIRING_V1)` | The message the matchmaker signs (`ticket::digest`): `signingHash` over the domain tag, the rules' `tag`, the ratings contract's address and `ticketFields(ticket)`. |
+| `signTicket` | `(ticket, rulesTag, ratingsAddress, privateKey, domain = PAIRING_V1)` | `sign(ticketDigest(...), privateKey)`: the matchmaker's `{ r, s }`. |
+| `configHash` | `(gameTag, configFelts)` | `arbiter::config_hash`: Poseidon over the game's `GameRules` tag, `'ARBITER_CONFIG_V1'` and the config's Serde encoding with its ticket set to 0, such as `game.encodeConfig({ ...config, ticket: 0 })`. |
+| `clockHash` | `(settingsFelts)` | Poseidon over the clock settings' Serde encoding, without a length prefix, as `clock_presets` and `Ticket.clock` key them: `clockHash(standardTime.encodeSettings(settings))`, or the game's `time.encodeSettings`. |
+
+`ticketDigest` takes the ratings rules' tag (`RatingRules::TAG`); `configHash` takes the game's (`GameRules::TAG`, the codec's `tag`). They may be the same short string, as in `dojo/examples/rated`.
+
+## Calls and reads
+
+Reads take a starknet.js provider, the ratings contract's address and an optional `block` (default `'latest'`).
+
+| Name | Signature | What it does |
+| --- | --- | --- |
+| `rateCall` | `(channel, gameId, ticket, entrypoint = 'rate')` | A game channel's `rate(game_id, ticket)` call, which reports a settled rated game with its ticket (from `TicketUsed`, or the matchmaker). Anyone may send it. |
+| `getPlayerRating` | `(provider, ratings, pool, player, block)` | The contract's `player(pool, player)`, decoded with `decodePlayer`. |
+| `getAnchor` | `(provider, ratings, pool, player, block)` | An anchor's pinned μ (Q32.32) in the pool, or `null` if `player` isn't one there. |
+| `ratingsRules` | `(provider, ratings, block)` | The contract's `rules()`: `{ tag, version, refereeRng }`, to check a rules object against. |
+| `getPool` | `(provider, ratings, pool, block)` | A pool's constants as the contract's rules have them, or `null`. |
+| `decodePlayer` | `(values)` | A `Player` from its Serde encoding: `{ mu, phi, last_played, games, wins, losses, draws, shown, provisional, established, settled, peak, has_peak, band, params, anchor }`, with μ and the peak signed. |
+| `decodePool` | `(values)` | A pool from its Serde encoding, as a rules object returns it. |
+
+`rateCall` and the reads build calls with [`contractCall`](/reference/proving#building-blocks).
+
+## Replay
+
+Each rated game emits two `RatingUpdated` events, seat 0's then seat 1's, each with the side's state before and after. `verifyRatings` checks both things the events allow:
+
+- **each game on its own:** from the two pre-game states and the game's ticket (`TicketUsed`), the update this module computes, under the contract's rule for short games, gives the post-game states, `applied` flags, bands and ranks shown that the events report;
+- **the chain:** each side's pre-game state is the player's previous post-game state in the pool, in event order.
+
+Pass events in chain order, not by `played_at`: a game rated late uses the players' states at the time it was rated. Replay from the contract's deployment, since anchors and rank offsets come from its `PolicySet` events.
+
+| Name | Signature | What it does |
+| --- | --- | --- |
+| `fetchRatingEvents` | `(provider, address, fromBlock = 0, options = {})` | Every ratings event at `address` from `fromBlock`, decoded, in chain order, each with its `block` and `tx`. Pages through `getEvents` 1000 at a time. |
+| `decodeEvent` | `({ keys, data }, { ticketFormat = PAIRING_V1 } = {})` | One `RatingUpdated`, `TicketUsed`, `GameVoided` or `PolicySet` event, decoded with its `type`, or `null` for another event. The first key must be the event's own selector, which holds when the contract embeds `RatingsComponent`'s events `#[flat]`. |
+| `verifyRatings` | `(events, rules)` | Checks decoded events in chain order. Returns `{ ok, errors, games, players, newcomers, anchors }`. |
+
+`rules` gives the rules for each version a game carries (`params`), so events written before a rules upgrade still replay. It is one rules object (used for its own `version`), a `{ [params]: rules }` map, a `Map`, or a function of `params`.
+
+| Result | What it holds |
+| --- | --- |
+| `ok` | `errors` is empty. |
+| `errors` | `{ digest, pool, player, what }` for each problem. |
+| `games` | The number of rated games seen. |
+| `players` | Per pool, per player: `{ rating, wins, losses, draws }` replayed. |
+| `newcomers` | Per pool: `{ games, expected, won }`, in points: newcomers' first games against established players (at least `settledGames` games), against the prediction. New players start at fixed band values, so if the pool drifts down, newcomers score less than expected; the gap is what the pool's rank offset should add. |
+| `anchors` | Per pool, per anchor: `{ games, expected, won }` against established players, the signal for re-pinning it. |
+
+The `what` of an error is one of:
+
+| `what` | Meaning |
+| --- | --- |
+| `ticket used twice` | Two `TicketUsed` events with one digest. |
+| `no TicketUsed before its rating` | A rated game whose ticket wasn't seen first. |
+| `rated twice`, `rated after it was voided` | A digest rated more than once, or after `GameVoided`. |
+| `events name another pool than the ticket`, `events name other players than the ticket` | The events don't match their ticket. |
+| `the two sides disagree`, `event fields disagree with the ticket` | The two sides report a different game, or fields other than the ticket's. |
+| `no rules for params …`, `the rules have no such pool` | `rules` can't replay the game. |
+| `anchor …, expected …`, `pre-game state is not the anchor's pin`, `an anchor's state changed` | A side is or isn't an anchor against the `PolicySet` history, or its pin moved. |
+| `pre-game state is not the previous post-game state` | The chain is broken. |
+| `no start for band …` | A new player's band has no start in the rules. |
+| `a short draw was rated, not voided` | A draw shorter than `minSteps` was rated. |
+| `applied …, expected …`, `post-game state differs from the update`, `band …, expected …`, `shown …, expected …` | The game on its own doesn't match the update. |
+| `a rating with no opposite side` | A `RatingUpdated` whose pair never came. |
+
+After a game it can't replay (no `TicketUsed`, no rules for its version or pool, no start for a band), `verifyRatings` takes the game's reported states, so the chain still checks the games after it.
+
+```js
+import { RpcProvider } from 'starknet'
+import { fetchRatingEvents, verifyRatings } from '@arbiter/sdk/ratings'
+
+const provider = new RpcProvider({ nodeUrl: RPC_URL })
+const events = await fetchRatingEvents(provider, RATINGS_ADDRESS, DEPLOYMENT_BLOCK)
+const { ok, errors, players } = verifyRatings(events, MY_RULES)
+if (!ok) console.error(errors)
+```

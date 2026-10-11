@@ -10,6 +10,7 @@
 pub mod channel;
 pub mod clocks;
 pub mod protocol;
+pub mod rated;
 pub mod rules;
 pub mod types;
 pub use channel::{Channel, StateRef, state_ref};
@@ -20,6 +21,7 @@ pub use protocol::{
     referee_resume_hash, reopen_hash, replay, rng_next, roll, seed, signing_hash, stamp_hash,
     state_hash, terms_message, tip_hash, verify, void_hash,
 };
+pub use rated::{RatedConfig, config_hash, is_rated_config};
 pub use rules::GameRules;
 pub use types::{
     Approval, Batch, Clock, DRAW, Delegated, Envelope, Move, NO_SEAT, Outcome, Pending,

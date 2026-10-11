@@ -1,17 +1,17 @@
 # Cairo: arbiter_dojo and arbiter_adapter
 
-`arbiter_dojo` binds the [channel state machine](/reference/cairo#the-channel-module) to a Dojo world: models, an event, and one helper per entrypoint of a game system. `arbiter_adapter` is the logic of a proof adapter, the account contract that proves a replay and hands the result to the channel. This page lists both crates' public items. For a walkthrough, see [Deploy the channel](/guide/channel) and [Add a proof adapter](/guide/adapter).
+`arbiter_dojo` binds the [channel state machine](/reference/cairo#the-channel-module) to a Dojo world: models, an event, one helper per entrypoint of a game system, and helpers for games rated on an [`arbiter_ratings`](/reference/ratings) contract. `arbiter_adapter` is the logic of a proof adapter, the account contract that proves a replay and hands the result to the channel. This page lists both crates' public items. For a walkthrough, see [Deploy the channel](/guide/channel) and [Add a proof adapter](/guide/adapter).
 
 | Crate | Path | Toolchain |
 | --- | --- | --- |
-| `arbiter_dojo` | [`dojo/arbiter_dojo`](https://github.com/broody/arbiter/blob/main/dojo/arbiter_dojo/src/lib.cairo) | Cairo 2.13.1, Dojo 1.8.0. The `dojo/` workspace builds it with the counter example. |
+| `arbiter_dojo` | [`dojo/arbiter_dojo`](https://github.com/broody/arbiter/blob/main/dojo/arbiter_dojo/src/lib.cairo) | Cairo 2.13.1, Dojo 1.8.0. Depends on `arbiter` and `arbiter_ratings`. The `dojo/` workspace builds it with the counter and rated counter examples. |
 | `arbiter_adapter` | [`adapter/arbiter_adapter`](https://github.com/broody/arbiter/blob/main/adapter/arbiter_adapter/src/lib.cairo) | Cairo 2.18.0, for execution-info v3 proof facts. The `adapter/` workspace builds it with the counter example. |
 
 ## arbiter_dojo models
 
 `arbiter_dojo::models` ([`models.cairo`](https://github.com/broody/arbiter/blob/main/dojo/arbiter_dojo/src/models.cairo)). A game registers the models and the event in its namespace through `build-external-contracts` (see [Wrapping the helpers](#wrapping-the-helpers)).
 
-A channel is stored in two models: `ChannelTerms`, written once, when `open_game` opens the game, and `ChannelState`, four felts written on every transition. A game that takes its randomness from its referee has a third, `ChannelRng`. `ChannelGame` is not a model: it is the combined view that `read` builds and a game's `get_channel` returns.
+A channel is stored in two models: `ChannelTerms`, written once, when `open_game` opens the game, and `ChannelState`, four felts written on every transition. A game that takes its randomness from its referee has a third, `ChannelRng`. `ChannelGame` is not a model: it is the combined view that `read` builds and a game's `get_channel` returns. `Settlement` records when and how each game settled, and `RatedGame` a rated game's ticket.
 
 ### ChannelGame
 
@@ -117,6 +117,31 @@ Proof adapter classes the namespace owner accepts. `#[dojo::model]`.
 | `class_hash` | `felt252` (key) | Adapter class hash. |
 | `allowed` | `bool` | Whether channels accept provers of this class. |
 
+### Settlement
+
+When and how a game settled. `#[dojo::model]`, keyed by `game_id`. The binding writes it from the call that leaves the game `SETTLED`, whichever helper that is, `void` and `roll` included: a settled game takes no further call. Rating reads `via`, and a game may date what it mints by `timestamp`. Every game registers it. A game nobody settled reads as zeros.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `game_id` | `felt252` (key) | The game. |
+| `timestamp` | `u64` | The block timestamp of the transaction that settled it. |
+| `via` | `u8` | Which kind of call settled it (below). |
+
+| `via` constant | Value | Settled by |
+| --- | --- | --- |
+| `VIA_TRANSCRIPT` | `1` | A transcript, which holds every step: a replay, a proof, a dispute's resolution, forced play, a roll or a void. |
+| `VIA_RESIGN` | `2` | An onchain resignation (`resign`), which may sit on a stale anchor. |
+| `VIA_TIMEOUT_CLAIM` | `3` | A timeout claim (`claim_timeout`), which may sit on a stale anchor. |
+
+### RatedGame
+
+A rated game, opened on a matchmaker's signed ticket (`rated::open_rated_game`) whose digest both wallets signed in the game's config. `#[dojo::model]`, keyed by `game_id`. Derives `Copy`, `Drop`, `Serde`, `Debug` and `PartialEq`. Only a game with rated play registers it. The game's ratings contract holds the ticket under its digest (its `TicketUsed` event carries the ticket) and rates the game once it settles.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `game_id` | `felt252` (key) | The game. |
+| `ticket` | `felt252` | The ticket's digest; 0 for a game that isn't rated. |
+
 ### Stored types
 
 Storable (`Introspect`, `DojoStore`) mirrors of the core types, with `Into` conversions both ways. `ChannelGame` uses them for its references and result.
@@ -165,7 +190,7 @@ Kinds 1 and 2, once a join and a cancel, are retired: a game opens once, on ever
 
 ## arbiter_dojo helpers
 
-`arbiter_dojo::channel` ([`channel.cairo`](https://github.com/broody/arbiter/blob/main/dojo/arbiter_dojo/src/channel.cairo)). Each helper wraps a transition of `arbiter::channel` with storage, caller authentication, prover checks and signature checks, then saves the channel's state and emits `ChannelUpdated`. Generic helpers take the game's rules, e.g. `open_game::<MyRules>(ref world, ...)`; trait bounds are omitted below.
+`arbiter_dojo::channel` ([`channel.cairo`](https://github.com/broody/arbiter/blob/main/dojo/arbiter_dojo/src/channel.cairo)). Each helper wraps a transition of `arbiter::channel` with storage, caller authentication, prover checks and signature checks, then saves the channel's state, writes `Settlement` if the call settled the game, and emits `ChannelUpdated`. Generic helpers take the game's rules, e.g. `open_game::<MyRules>(ref world, ...)`; trait bounds are omitted below.
 
 "Caller" is `get_caller_address()` inside the game system, so the wallet that called it. "Now" and "block" are the block timestamp and number.
 
@@ -177,6 +202,7 @@ Helpers that read the channel's terms first panic with `'Unknown channel'` for a
 | --- | --- |
 | A player (`seat_of` the caller) | `open_dispute`, `force`, `claim_timeout`, `resign` |
 | Anyone | `open_game`: authenticated by every seat's wallet signature over the terms, and the referee's signature over its tip when the game takes its randomness. `submit_history`, `resolve`, `resume`: authenticated by signatures and the channel's windows, not by the caller. `acknowledge`, `resume_by_referee`: authenticated by the referee's signature. `roll`: authenticated by the referee's hash chain. `void`: authenticated by every seat's signature, or allowed once the pause has run out. |
+| Anyone, for a rated game | `rated::open_rated_game`, `rated::open_rated_game_delegable`: authenticated as `open_game`, and by the matchmaker's signature over the ticket. `rated::rate`: it reads only the channel's state. |
 | The game's prover | `accept_verified` |
 | A namespace owner | `allow_prover` |
 | Read-only | `terms`, `snapshot`, `result`, `read`, `read_state`, `status`, `seat_of` |
@@ -184,26 +210,33 @@ Helpers that read the channel's terms first panic with `'Unknown channel'` for a
 ### Opening a game
 
 ```cairo
-fn open_game<impl R: GameRules>(
+fn open_game<impl R: GameRules, +RatedConfig<R::Config>>(
     ref world: WorldStorage, terms: Terms<R::Config>, signatures: Span<Span<felt252>>,
     referee_signature: Signature,
 );
+fn open_game_delegable<impl R: GameRules, +RatedConfig<R::Config>>(
+    ref world: WorldStorage, terms: Terms<R::Config>, approvals: Span<Approval>,
+    referee_signature: Signature, max_lifetime: u64,
+);
 ```
+
+Both require the game's config to implement [`RatedConfig`](/reference/cairo#ratedconfig): `impl Unrated of RatedConfig<Config> {}` for a game without rated play.
 
 `open_game` opens a game on its seats' signed terms. Anyone may send it, usually in one transaction with the first call that needs the chain: a settlement (`submit_history`, or the adapter's `settle`), or a player's dispute, resignation or timeout claim. `signatures` holds each seat's wallet signature over the terms, in seat order, each the felt array its wallet returned. `referee_signature` is the referee's over its randomness tip when the terms take the referee's randomness, otherwise zero. It checks, in order (panic):
 
-1. `terms.chain_id` is the transaction's chain id (`'Wrong chain'`), and `terms.channel` is the game system's own address (`'Wrong channel'`).
-2. No channel holds `terms.game_id` yet (`'Game already open'`), and it is the seats': `game_id_of(players, keys)`, a Poseidon hash of `'ARBITER_GAME_ID_V1'`, the wallets and the session keys (`'Invalid game id'`), so only terms both wallets signed can take it.
-3. `open(terms)` builds the opening state (any [`open` panic](/reference/cairo#envelope-and-seats): `'Wrong tip count'`, `'Invalid tip'` for a zero tip, `'Invalid referee'` and any panic of the game's `ClockRules::check`, such as `StandardTime`'s `'Invalid time control'`, and any `R::init` panic for an invalid config).
-4. Two players and two keys (`'Wrong seat count'`), and two signatures (`'Wrong signature count'`).
-5. The players are non-zero and differ (`'Invalid players'`).
-6. Each session key is non-zero and the x coordinate of a curve point (`'Invalid session key'`), and the keys differ (`'Shared session key'`): one signature would approve for both seats.
-7. The tips differ (`'Invalid tip'`).
-8. The prover is non-zero (`'Zero prover'`) and its class is allowed (`'Untrusted prover class'`).
-9. In a timed game, the referee key is valid (`'Invalid session key'`) and neither seat's (`'Referee is a seat'`).
-10. The referee's tip (below).
-11. Each seat's wallet accepts its signature: the helper calls `is_valid_signature(terms_message(chain_id, game_id, context, player), signature)` on the player's account, which must answer `'VALID'` or `1` (`'Invalid wallet signature'`). The account must be deployed.
-12. `channel::open`: the response window is in range (`'Invalid response window'`).
+1. The config carries no ticket: `terms.config.ticket()` is 0 (`'Rated game needs its ticket'`). A game signed as rated opens only through [`rated::open_rated_game`](#rated-games).
+2. `terms.chain_id` is the transaction's chain id (`'Wrong chain'`), and `terms.channel` is the game system's own address (`'Wrong channel'`).
+3. No channel holds `terms.game_id` yet (`'Game already open'`), and it is the seats': `game_id_of(players, keys)`, a Poseidon hash of `'ARBITER_GAME_ID_V1'`, the wallets and the session keys (`'Invalid game id'`), so only terms both wallets signed can take it.
+4. `open(terms)` builds the opening state (any [`open` panic](/reference/cairo#envelope-and-seats): `'Wrong tip count'`, `'Invalid tip'` for a zero tip, `'Invalid referee'` and any panic of the game's `ClockRules::check`, such as `StandardTime`'s `'Invalid time control'`, and any `R::init` panic for an invalid config).
+5. Two players and two keys (`'Wrong seat count'`), and two signatures (`'Wrong signature count'`).
+6. The players are non-zero and differ (`'Invalid players'`).
+7. Each session key is non-zero and the x coordinate of a curve point (`'Invalid session key'`), and the keys differ (`'Shared session key'`): one signature would approve for both seats.
+8. The tips differ (`'Invalid tip'`).
+9. The prover is non-zero (`'Zero prover'`) and its class is allowed (`'Untrusted prover class'`).
+10. In a timed game, the referee key is valid (`'Invalid session key'`) and neither seat's (`'Referee is a seat'`).
+11. The referee's tip (below).
+12. Each seat's wallet accepts its signature: the helper calls `is_valid_signature(terms_message(chain_id, game_id, context, player), signature)` on the player's account, which must answer `'VALID'` or `1` (`'Invalid wallet signature'`). The account must be deployed.
+13. `channel::open`: the response window is in range (`'Invalid response window'`).
 
 It then writes `ChannelTerms`, and `ChannelRng` when the game takes its referee's randomness, and an `ACTIVE` state at epoch 0 whose anchor and candidate are `state_ref(open(terms))` at the current block, and emits `OPENED`.
 
@@ -213,6 +246,8 @@ It then writes `ChannelTerms`, and `ChannelRng` when the game takes its referee'
 | A zero `rng_tip`, or an untimed game | A zero `referee_signature` (`'Seats reveal in this game'`). |
 
 The signature is what keeps a seat from choosing the tip: a tip a seat made up would let that seat know every roll. It names the game, so a tip signed for one game is refused in another.
+
+`open_game_delegable` opens a game as `open_game` does, each seat agreeing with its wallet's signature (`Approval::Wallet`) or with a key its wallet delegated on this channel (`Approval::Delegated`, `delegation_message`) until a time at most `max_lifetime` seconds away. A channel opts in so its players' wallets sign once per sign-in rather than once per game; a stolen key can then agree to games for its wallet until the delegation expires. It refuses a ticket first, as `open_game` does, then a zero `max_lifetime` (`'Invalid delegation lifetime'`).
 
 ### Submitting states
 
@@ -293,6 +328,52 @@ fn seat_of(game: @ChannelGame, address: ContractAddress) -> u8;
 | `read_state` | The `Channel` alone, from `ChannelState` and the terms' `response_seconds`, without reading the rest of the terms: its `context` reads as zero. | |
 | `status` | The channel's status, read from the packed state. | |
 | `seat_of` | `0` for `player_0`, `1` for a non-zero `player_1`. | `'Not a player'` for any other address. |
+
+## Rated games
+
+`arbiter_dojo::rated` ([`rated.cairo`](https://github.com/broody/arbiter/blob/main/dojo/arbiter_dojo/src/rated.cairo)) opens rated games on the game's ratings contract and reports them for rating. The helpers are generic over the game's `GameRules` (`R`) and its `RatingRules` (`Q`), e.g. `open_rated_game::<MyRules, MyRatingRules>(ref world, ...)`, and take the ratings contract's address. A game that uses them registers `m_RatedGame` besides the other models. See [Ratings](/concepts/ratings) and [Add rated play](/guide/ratings).
+
+```cairo
+fn open_rated_game<impl R: GameRules, impl Q: RatingRules>(
+    ref world: WorldStorage, ratings: ContractAddress, terms: Terms<R::Config>,
+    signatures: Span<Span<felt252>>, referee_signature: Signature, ticket: Ticket,
+    ticket_signature: Signature,
+);
+fn open_rated_game_delegable<impl R: GameRules, impl Q: RatingRules>(
+    ref world: WorldStorage, ratings: ContractAddress, terms: Terms<R::Config>,
+    approvals: Span<Approval>, referee_signature: Signature, max_lifetime: u64, ticket: Ticket,
+    ticket_signature: Signature,
+);
+fn rated_result(world: @WorldStorage, game_id: felt252, ticket: @Ticket) -> Option<GameResult>;
+fn rate<impl Q: RatingRules>(
+    world: @WorldStorage, ratings: ContractAddress, game_id: felt252, ticket: Ticket,
+) -> Option<(GameResult, Player, Player)>;
+```
+
+The config needs `RatedConfig`, `Serde`, `Drop` and `PartialEq`.
+
+### open_rated_game
+
+`open_rated_game` opens a game as `open_game` does, once its terms are its ticket's, and has `ratings` accept the ticket for it. It checks, in order (panic):
+
+1. `ratings` is set (`'Ratings not set'`).
+2. The config is a rated game's config for the ticket: `is_rated_config(config, digest::<Q>(ticket, ratings))`, which requires the config to carry the ticket's digest and its `with_ticket` to change nothing else (`'Not the ticket game'`).
+3. `config_hash::<R>(config)` is the ticket's `config` (`'Not the ticket config'`).
+4. The terms' players are `[player_0, player_1]` (`'Not the ticket players'`).
+5. The game is timed (`'Rated game is untimed'`), its referee is the ticket's (`'Not the ticket referee'`), and the Poseidon hash of its clock settings is the ticket's `clock` (`'Not the ticket clock'`).
+6. With `Q::REFEREE_RNG`, the clock's `rng_tip` is nonzero (`'Rated game needs referee rolls'`); without it, zero (`'Rated game takes no rolls'`).
+7. The prover is the ticket's (`'Not the ticket prover'`), and so is the response window (`'Not the ticket window'`).
+8. Every `open_game` check from step 2 on.
+9. The ratings contract's `check_ticket(ticket, ticket_signature, game_id)`: any of its [panics](/reference/ratings#tickets-and-rating), such as `'Config not allowed'` or `'Ticket used'`.
+
+It then writes `RatedGame { game_id, ticket: digest }`. `open_rated_game_delegable` takes `open_game_delegable`'s approvals and `max_lifetime` (`'Invalid delegation lifetime'` for 0, checked first).
+
+### rated_result and rate
+
+| Helper | Behavior | Panics |
+| --- | --- | --- |
+| `rated_result` | A settled game's `GameResult`, from the channel alone, or `None` while the game isn't `SETTLED`. `winner` and `reason` are the channel's result. `played_at` is the channel's `started`, its referee's first stamp; a game that settled by `VIA_RESIGN` or `VIA_TIMEOUT_CLAIM` with `started` still 0 is dated by the ticket's `issued_at`, so a losing seat can't void its loss by opening the game and resigning first. `settled_at` is the `Settlement`'s `timestamp`. `steps` is the larger of the anchor's and the candidate's `seq`. `onchain_forfeit` is `via` being `VIA_RESIGN` or `VIA_TIMEOUT_CLAIM`. | |
+| `rate` | Reports a settled rated game to `ratings` (`rate_game`). Returns the result as reported and both seats' ratings when the contract rated the game, for a game that mirrors them; `None` otherwise. It returns `None` without a call for a game whose `RatedGame` is empty or when `ratings` is zero, and without rating while the game isn't settled. It never reverts on a game that isn't rateable, so rating can never block a settlement. Anyone may call it. | `'Not the game ticket'` if the ticket's digest isn't the game's `RatedGame.ticket`. |
 
 ## Wrapping the helpers
 
@@ -377,11 +458,14 @@ build-external-contracts = [
     "arbiter_dojo::models::m_ChannelState",
     "arbiter_dojo::models::m_ChannelRng",
     "arbiter_dojo::models::m_ProverAllowed",
+    "arbiter_dojo::models::m_Settlement",
     "arbiter_dojo::models::e_ChannelUpdated",
 ]
 ```
 
-`m_ChannelRng` is only needed by a game that takes randomness from its referee.
+`m_ChannelRng` is only needed by a game that takes randomness from its referee, and `m_RatedGame` by a game with rated play ([`dojo/examples/rated/Scarb.toml`](https://github.com/broody/arbiter/blob/main/dojo/examples/rated/Scarb.toml)). `m_Settlement` is needed by every game: the binding writes it whenever a game settles.
+
+The game's config implements `arbiter::RatedConfig`, which `open_game` requires. The counter has no rated play: `pub impl Unrated of arbiter::RatedConfig<Config> {}`.
 
 The system also needs write access to its namespace; the counter grants it in `dojo_dev.toml` with `[writers] "counter" = ["counter-channel"]`.
 

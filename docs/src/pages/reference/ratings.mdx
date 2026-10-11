@@ -1,0 +1,419 @@
+# Cairo: arbiter_ratings
+
+The `arbiter_ratings` crate ([`ratings/`](https://github.com/broody/arbiter/blob/main/ratings/src/lib.cairo)) is onchain ratings for 2-seat arbiter games: the `RatingRules` a game implements, the rating update in Q32.32 fixed point, the pairing `Ticket`, and `RatingsComponent`, which a game embeds in its own ratings contract. This page lists every public item. For the model, see [Ratings](/concepts/ratings); for a walkthrough, [Add rated play](/guide/ratings).
+
+| Crate | Path | Toolchain |
+| --- | --- | --- |
+| `arbiter_ratings` | [`ratings/`](https://github.com/broody/arbiter/blob/main/ratings/Scarb.toml) | Cairo 2.13.1, so Dojo channels (Dojo 1.8) can import it. Depends on `arbiter`. |
+| `arbiter_ratings_fuzz` | [`ratings/fuzz/`](https://github.com/broody/arbiter/blob/main/ratings/fuzz/src/lib.cairo) | Its own workspace: snforge fuzz properties of the update, run with Starknet Foundry 0.64.0. |
+
+The Dojo side of rated play, `open_rated_game` and `rate`, is in [`arbiter_dojo::rated`](/reference/dojo#rated-games). Rated or not is part of the game's config: [`RatedConfig`](/reference/cairo#ratedconfig) is in `arbiter`.
+
+| Module | Contents |
+| --- | --- |
+| `arbiter_ratings::rules` | `RatingRules`, `Pool`, `valid_pool`, `elo`, `drift_of` and their constants |
+| `arbiter_ratings::math` | The engine: `Rating`, the update, aging, and its arithmetic |
+| `arbiter_ratings::ticket` | `Ticket` and `digest` |
+| `arbiter_ratings::ratings` | `IRatings`, `GameResult`, `Player`, `admin_op`, `RatingsComponent` and the contract's constants |
+
+The crate root re-exports `Rating`; `Pool`, `RatingRules`, `drift_of`, `elo` and `valid_pool`; `Ticket` and `digest`; and `GameResult`, `IRatings`, `IRatingsDispatcher`, `IRatingsDispatcherTrait`, `Player`, `RatingsComponent` and `admin_op`. Constants are reached through their modules, e.g. `arbiter_ratings::math::ONE` or `arbiter_ratings::ratings::{QUEUE, CHANNEL_ACTIVE}`.
+
+Ratings and deviations are Q32.32 fixed point (x / 2^32, `ONE`), in logits on Glicko-2's μ scale. A pool id is a `felt252` short string, such as `'blitz'`.
+
+## RatingRules
+
+What a game decides about its ratings, compiled into its ratings contract ([`rules.cairo`](https://github.com/broody/arbiter/blob/main/ratings/src/rules.cairo)). A game implements it once, as it implements `GameRules`. No setting is read from storage: changing one means upgrading the contract.
+
+```cairo
+pub trait RatingRules {
+    const TAG: felt252;
+    const VERSION: u8;
+    const REFEREE_RNG: bool;
+    fn pool(pool: felt252) -> Option<Pool>;
+    fn start(pool: felt252, band: u8) -> Option<i128>;
+    fn drift(pool: felt252, mu: i128) -> i128;
+    fn shown(pool: felt252, mu: i128, offset: i32) -> u16;
+}
+```
+
+| Item | Contract |
+| --- | --- |
+| `TAG` | Domain tag in every ticket digest and admin op, e.g. `'SURROUND'`. |
+| `VERSION` | Version of the rules that last updated a player, stored with it (`params`) and carried by `RatingUpdated`. Bump it when an update would change. |
+| `REFEREE_RNG` | `true`: rated games take their randomness from the referee (a game with dice). `false`: they never take any. `open_rated_game` enforces it on the clock's `rng_tip`. |
+| `pool(pool)` | A pool's constants, or `None` for a pool the game doesn't have. |
+| `start(pool, band)` | A new player's μ for a starting band, 1 to 7, or `None`. |
+| `drift(pool, mu)` | c, the growth of φ per √day idle at μ (Q): φ² grows by c² a day. |
+| `shown(pool, mu, offset)` | The rank shown for μ with the owner's offset, e.g. `elo(mu, offset)`. The trait has no default. |
+
+The engine calls `pool` once per rated game and passes the `Pool` through. `drift` and `shown` take the pool, so each pool may age and display differently.
+
+### Pool
+
+A pool's constants. Derives `Copy`, `Drop`, `Serde`, `PartialEq` and `Debug`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `phi0` | `i128` | A new player's deviation, and the cap on aging. Below 4 (`PHI_LIMIT`). |
+| `min_phi` | `i128` | The deviation floor after a game. |
+| `mu_min`, `mu_max` | `i128` | Stored μ stays within these. |
+| `provisional_phi` | `i128` | A rank shows "?" while the deviation, aged to now, is above this. |
+| `settled_games` | `u32` | A player counts as settled from this many games, with aged φ at most `provisional_phi`. Only games between settled players move a peak. |
+| `min_steps` | `u32` | Games shorter than this, in steps, are void, except onchain forfeits, which only the loser's rating feels. |
+| `anchor_phi` | `i128` | An anchor's fixed deviation. |
+| `anchor_mu_min`, `anchor_mu_max` | `i128` | The μ an anchor may be pinned at. |
+| `max_offset` | `i32` | The largest rank offset the owner may set, in `shown`'s units. |
+
+### valid_pool
+
+```cairo
+fn valid_pool(pool: @Pool) -> bool;
+```
+
+Whether a pool's constants fit the [packed player state](#packed-player-state) and make sense. `check_ticket` refuses a ticket in a pool that fails it (`'Invalid pool'`), and `rate_game` voids its games (`VOID_INVALID`). It requires all of:
+
+| Condition | Why |
+| --- | --- |
+| `min_phi > 0` | A rated player's φ is never zero: zero marks a player never rated. |
+| `min_phi <= provisional_phi <= phi0` | The thresholds are ordered. |
+| `phi0 < PHI_LIMIT` (2^34, that is 4) | φ is stored in 34 bits. |
+| `min_phi <= anchor_phi < PHI_LIMIT` | An anchor's φ is a deviation like any other. |
+| `mu_min < mu_max` | A non-empty range. |
+| `mu_min - 2 * phi0 >= -BIAS_40` | The lowest peak, μ − 2φ, fits 40 biased bits. |
+| `mu_max < BIAS_40` (2^39) | μ fits 40 biased bits. |
+| `mu_min <= anchor_mu_min <= anchor_mu_max <= mu_max` | Anchors are pinned inside the pool's range. |
+| `max_offset >= 0` | The offset bound is a magnitude. |
+
+### Helpers and constants
+
+| Name | Signature or value | What it is |
+| --- | --- | --- |
+| `elo` | `fn elo(mu: i128, offset: i32) -> u16` | The Elo-scale rating for μ, 1500 + 173.7178·μ, rounded half to even, plus `offset`, held to `0..=65535`. The offset applies before the clamp. A `shown` for chess-like games. |
+| `drift_of` | `fn drift_of(half_life: i128) -> i128` | c for a half-life in days (Q): `div(C_HALF_LIFE, half_life)`. |
+| `C_HALF_LIFE` | `29408509883171471360` | 1.15·2·ln 2 scaled by 2^64 (KGS's drift). |
+| `ELO_SCALE` | `746112238643` | 400 / ln 10 in Q: Elo points per logit. |
+| `BIAS_40` | `0x8000000000` (2^39) | Signed values are stored biased in 40 bits. |
+| `PHI_LIMIT` | `0x400000000` (2^34) | Deviations are stored in 34 bits. |
+
+## The engine
+
+`arbiter_ratings::math` ([`math.cairo`](https://github.com/broody/arbiter/blob/main/ratings/src/math.cairo)) is Glicko-2's update, one game at a time, without the volatility step. Deviation grows with idle time instead, through the rules' `drift`. The opponent's deviation is aged too, and μ stays within the pool's range. Variances are Q64, so aging needs no square root. Every division rounds half to even. i128 arithmetic panics on overflow rather than wrapping. [`sdk/src/ratings.mjs`](/reference/ratings-sdk) mirrors it bit for bit.
+
+### Rating
+
+A player's rating state. Derives `Copy`, `Drop`, `Serde`, `PartialEq` and `Debug`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `mu` | `i128` | μ, Q. |
+| `phi` | `i128` | φ, Q; zero for a player never rated. |
+| `last` | `u64` | When the player last played, in seconds. |
+
+### Functions
+
+Functions that take `impl R: RatingRules` are called with the rules as a generic argument, e.g. `update::<MyRules>(...)`. `id` is the pool id and `p` its constants.
+
+| Function | Behavior |
+| --- | --- |
+| `start<R>(pool: felt252, band: u8) -> Option<Rating>` | A new player's state for a starting band: `R::start`'s μ, φ 0 (never rated), `last` 0. `None` for a band the rules lack. |
+| `update<R>(id: felt252, p: @Pool, a: Rating, b: Rating, result: u8, t: u64) -> (Rating, Rating, i128)` | One rated game at time `t`. `result` is seat 0's score in half points: 2 seat 0 won, 1 a draw, 0 seat 1 won. Returns both new states and P(seat 0 wins) before the game (Q). |
+| `update_states<R>(id, p, a, b, result, t) -> (Rating, Rating)` | `update` without the probability, as the contract runs it. |
+| `age<R>(id: felt252, p: @Pool, player: Rating, t: u64) -> Rating` | A rated player's state aged to `t` without a game: φ grows as it would for a game at `t`, and `last` moves to `t` (never back). For the side of a game that doesn't count for it. |
+| `aged_phi<R>(id: felt252, p: @Pool, player: Rating, t: u64) -> i128` | φ aged to `t`, as a game at `t` would use it; φ0 for a player never rated. |
+| `settled<R>(id: felt252, p: @Pool, player: Rating, games: u32, t: u64) -> bool` | `games >= settled_games` and aged φ at most `provisional_phi`. |
+| `provisional(p: @Pool, phi: i128, wins: u32, losses: u32) -> bool` | "?": φ above `provisional_phi`, or no win, or no loss. |
+| `div(n: i128, d: i128) -> i128` | n / d rounded half to even, for d > 0. Symmetric in the sign of n. |
+| `sqrt(n: i128) -> i128` | The nearest integer to √n; 0 for n ≤ 0. |
+| `exp_neg(x: i128) -> i128` | e^(−x) for x ≥ 0, Q. |
+| `sigmoid(z: i128) -> i128` | 1 / (1 + e^(−z)), Q. |
+| `quot(n: i128, d: i128) -> i128` | Floor of n / d for n ≥ 0 and d > 0. |
+
+`ONE` (`0x100000000`) is 1.0 in Q32.32.
+
+A player brings variance φ0² to a game if new, otherwise min(φ0², φ² + c²·idle days), with c = `R::drift(id, μ)`. Idle time stops adding after 2^30 seconds. After the game, φ is at least `min_phi`, μ is held to `mu_min..=mu_max`, and `last` never moves back.
+
+## Ticket
+
+A rated pairing signed by a game's matchmaker: who plays whom, in which pool, on which channel, under which terms ([`ticket.cairo`](https://github.com/broody/arbiter/blob/main/ratings/src/ticket.cairo)). Derives `Copy`, `Drop`, `Serde`, `PartialEq` and `Debug`. Both wallets sign the game's terms, whose config carries the ticket's digest. The ratings contract accepts each ticket once.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `chain_id` | `felt252` | Starknet chain id. |
+| `channel` | `ContractAddress` | The channel contract the game is played on. |
+| `player_0`, `player_1` | `ContractAddress` | The seats, in the terms' order. |
+| `pool` | `felt252` | The pool the game is rated in. |
+| `config` | `felt252` | The game's config without its ticket (`arbiter::config_hash`). |
+| `referee` | `felt252` | The referee key. Rated games are always timed. |
+| `clock` | `felt252` | The Poseidon hash of the clock settings (`TimeControl.settings`), as `clock_presets` keys them. The referee's randomness tip isn't known at pairing, so the ticket leaves it out. |
+| `prover` | `ContractAddress` | The game's proof adapter. |
+| `response_seconds` | `u32` | The game's response window. |
+| `source` | `u8` | `QUEUE` or `TABLE`. Only queue games move a peak. |
+| `band_0`, `band_1` | `u8` | Starting bands, used for a player's first rated game in the pool; 0 for an anchor. |
+| `matchmaker` | `felt252` | The matchmaker key that signed this ticket. |
+| `issued_at`, `expires_at` | `u64` | Unix seconds: when the matchmaker paired the players, and the deadline for the game's start (its referee's first stamp). |
+| `nonce` | `felt252` | The matchmaker's nonce, part of the digest. |
+
+```cairo
+fn digest<impl R: RatingRules>(ticket: @Ticket, ratings: ContractAddress) -> felt252;
+```
+
+The message the matchmaker signs: arbiter's 250-bit `signing_hash` over `'ARBITER_PAIRING_V1'`, the rules' `TAG`, the ratings contract's address and the ticket's Serde encoding. The SDK's [`ticketDigest`](/reference/ratings-sdk#tickets) reproduces it. The address keeps a ticket from being used on another deployment, and the tag on another game's.
+
+## GameResult
+
+A settled rated game, as the channel that hosted it reports it (`arbiter_dojo::rated::rated_result`). Everything else about the game comes from its ticket.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `game_id` | `felt252` | The game. |
+| `winner` | `u8` | arbiter's winner: 1 seat 0, 2 seat 1, 0 a draw. |
+| `reason` | `u8` | arbiter's reason: `1..=127` the game's, `REASON_RESIGN`, `REASON_TIMEOUT` (the referee's flag) or `REASON_ABANDON` (forced play the chain judged abandoned). Any other, such as `REASON_VOID`, voids the game. |
+| `played_at` | `u64` | When the game started, in seconds, as its referee's first stamp attests (0 if it never started): the game's time for aging. An onchain forfeit settled before any stamp reached the chain is dated by its ticket's `issued_at`. |
+| `settled_at` | `u64` | When the game settled, in seconds. |
+| `steps` | `u32` | Steps the channel holds for the game: its anchor's or candidate's `seq`, whichever is larger. |
+| `onchain_forfeit` | `bool` | Settled by an onchain resignation or abandoned forced play, whose step count may be a stale anchor's. |
+
+## Player
+
+A player's rating and record in a pool, as the views show it now. Unrated players read as all zeros.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `mu` | `i64` | μ, Q32.32. An anchor's is its pin. |
+| `phi` | `u64` | Stored φ, Q32.32, not aged. An anchor's is the pool's `anchor_phi`. |
+| `last_played` | `u64` | When the player last played, in seconds. |
+| `games`, `wins`, `losses`, `draws` | `u32` | The record in this pool. `games` is the sum of the other three. |
+| `shown` | `u16` | The rank shown (`RatingRules::shown`), with the pool's offset; 0 for a player never rated. |
+| `provisional` | `bool` | "?": φ aged to now above `provisional_phi`, or no win or no loss yet. Never set for an anchor. |
+| `established` | `bool` | Set once the rank first stops being provisional after a game; never cleared. Always set for an anchor. |
+| `settled` | `bool` | At least `settled_games` games and φ aged to now at most `provisional_phi`. Never set for an anchor. |
+| `peak` | `i64` | Highest μ − 2φ in queue games between settled players, recorded once the player is established. |
+| `has_peak` | `bool` | Whether `peak` is set. |
+| `band` | `u8` | The band the player's first rated game started from. |
+| `params` | `u8` | The rules' `VERSION` that last updated the player. |
+| `anchor` | `bool` | An anchor: a fixed-strength player (an AI) whose rating is pinned. |
+
+## IRatings
+
+The ratings contract's interface ([`ratings.cairo`](https://github.com/broody/arbiter/blob/main/ratings/src/ratings.cairo)). `RatingsComponent` implements it under the game's rules. "Now" is the block timestamp.
+
+### Tickets and rating
+
+```cairo
+fn check_ticket(ref self: T, ticket: Ticket, signature: Signature, game_id: felt252) -> felt252;
+fn rate_game(ref self: T, ticket: Ticket, result: GameResult) -> Option<(Player, Player)>;
+```
+
+`check_ticket` accepts a pairing ticket once, for the active channel calling it, as game `game_id`, and returns the ticket's digest. `open_rated_game` calls it. It checks, in order (panic):
+
+1. The caller is a channel in state `CHANNEL_ACTIVE` (`'Unknown channel'`), and the ticket names it (`'Wrong channel'`).
+2. The ticket names this chain (`'Wrong chain'`).
+3. Both seats are non-zero and differ (`'Invalid players'`).
+4. `issued_at <= expires_at` (`'Ticket expires before issue'`), and the ticket lives at most `MAX_TICKET_LIFE` (`'Ticket lives too long'`).
+5. `source` is `QUEUE` or `TABLE` (`'Invalid source'`).
+6. The rules have the pool (`'Unknown pool'`), and it passes `valid_pool` (`'Invalid pool'`).
+7. At most one seat is an anchor in the pool (`'Two anchors'`). An anchor's band is 0 (`'Anchor has a band'`). Any other seat's band is 1 to 7 with a start in the rules (`'Invalid band'`), and, for a player never rated in the pool, one the pool's start bands allow (`'Band not allowed'`).
+8. The pool allows the config hash (`'Config not allowed'`).
+9. The referee key is `KEY_ACTIVE` (`'Referee not allowed'`), and the pool allows the clock hash (`'Clock not allowed'`).
+10. The prover is allowed (`'Prover not allowed'`), and `response_seconds` is within the allowed range (`'Response window not allowed'`).
+11. The matchmaker key is `KEY_ACTIVE` (`'Matchmaker not allowed'`).
+12. The digest was never accepted (`'Ticket used'`), and `signature` is the matchmaker's over it (any `arbiter::verify` panic, such as `'Invalid session signature'`).
+
+It then marks the ticket `ACCEPTED` for `game_id` and emits `TicketUsed`. It doesn't check the time: a game may open long after its ticket expired, at settlement, so rating checks that the game started within the ticket's window instead.
+
+`rate_game` rates the game of an accepted ticket once, from the result its channel reports, and returns both seats' `Player` views. It returns `None`, and changes nothing, when:
+
+- the caller's channel state is `NONE`, or the ticket names another channel;
+- the ticket isn't `ACCEPTED` (unknown, rated or voided), or was accepted for another game than `result.game_id`.
+
+Otherwise it either rates the game (`RATED`, two `RatingUpdated` events, seat 0's first) or voids it (`VOID`, a `GameVoided` event, `None`). A retiring channel still rates games it has. It voids with:
+
+| Reason | When |
+| --- | --- |
+| `VOID_INVALID` | The rules no longer have the pool, or it fails `valid_pool` (an upgrade changed it). Or the times are impossible: `played_at` is 0, outside `issued_at..=expires_at` by more than `MAX_CLOCK_SKEW`, later than `settled_at` by more than the skew, or `settled_at` is in the future. Or `reason` isn't `1..=REASON_RESIGN`, `REASON_TIMEOUT` or `REASON_ABANDON`, or `winner > 2`. Or, after the checks below, a new player's band has no start any more (an upgrade dropped it). |
+| `VOID_MATCHMAKER` | The ticket's matchmaker was revoked from a time at or before `played_at`. |
+| `VOID_REFEREE` | The ticket's referee was revoked from a time at or before `played_at`, or the game ended by its flag (`REASON_TIMEOUT`) and settled at or after the revocation. |
+| `VOID_ANCHOR` | Both seats are anchors now, or a seat is neither an anchor, nor rated, nor has a band: its anchor was removed before the game was rated. |
+| `VOID_SHORT` | `steps < min_steps`, unless the game was an onchain forfeit with a winner. |
+
+A short onchain forfeit that isn't voided counts only for the loser. A side the game doesn't count for is aged to the game's time, or left alone if never rated. An anchor's side never changes. `rate_game` doesn't check the config, clock, prover or window again: `check_ticket` did when the game opened.
+
+### Views
+
+| Function | Returns |
+| --- | --- |
+| `player(pool, player) -> Player` | The player's rating and record, aged to now for `provisional` and `settled`. Panics `'Unknown pool'`. |
+| `anchor(pool, player) -> Option<i64>` | An anchor's pinned μ in the pool, if `player` is one there. |
+| `ranks(pool, players: Span<ContractAddress>) -> Array<(u16, bool, bool)>` | (rank shown, provisional, rated) for each player. Panics `'Unknown pool'`. |
+| `ticket_status(digest) -> (u8, felt252)` | The ticket's status (`NONE`, `ACCEPTED`, `RATED`, `VOID`) and the game it was accepted for. |
+| `channel_state(channel) -> u8` | `NONE`, `CHANNEL_ACTIVE` or `CHANNEL_RETIRING`. |
+| `matchmaker(key) -> (u8, u64)`, `referee(key) -> (u8, u64)` | The key's state (`NONE`, `KEY_ACTIVE`, `KEY_RETIRED`) and the time it was revoked from (0: not revoked). |
+| `is_clock_preset(pool, settings: Span<felt252>) -> bool` | Whether the pool's rated games may use these serialized clock settings. |
+| `is_config(pool, config) -> bool` | Whether the pool's rated games may use this config hash. |
+| `is_prover(prover) -> bool` | Whether rated games may name this prover. |
+| `response_window() -> (u32, u32)` | The allowed range of response windows, in seconds. |
+| `start_bands(pool) -> u8` | The bands a new player in the pool may choose: bit b for band b. |
+| `rank_offset(pool) -> i32` | Added to every rank shown in the pool. |
+| `rules() -> (felt252, u8, bool)` | The rules' `TAG`, `VERSION` and `REFEREE_RNG`. |
+| `pool(pool) -> Option<Pool>` | The pool's constants, if the rules have it. |
+| `owner()`, `pending_owner()` | The owner, and the address a transfer waits on. |
+| `sealed() -> bool` | Whether `seal` was called. |
+| `queued(op) -> u64` | When `op` was queued (0: not queued). |
+
+### Administration
+
+Every entrypoint here is the owner's (`'Only owner'`), except `accept_ownership`. Before `seal`, all apply at once. After it, a change that **loosens** policy or trusts more must have been queued: `queue(admin_op::<Rules>(name, args))` at least `TIMELOCK_SECONDS` and at most `QUEUE_LIFE` before (`'Not queued'`, `'Timelocked'`, `'Queued change expired'`). Applying it consumes the queued op. Tightening applies at once.
+
+| Entrypoint | Loosens when | `admin_op` args | Other panics |
+| --- | --- | --- | --- |
+| `queue(op)`, `cancel(op)` | Never | | |
+| `seal()` | Never. Irreversible. | | |
+| `set_channel(channel, state)` | `state` is `CHANNEL_ACTIVE`, or `CHANNEL_RETIRING` for a channel that was `NONE` | `[channel, state]` | `'Invalid channel state'` |
+| `set_matchmaker(key)`, `set_referee(key)` | Always | `[key]` | `'Key revoked'` |
+| `retire_matchmaker(key)`, `retire_referee(key)` | Never: the key names no new tickets, and its games still rate | | |
+| `revoke_matchmaker(key, at)`, `revoke_referee(key, at)` | Never: retires the key and voids its games as `rate_game` describes | | `'Invalid revocation time'` unless `0 < at <= now`. An earlier revocation time is kept. |
+| `set_clock_preset(pool, settings, allowed)` | `allowed` | `[pool, poseidon(settings)]` | `'Unknown pool'` |
+| `set_config(pool, config, allowed)` | `allowed` | `[pool, config]` | `'Unknown pool'` |
+| `set_prover(prover, allowed)` | `allowed` | `[prover]` | |
+| `set_response_window(min_seconds, max_seconds)` | Unless both ends tighten | `[min_seconds, max_seconds]` | `'Invalid window'` if `min > max` |
+| `set_start_bands(pool, bands)` | `bands` adds any band | `[pool, bands]` | `'Unknown pool'`; `'Invalid bands'` for bit 0 or a band without a start |
+| `set_rank_offset(pool, offset)` | Always | `[pool, offset + 2^31]` | `'Unknown pool'`; `'Invalid offset'` beyond `±max_offset` |
+| `set_anchor(pool, player, mu)` | Always | `[pool, player, mu + 2^39]` | `'Unknown pool'`, `'Zero anchor'`, `'Invalid anchor rating'` outside `anchor_mu_min..=anchor_mu_max`, `'Player is rated'` |
+| `remove_anchor(pool, player)` | Never: the anchor's accepted games that aren't rated yet are voided | | |
+| `transfer_ownership(owner)` | Always | `[owner]` | `'Zero owner'` |
+| `accept_ownership()` | The pending owner's call | | `'Not pending owner'` |
+| `upgrade(class_hash)` | Always | `[class_hash]` | |
+
+`admin_op`'s `name` is the entrypoint's name as a short string, e.g. `'set_config'`.
+
+### admin_op
+
+```cairo
+fn admin_op<impl R: RatingRules>(name: felt252, args: Span<felt252>) -> felt252;
+```
+
+The hash `queue` takes for a timelocked change: Poseidon over the rules' `TAG`, `'ARBITER_ADMIN_V1'`, `name` and `args`. A change queued under another game's tag, or for another pool, never applies.
+
+## RatingsComponent
+
+A game's ratings: players, tickets, policy, anchors and admin, under the game's `RatingRules`. A game's contract embeds it and calls `initializer` in its constructor. The tests' contract ([`ratings/src/tests/contract.cairo`](https://github.com/broody/arbiter/blob/main/ratings/src/tests/contract.cairo)) is the whole of one:
+
+```cairo
+#[starknet::contract]
+pub mod TestRatings {
+    use starknet::ContractAddress;
+    use crate::ratings::RatingsComponent;
+    use crate::tests::rules::TestRules;
+
+    component!(path: RatingsComponent, storage: ratings, event: RatingsEvent);
+
+    #[abi(embed_v0)]
+    impl RatingsImpl = RatingsComponent::Ratings<ContractState>;
+    impl RatingsInternal = RatingsComponent::InternalImpl<ContractState>;
+
+    #[storage]
+    struct Storage {
+        #[substorage(v0)]
+        ratings: RatingsComponent::Storage,
+    }
+
+    #[event]
+    #[derive(Drop, starknet::Event)]
+    pub enum Event {
+        #[flat]
+        RatingsEvent: RatingsComponent::Event,
+    }
+
+    #[constructor]
+    fn constructor(ref self: ContractState, owner: ContractAddress) {
+        self.ratings.initializer(owner);
+    }
+}
+```
+
+The rules impl in scope (`TestRules` here) is the one the component's impls take. Embed the events `#[flat]`, as above: the SDK's `decodeEvent` reads the first key as the event's own selector.
+
+| Item | What it is |
+| --- | --- |
+| `Ratings` | The embeddable `IRatings` impl. |
+| `InternalImpl::initializer(owner)` | Sets the owner. Panics `'Zero owner'`. |
+| `Storage` | Owner, pending owner, seal, queued ops, channels, keys, players, tickets, and per-pool policy and anchors. Players are keyed by `(pool, player)`. |
+| `Event` | The events below. |
+
+### Events
+
+| Event | Keys | Data |
+| --- | --- | --- |
+| `RatingUpdated` | `player`, `digest`, `pool` | One side of a rated game: `channel`, `game_id`, `opponent`, `score` (this player's half points: 2 won, 1 drew, 0 lost), `source`, `steps`, `played_at`, `params`, `band` (the band a first game started from, else 0), `applied` (whether the game changed this side), `pre_mu`, `pre_phi`, `pre_last`, `mu`, `phi`, `last_played`, `shown`, and `anchor`. Each rated game emits two, seat 0's first. |
+| `GameVoided` | `digest` | `channel`, `game_id`, `reason` (a `VOID_*`). |
+| `TicketUsed` | `digest`, `channel`, `pool` | `game_id` and the whole `ticket`, so anyone can rate the game and rebuild its rating. |
+| `ChannelSet` | `channel` | `state`. |
+| `KeySet` | `kind` (`'matchmaker'` or `'referee'`), `key` | `state`, `revoked_at`. |
+| `PolicySet` | `kind`, `pool` | `value`, `extra`, `allowed`. See below. |
+| `Queued` | `op` | `ready_at`, `expires_at`. |
+| `Cancelled` | `op` | |
+| `Sealed` | | |
+| `OwnershipTransferStarted` | | `owner`, `pending`. |
+| `OwnershipTransferred` | | `previous`, `owner`. |
+| `Upgraded` | | `class_hash`. |
+
+| `PolicySet.kind` | `pool` | `value` | `extra` |
+| --- | --- | --- | --- |
+| `'clock'` | The pool | The settings' Poseidon hash | 0 |
+| `'config'` | The pool | The config hash | 0 |
+| `'prover'` | 0 | The prover's address | 0 |
+| `'window'` | 0 | min·2^32 + max | 0 |
+| `'bands'` | The pool | The band mask | 0 |
+| `'offset'` | The pool | The offset + 2^31 | 0 |
+| `'anchor'` | The pool | The anchor's address | Its pinned μ + 2^39 (0 on removal) |
+
+`allowed` is the call's `allowed` for `'clock'`, `'config'` and `'prover'`, `false` for a removed anchor, and `true` otherwise.
+
+### Packed player state
+
+One felt per player and pool. A zero felt is a player never rated: a rated φ is never zero. Signed values are stored biased by 2^39. `valid_pool` keeps every pool's values within these widths.
+
+| Bits | Field |
+| --- | --- |
+| 0..40 | μ, biased |
+| 40..74 | φ |
+| 74..114 | last played |
+| 114..117 | band |
+| 117..119 | established, has-peak |
+| 119..127 | params |
+| 128..152 | wins |
+| 152..176 | losses |
+| 176..200 | draws |
+| 200..240 | peak, biased |
+
+A counter never overflows: it holds at `0xffffff`.
+
+## Constants
+
+In `arbiter_ratings::ratings`.
+
+| Constant | Type | Value | Meaning |
+| --- | --- | --- | --- |
+| `MAX_TICKET_LIFE` | `u64` | `900` | Longest a ticket may live, from `issued_at` to `expires_at`, in seconds. |
+| `MAX_CLOCK_SKEW` | `u64` | `60` | How far apart the referee's, the matchmaker's and the chain's clocks may be, in seconds. Rating allows this much either way. |
+| `QUEUE`, `TABLE` | `u8` | `1`, `2` | A ticket's `source`. |
+| `NONE`, `ACCEPTED`, `RATED`, `VOID` | `u8` | `0` to `3` | `ticket_status` values. `NONE` is also the state of an unknown channel or key. |
+| `CHANNEL_ACTIVE`, `CHANNEL_RETIRING` | `u8` | `1`, `2` | An active channel takes tickets and rates their games; a retiring one only rates games it already has. |
+| `KEY_ACTIVE`, `KEY_RETIRED` | `u8` | `1`, `2` | An active key names new tickets; a retired one no longer does, and its games still rate unless it was revoked from a time before they were played. |
+| `VOID_INVALID`, `VOID_MATCHMAKER`, `VOID_REFEREE`, `VOID_SHORT`, `VOID_ANCHOR` | `u8` | `1` to `5` | `GameVoided.reason`. |
+| `TIMELOCK_SECONDS` | `u64` | `172800` (48 hours) | After `seal`, a loosening change waits this long after it is queued. |
+| `QUEUE_LIFE` | `u64` | `604800` (7 days) | A queued change expires this long after it is queued. |
+| `BAND_BITS` | `u8` | `0b11111110` | Starting bands are 1 to 7: bit b of a band mask for band b. |
+
+## Errors
+
+The panics a caller can hit, by where they come from.
+
+| Message | Raised by |
+| --- | --- |
+| `'Unknown channel'`, `'Wrong channel'`, `'Wrong chain'`, `'Invalid players'`, `'Ticket expires before issue'`, `'Ticket lives too long'`, `'Invalid source'`, `'Invalid pool'`, `'Two anchors'`, `'Anchor has a band'`, `'Invalid band'`, `'Band not allowed'`, `'Config not allowed'`, `'Referee not allowed'`, `'Clock not allowed'`, `'Prover not allowed'`, `'Response window not allowed'`, `'Matchmaker not allowed'`, `'Ticket used'` | `check_ticket` |
+| `'Unknown pool'` | `check_ticket`, `player`, `ranks`, `set_clock_preset`, `set_config`, `set_start_bands`, `set_rank_offset` and `set_anchor` |
+| `'Only owner'`, `'Not queued'`, `'Timelocked'`, `'Queued change expired'` | Administration |
+| `'Invalid channel state'`, `'Key revoked'`, `'Invalid revocation time'`, `'Invalid window'`, `'Invalid bands'`, `'Invalid offset'`, `'Zero anchor'`, `'Invalid anchor rating'`, `'Player is rated'`, `'Zero owner'`, `'Not pending owner'` | The administration entrypoint the table above names |
+
+`rate_game` never panics on a game it can't rate: it returns `None` or voids the game.

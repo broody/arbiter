@@ -13,6 +13,7 @@ build-external-contracts = [
     "arbiter_dojo::models::m_ChannelState",
     "arbiter_dojo::models::m_ChannelRng",
     "arbiter_dojo::models::m_ProverAllowed",
+    "arbiter_dojo::models::m_Settlement",
     "arbiter_dojo::models::e_ChannelUpdated",
 ]
 

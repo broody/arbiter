@@ -3,10 +3,10 @@
 //! prover checks and signature checks. A game system calls one helper per
 //! entrypoint, e.g. `arbiter_dojo::channel::open_game::<MyRules>(ref world, ...)`.
 use arbiter::{
-    Approval, Batch, Channel, Envelope, GameRules, Move, Outcome, Signature, Terms, TimeControl,
-    approve_all, channel as machine, checkpoint_hash, context_hash, delegation_message, game_id_of,
-    live_hash, open, referee_resume_hash, reopen_hash, replay, state_ref, terms_message, tip_hash,
-    verify, void_hash,
+    Approval, Batch, Channel, Envelope, GameRules, Move, Outcome, RatedConfig, Signature, Terms,
+    TimeControl, approve_all, channel as machine, checkpoint_hash, context_hash, delegation_message,
+    game_id_of, live_hash, open, referee_resume_hash, reopen_hash, replay, state_ref, terms_message,
+    tip_hash, verify, void_hash,
 };
 use core::ec::EcPointTrait;
 use core::num::traits::Zero;
@@ -20,8 +20,9 @@ use starknet::{
 };
 use crate::models::{
     ACKNOWLEDGED, ChannelGame, ChannelRng, ChannelState, ChannelTerms, ChannelUpdated, DISPUTED,
-    FORCED, OPENED, ProverAllowed, RECEIVED, RESIGNED, RESOLVED, RESUMED, ROLLED, TIMED_OUT, VOIDED,
-    channel_of, game_of, pack_state, unpack_state,
+    FORCED, OPENED, ProverAllowed, RECEIVED, RESIGNED, RESOLVED, RESUMED, ROLLED, Settlement,
+    TIMED_OUT, VIA_RESIGN, VIA_TIMEOUT_CLAIM, VIA_TRANSCRIPT, VOIDED, channel_of, game_of,
+    pack_state, unpack_state,
 };
 
 /// Open a game on its seats' signed terms: each seat's wallet signs
@@ -32,15 +33,22 @@ use crate::models::{
 /// takes its randomness from its referee carries the referee's tip in its
 /// time control (`rng_tip`), and `referee_signature` is the referee's over it
 /// (`tip_hash`): a tip a seat made up would let that seat know every roll.
-/// Otherwise `referee_signature` is zero.
+/// Otherwise `referee_signature` is zero. A game signed as rated (its config
+/// carries a ticket, `RatedConfig`) opens only through `rated::open_rated_game`.
 pub fn open_game<
-    impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Serde<R::State>, +Drop<R::State>,
+    impl R: GameRules,
+    +Serde<R::Config>,
+    +Drop<R::Config>,
+    +RatedConfig<R::Config>,
+    +Serde<R::State>,
+    +Drop<R::State>,
 >(
     ref world: WorldStorage,
     terms: Terms<R::Config>,
     signatures: Span<Span<felt252>>,
     referee_signature: Signature,
 ) {
+    assert(terms.config.ticket() == 0, 'Rated game needs its ticket');
     let mut approvals = array![];
     for signature in signatures {
         approvals.append(Approval::Wallet(*signature));
@@ -55,7 +63,12 @@ pub fn open_game<
 /// once per game; a stolen key can then agree to games for its wallet until
 /// the delegation expires.
 pub fn open_game_delegable<
-    impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Serde<R::State>, +Drop<R::State>,
+    impl R: GameRules,
+    +Serde<R::Config>,
+    +Drop<R::Config>,
+    +RatedConfig<R::Config>,
+    +Serde<R::State>,
+    +Drop<R::State>,
 >(
     ref world: WorldStorage,
     terms: Terms<R::Config>,
@@ -63,13 +76,15 @@ pub fn open_game_delegable<
     referee_signature: Signature,
     max_lifetime: u64,
 ) {
+    assert(terms.config.ticket() == 0, 'Rated game needs its ticket');
     assert(max_lifetime != 0, 'Invalid delegation lifetime');
     opened::<R>(ref world, terms, approvals, referee_signature, max_lifetime);
 }
 
 // `open_game`, with delegated approvals for at most `max_lifetime` seconds (0:
-// wallets only).
-fn opened<
+// wallets only). `rated::open_rated_game` opens through it too, once the terms
+// are its ticket's.
+pub(crate) fn opened<
     impl R: GameRules, +Serde<R::Config>, +Drop<R::Config>, +Serde<R::State>, +Drop<R::State>,
 >(
     ref world: WorldStorage,
@@ -595,9 +610,21 @@ fn valid_prover(world: @WorldStorage, prover: ContractAddress) {
     assert(entry.allowed, 'Untrusted prover class');
 }
 
-// Write a channel's state and announce the transition.
+// Write a channel's state and announce the transition. The call that leaves a
+// game settled also records when and how (`Settlement`): a settled game takes
+// no further call.
 fn save(ref world: WorldStorage, game_id: felt252, channel: Channel, kind: u8) {
     world.write_model(@pack_state(game_id, @channel));
+    if channel.status == machine::SETTLED {
+        let via = if kind == RESIGNED {
+            VIA_RESIGN
+        } else if kind == TIMED_OUT {
+            VIA_TIMEOUT_CLAIM
+        } else {
+            VIA_TRANSCRIPT
+        };
+        world.write_model(@Settlement { game_id, timestamp: get_block_timestamp(), via });
+    }
     let state = if channel.status == machine::DISPUTE {
         channel.candidate
     } else {

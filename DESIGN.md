@@ -19,12 +19,13 @@ Hashfront (`~/development/hashfront`, a tactics game with combat randomness).
 
 | Layer | Status | Depends on | Purpose |
 |---|---|---|---|
-| `core` (Cairo) | built | nothing | `GameRules`, protocol envelope, hashing, signatures, replay, forced steps, randomness, referee clocks |
+| `core` (Cairo) | built | nothing | `GameRules`, protocol envelope, hashing, signatures, replay, forced steps, randomness, referee clocks, and `RatedConfig` (rated or not in the signed config) |
 | channel state machine (`arbiter::channel`) | built | `core` | Pure functions: open, receive a candidate, dispute, acknowledge, resolve, forced play, a posted roll, void, timeout, resume, resign |
-| `arbiter_dojo` (Cairo) | built | `core`, Dojo | `ChannelTerms`/`ChannelState`/`ChannelRng`/`ProverAllowed` models, `ChannelUpdated` event and one helper per entrypoint, including `open_game`, which opens a game on every seat's wallet signature over its terms, `acknowledge`, `resume_by_referee`, `roll` and `void`. Games list the models in `build-external-contracts` |
+| `arbiter_dojo` (Cairo) | built | `core`, Dojo, `arbiter_ratings` | `ChannelTerms`/`ChannelState`/`ChannelRng`/`ProverAllowed`/`Settlement` models, `ChannelUpdated` event and one helper per entrypoint, including `open_game`, which opens a game on every seat's wallet signature over its terms, `acknowledge`, `resume_by_referee`, `roll` and `void`; `rated` opens rated games on tickets and reports them (`RatedGame` model). Games list the models in `build-external-contracts` |
+| `arbiter_ratings` (Cairo 2.13) | built | `core` | `RatingRules`, the Q32.32 rating update, the pairing `Ticket`, and `RatingsComponent`, which each game compiles into its own ratings contract. See [Ratings](#ratings) |
 | `arbiter_testing` (Cairo) | built | `core` | Test-only STARK-curve signer and hash-chain helper |
 | `arbiter_adapter` (Cairo 2.18) | built, tested with mocked proof facts | `core` | Generic logic for a SNIP-36 account contract that proves a replay in the virtual OS and relays it to the channel |
-| `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, clocks and `Referee`, fixtures, Poseidon in WebAssembly; native proving client (`@arbiter/sdk/proving`); session store and signing guard (`@arbiter/sdk/store`) |
+| `sdk` (JS) | built | starknet.js | Signing, transcripts, randomness chains, clocks and `Referee`, fixtures, Poseidon in WebAssembly; native proving client (`@arbiter/sdk/proving`); session store and signing guard (`@arbiter/sdk/store`); the rating update, tickets and event replay (`@arbiter/sdk/ratings`) |
 | keeper (`keeper/`) | built, tested on Katana | `sdk` | Archives and forwards verified steps, records equivocation, answers disputes, resolves and settles, referees timed games and gives them their randomness |
 
 `core` has no Dojo or storage dependency and builds on both Cairo 2.13 (Dojo)
@@ -328,9 +329,12 @@ fn open_dispute(ref self: ContractState, game_id: felt252, epoch: u32) {
 ```
 
 - The game adds `arbiter_dojo::models::{m_ChannelTerms, m_ChannelState, m_ProverAllowed,
-  e_ChannelUpdated}` to `build-external-contracts`, and `sozo` registers them
-  in the game's namespace. A game that takes randomness from its referee adds
-  `m_ChannelRng`.
+  m_Settlement, e_ChannelUpdated}` to `build-external-contracts`, and `sozo`
+  registers them in the game's namespace. A game that takes randomness from
+  its referee adds `m_ChannelRng`, and a game with rated play `m_RatedGame`.
+- The game's `Config` implements `arbiter::RatedConfig`: `impl Unrated of
+  RatedConfig<Config> {}` for a game without rated play (see
+  [Ratings](#ratings)).
 - A channel is stored in two models, and a third if its terms take the
   referee's randomness:
   - `ChannelTerms`, written once, when the game opens: 2 seats (wallet,
@@ -373,7 +377,8 @@ fn open_dispute(ref self: ContractState, game_id: felt252, epoch: u32) {
 - `get_channel`, `snapshot` and the helpers that read the seats or the whole
   terms panic with `'Unknown channel'` for a game nobody opened.
 - `allow_prover` lets namespace owners allowlist adapter classes.
-- Rewards read `binding::result(world, game_id)` once a game is SETTLED.
+- Rewards read `binding::result(world, game_id)` once a game is SETTLED, and
+  `Settlement` says when and how it settled.
 
 ## Proof adapter
 
@@ -805,8 +810,9 @@ a seat's step or the referee's `Start`. `stamp` can't serve: it is 0 while the
 clock is paused, before the first stamp and after a forced step. `started` is
 in the envelope, so every context and state hash changed, as in v4 and v5.
 
-**Rated games (Surround), planned.** Not built yet: Surround is a separate
-repository, updated in its own pass.
+**Rated games (Surround), planned.** Built on 2026-10-11 for every game, not
+Surround alone: see [Ratings](#ratings), which also amends decision 4 below.
+As planned here:
 - *Rated or not is in what the wallets sign.* Otherwise a player who is losing
   could open the same signed terms as an unrated game first, and the ticket
   would never be used. `Config` is the only game-specific part of the terms, so
@@ -918,9 +924,9 @@ revert a call hit. Transcripts are version 6, and clocks carry `started`.
 3. ~~The Dojo binding: `open_game` with signature checks, OPENED, unique
    ids.~~ Done.
 4. ~~The adapter: proving and settling a game that isn't open.~~ Done.
-5. ~~The keeper and the SDK's proving client.~~ Done. Still to do: Surround's
-   `GoConfig.ticket`, `open_rated_game` and the rating rules, measured against
-   today's 77.6M.
+5. ~~The keeper and the SDK's proving client.~~ Done. ~~Surround's
+   `GoConfig.ticket`, `open_rated_game` and the rating rules~~: done, for every
+   game, in [Ratings](#ratings).
 
 **Tests.** The counter's Dojo suite opens every game on two test wallets'
 signatures (a `TestAccount` contract): `a_game_opens_on_its_seats_signed_terms_alone`,
@@ -950,7 +956,9 @@ opens and settles three, one of them with its randomness.
 3. A rated game's time is its referee's first stamp, checked against the
    ticket's window.
 4. Rated or not is part of the signed terms (Surround: the ticket digest in
-   `GoConfig`).
+   `GoConfig`). Amended 2026-10-11: every game's config says so through
+   `RatedConfig`, and the binding's `open_game` refuses a ticket for every
+   game, so no game can forget the check ([Ratings](#ratings)).
 5. `open_game` replaces `create`, `join` and `cancel`; WAITING and CANCELLED
    go.
 6. Revoking a referee key voids the rated games it started from the
@@ -973,6 +981,56 @@ opens and settles three, one of them with its randomness.
    signed concession, and an honest seat signs no other branch past it. The
    same may hold for a referee's `Flag`, since the referee attests one branch.
    Both need their edge cases checked (equivocation) before they are decided.
+
+## Ratings
+
+Onchain ratings for 2-seat games, moved from Surround on 2026-10-11 and made
+game-agnostic. The plan, the review and the decisions are in
+[RATINGS_PLAN.md](RATINGS_PLAN.md); the model's evidence is in Surround's
+`RANKING_PLAN.md`.
+
+**Shape.**
+- *Rules in code.* A game implements `RatingRules` (pools, starting ratings,
+  aging, the rank it shows) and builds its own ratings contract from
+  `RatingsComponent`, as it implements `GameRules` and builds its channel. No
+  setting is read from storage, and changing one is a timelocked `upgrade`.
+- *One deployment per game,* owned by the game. Ratings are keyed by
+  `(pool, player)`: Surround has one pool, a chess game would have one per
+  time control.
+- *Runtime policy stays in storage:* channels, matchmaker and referee keys,
+  and per pool the allowed configs, clock presets, starting bands, rank
+  offset and anchors.
+- *The engine* is Surround's Glicko-2 update without volatility, in Q32.32,
+  with `RatingRules::drift` in place of Surround's rank-dependent half-life.
+  Surround's `GoRatingRules` reproduces its vectors bit for bit.
+
+**Rated or not in the signed terms.** Decision 4 kept the ticket's digest in
+the game's `Config`. A ticket can't carry a hash of a config that holds its own
+digest, so a game implements `RatedConfig` (`ticket`, `with_ticket`), and
+`config_hash` hashes the config with its ticket zeroed. Every game implements
+it (`impl Unrated of RatedConfig<Config> {}` without rated play), and
+`open_game` refuses a nonzero ticket, so a seat losing a rated game can't
+reopen its signed terms as unrated. `open_rated_game` checks the terms against
+the ticket: the digest and the round trip of `with_ticket`, the config hash,
+the seats, the referee and the clock settings' hash, the referee's randomness
+tip (required with `RatingRules::REFEREE_RNG`, otherwise refused), the prover
+and the response window. The ticket carries hashes because a referee's tip
+isn't known at pairing; the terms travel beside it.
+
+**Settlement.** `save()` writes `Settlement` (when, and by which route) in the
+call that leaves a game settled, so it covers every route, `void` and `roll`
+included. Every game registers `m_Settlement`; a game with rated play also
+registers `m_RatedGame`. `rated::rate` reads only arbiter state: the result,
+`Clock.started` (or the ticket's `issued_at` for a forfeit settled before any
+stamp reached the chain), the settlement and the step count.
+
+**Digests.** A ticket's digest binds `'ARBITER_PAIRING_V1'`, the game's
+`RatingRules::TAG` and the ratings contract's address, so a ticket works for
+one deployment of one game. Admin ops are tagged by `RatingRules::TAG`.
+
+**Upgrades.** A game whose pool, pool constants or new player's band an
+upgrade dropped after its ticket was accepted is voided when it reports
+(`VOID_INVALID`), so no ticket stays accepted forever.
 
 ## More than 2 seats (planned)
 
@@ -1207,8 +1265,12 @@ spike's collusion scenarios become tests that the new rules must reject.
 12. ~~Opening by signatures.~~ Done, in protocol v6: a game reaches the
     chain only when every seat's wallet has signed its terms, in one
     transaction with its first onchain call (`open_game`), and the keeper
-    opens the games it settles. Still to do: Surround's rated games
-    (`open_rated_game`). See [Opening by signatures](#opening-by-signatures).
+    opens the games it settles. ~~Surround's rated games
+    (`open_rated_game`).~~ Done in 13. See
+    [Opening by signatures](#opening-by-signatures).
+13. ~~Ratings.~~ Done (2026-10-11): `arbiter_ratings`, `arbiter_dojo::rated`
+    and `@arbiter/sdk/ratings`, moved from Surround and made game-agnostic. See
+    [Ratings](#ratings).
 
 ## Development
 

@@ -181,16 +181,17 @@ fn open_dispute(ref self: ContractState, game_id: felt252, epoch: u32) {
 | Package | Path | What it does |
 |---|---|---|
 | `arbiter` | `core/` | The protocol and the channel's dispute logic as pure functions: step hashing and signatures, transcript replay, forced steps, hash-chain randomness, referee clocks, checkpoint approvals. No Dojo. Builds on Cairo 2.13 and 2.18 |
-| `arbiter_dojo` | `dojo/arbiter_dojo/` | Dojo models (`ChannelTerms`, `ChannelState`, `ChannelRng`, `ProverAllowed`), the `ChannelUpdated` event, and one helper per entrypoint (open_game, submit, dispute, acknowledge, resolve, force, roll, void, resume, timeout, resign, prover allowlist) |
+| `arbiter_dojo` | `dojo/arbiter_dojo/` | Dojo models (`ChannelTerms`, `ChannelState`, `ChannelRng`, `ProverAllowed`, `Settlement`, `RatedGame`), the `ChannelUpdated` event, and one helper per entrypoint (open_game, submit, dispute, acknowledge, resolve, force, roll, void, resume, timeout, resign, prover allowlist), plus rated games (`open_rated_game`, `rate`) |
+| `arbiter_ratings` | `ratings/` | Onchain ratings for 2-seat games: Glicko-2 without volatility in Q32.32, matchmaker-signed pairing tickets, pools, AI anchors, a timelocked admin. A game implements `RatingRules` and builds its own ratings contract from `RatingsComponent`. Cairo 2.13 |
 | `arbiter_adapter` | `adapter/arbiter_adapter/` | Proof adapter logic: the virtual replay that gets proved (`__execute__`) and `settle`, which checks the proof facts and relays the result. Cairo 2.18. A game's adapter contract is about 40 lines |
 | `arbiter_testing` | `testing/` | Test-only Cairo signer, so tests can sign messages that bind deployed addresses |
-| `@arbiter/sdk` | `sdk/` | JS copy of the protocol: hashing, signing, replay, a `Session` per client, a `Referee` for timed games, channel calldata codecs and proof payloads. Fixtures keep it byte-identical to the Cairo. `@arbiter/sdk/proving` requests a native proof of a session and builds the `settle` call. `@arbiter/sdk/store` persists sessions (IndexedDB or files) and refuses to sign a step that would equivocate. `@arbiter/sdk/keeper` talks to a keeper. Install from git: `npm install github:broody/arbiter#<rev>` |
+| `@arbiter/sdk` | `sdk/` | JS copy of the protocol: hashing, signing, replay, a `Session` per client, a `Referee` for timed games, channel calldata codecs and proof payloads. Fixtures keep it byte-identical to the Cairo. `@arbiter/sdk/proving` requests a native proof of a session and builds the `settle` call. `@arbiter/sdk/store` persists sessions (IndexedDB or files) and refuses to sign a step that would equivocate. `@arbiter/sdk/keeper` talks to a keeper. `@arbiter/sdk/ratings` mirrors the rating update bit for bit, signs pairing tickets and replays a ratings contract's events. Install from git: `npm install github:broody/arbiter#<rev>` |
 
 ### Status
 
 | | |
 |---|---|
-| Built and tested | Protocol core (v6), referee clocks, randomness from the referee, games opened by their players' signatures, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS hashing and replay, counter example (pure, as a Dojo world, and with an adapter) |
+| Built and tested | Protocol core (v6), referee clocks, randomness from the referee, games opened by their players' signatures, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS hashing and replay, ratings (Surround's rated games run on them), counter example (pure, as a Dojo world, rated, and with an adapter) |
 | Proven on Sepolia | Surround (Go) settles full games with one native SNIP-36 proof through `arbiter_adapter`; see [Surround's results](https://github.com/broody/surround/blob/main/offchain/RESULTS.md) |
 | Self-hosted proving | [`prover/`](prover/README.md): StarkWare's transaction prover built from source (PROOF1) behind a gateway that proves only allowlisted arbiter adapters. Settled a Surround game on Sepolia; its proofs are byte-identical to the hosted prover's |
 | Keeper | [`keeper/`](keeper/README.md): archives and forwards each game's verified steps, records equivocation, answers disputes, resolves and settles, referees timed games and gives them their randomness. Tested end to end on a local Katana |
@@ -208,11 +209,18 @@ scripts/check.sh
 
 `check.sh` regenerates the JS fixtures and runs the SDK tests, then tests:
 - the pure crates on Scarb 2.13.1 and 2.18.0;
+- the ratings (`ratings/`) on 2.13.1, and their fuzz properties
+  (`ratings/fuzz/`) with Starknet Foundry 0.64.0;
 - the Dojo workspace (`dojo/`) on 2.13.1;
 - the adapter workspace (`adapter/`) on 2.18.0 with Starknet Foundry 0.63.0.
 
 Requirements: Scarb 2.13.1 and 2.18.0 (asdf switches with `ASDF_SCARB_VERSION`),
-Sozo 1.8.5 for the Dojo workspace, Starknet Foundry 0.63.0 for the adapter,
-and Node 22 or later. The SDK's Poseidon is committed WebAssembly; rebuilding
+Sozo 1.8.5 for the Dojo workspace, Starknet Foundry 0.63.0 for the adapter
+and 0.64.0 for the ratings' fuzz properties, and Node 22 or later. The SDK's Poseidon is committed WebAssembly; rebuilding
 it (`npm run poseidon`) also needs Rust with the `wasm32-unknown-unknown`
 target.
+
+## License
+
+MIT ([LICENSE](LICENSE)), except `prover/patches`, which modify StarkWare's
+repositories and keep their Apache-2.0 license.

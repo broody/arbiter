@@ -1,0 +1,22 @@
+[package]
+name = "arbiter_ratings_fuzz"
+version = "0.1.0"
+edition = "2024_07"
+cairo-version = "2.13.1"
+description = "snforge fuzz properties of arbiter_ratings' rating update, on random storable states."
+
+# Its own workspace: snforge, apart from the root's cairo-test crates.
+[workspace]
+
+[dependencies]
+starknet = "2.13.1"
+arbiter_ratings = { path = ".." }
+
+[dev-dependencies]
+snforge_std = "0.64.0"
+
+[scripts]
+test = "snforge test"
+
+[tool.snforge]
+fuzzer_runs = 2000

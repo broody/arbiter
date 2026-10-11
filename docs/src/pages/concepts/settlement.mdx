@@ -141,3 +141,8 @@ The adapter's
 games. A [keeper](/infra/keeper) settles finished games that nobody submitted,
 opening those nobody opened in the same transaction, and answers disputes,
 from its own account.
+
+Whichever call settles a game, `void` and `roll` included, `arbiter_dojo`
+records it in the [`Settlement`](/reference/dojo#settlement) model: the block
+timestamp and the route (`VIA_TRANSCRIPT`, `VIA_RESIGN` or
+`VIA_TIMEOUT_CLAIM`). [Rated games](/concepts/ratings) read it.

@@ -187,6 +187,9 @@ Moving to a new sequencer revision means regenerating the patches against the
 revisions its lockfile pins; `build.sh` refuses a mismatch. The gateway
 refuses `bounded` on a build whose patches are not the current ones.
 
+The patches modify StarkWare's repositories, which are licensed Apache-2.0,
+and keep that license; the rest of arbiter is MIT ([`LICENSE`](../LICENSE)).
+
 ## Offline proving
 
 A live job can only be proved again while the node still serves storage

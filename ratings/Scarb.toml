@@ -1,0 +1,21 @@
+[package]
+name = "arbiter_ratings"
+version = "0.1.0"
+edition = "2024_07"
+# Built with Cairo 2.13.1 so Dojo channels (Dojo 1.8) can import it.
+cairo-version = "2.13.1"
+description = "Onchain ratings for arbiter games: Glicko-2 without volatility, in Q32.32, as a component each game compiles with its own rules."
+
+[dependencies]
+arbiter = { path = "../core" }
+starknet = "2.13.1"
+
+[dev-dependencies]
+cairo_test = "2.13.1"
+arbiter_testing = { path = "../testing" }
+
+[lib]
+
+# The component's tests deploy a test contract.
+[[target.starknet-contract]]
+casm = true

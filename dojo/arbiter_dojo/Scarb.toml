@@ -9,6 +9,7 @@ description = "Dojo binding for arbiter channels: models, events and entrypoint 
 
 [dependencies]
 arbiter = { path = "../../core" }
+arbiter_ratings = { path = "../../ratings" }
 starknet = "2.13.1"
 dojo = "1.8.0"
 dojo_cairo_macros = "1.8.0"
