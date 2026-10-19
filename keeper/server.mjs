@@ -94,11 +94,16 @@ export async function loadConfig(raw, { base = process.cwd(), env = process.env 
     if (typeof game.maxSteps !== 'function') throw Error(`${g.export} has no maxSteps: it predates protocol v4`);
     const channel = felt(g.channel), anchored = g.anchored ?? true;
     if (!anchored && g.prover) throw Error('An unanchored game has no channel to settle on: remove its prover');
+    // The channel checks an opened game's delegations against itself, so only
+    // games that never open may honour another channel's.
+    if (anchored && g.delegation_channel != null)
+      throw Error('Only an unanchored entry takes another channel\'s delegations: a channel checks its own');
     if (g.world && !g.namespace) throw Error('A game entry with a world needs its namespace');
     const hook = name => (typeof module[name] === 'function' ? module[name] : null);
     config.entries.set(channel, {
       channel, game, anchored, entrypoints: { ...ENTRYPOINTS, ...g.entrypoints }, ...settings(g, config),
       world: anchored && g.world ? felt(g.world) : null, namespace: g.namespace ?? null, from_block: g.from_block ?? null,
+      delegation_channel: g.delegation_channel == null ? null : felt(g.delegation_channel),
       admit: hook('admit'), afterSettle: hook('afterSettle'), openCall: hook('openCall'),
       prover: g.prover ? { url: g.prover.url, class_hash: BigInt(g.prover.class_hash) } : null,
     });
@@ -125,7 +130,10 @@ export async function loadConfig(raw, { base = process.cwd(), env = process.env 
  * Check that each seat agreed to the terms of a game no channel holds, as its
  * channel will: one approval per player, in seat order, each its wallet's
  * signature over `termsTypedData`, or, where the entry takes delegations
- * (`delegation_seconds`), a delegated approval valid at the chain's time.
+ * (`delegation_seconds`), a delegated approval valid at the chain's time: a
+ * delegation for the terms' channel, or, in an unanchored entry with
+ * `delegation_channel`, for that channel instead (a sign-in for a game's real
+ * channel then covers its casual games too).
  */
 async function verifyAuthorizations(chain, entry, terms, authorizations) {
   if (!Array.isArray(authorizations) || authorizations.length !== terms.players.length)
@@ -133,7 +141,7 @@ async function verifyAuthorizations(chain, entry, terms, authorizations) {
   // The channel opens a game only under its seats' id: hold no game it never could.
   if (felt(terms.game_id) !== gameIdOf(terms.players, terms.keys)) fail(403, 'The game id is not its seats\' (gameIdOf)');
   const options = { verifyMessage: (...a) => chain.verifyMessage(...a), now: await chain.now(),
-    maxLifetime: entry.delegation_seconds };
+    maxLifetime: entry.delegation_seconds, delegationChannel: entry.delegation_channel ?? terms.channel };
   for (const seat of terms.players.keys()) {
     let valid = false;
     try { valid = await verifyApproval(entry.game, terms, seat, authorizations[seat], options); } catch {}

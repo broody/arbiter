@@ -770,6 +770,10 @@ chooses the lifetime and opts in; `open_game` keeps taking wallets only. The
 key never moves stones: the terms still name a fresh session key per game.
 A stolen delegated key can agree to games for its wallet until it expires;
 whoever admits games (a matchmaker, say) revokes keys sooner by refusing them.
+A keeper's unanchored entry may honour delegations for one real channel of
+the same game (`delegation_channel`), so a sign-in there also covers games
+that never touch the chain: they cost nothing, settle nothing, and the
+delegation still expires. A channel itself only ever honours its own.
 
 **Bundled with the first call.** Whatever call first needs the chain goes in
 one transaction with `open_game`, as a multicall:

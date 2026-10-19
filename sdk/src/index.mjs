@@ -241,16 +241,19 @@ export const encodeApprovals = approvals => [BigInt(approvals.length), ...approv
  * account's `is_valid_signature`), or, where the channel takes delegations
  * of at most `maxLifetime` seconds (0: none), one that expires after `now`
  * (Unix seconds) and within `maxLifetime`, signed by the wallet, with the
- * delegated key's signature over the terms.
+ * delegated key's signature over the terms. The delegation is for
+ * `delegationChannel`: the terms' own channel, unless a game no channel will
+ * ever hold (an unanchored one) honours delegations for another.
  */
-export async function verifyApproval(game, terms, seat, approval, { verifyMessage, now, maxLifetime = 0 }) {
+export async function verifyApproval(game, terms, seat, approval,
+  { verifyMessage, now, maxLifetime = 0, delegationChannel = terms.channel }) {
   const player = terms.players[seat];
   if (!isDelegated(approval)) return Boolean(await verifyMessage(player, termsTypedData(game, terms), approval));
   const expires = BigInt(approval.expires_at), at = BigInt(now);
   if (!maxLifetime || at >= expires || expires - at > BigInt(maxLifetime)) return false;
   const [r, s] = signatureFelts(approval.signature);
   if (!verify(termsMessageHash(game, terms, player), { r, s }, felt(approval.key))) return false;
-  const delegation = { chain_id: terms.chain_id, channel: terms.channel, key: approval.key, expires_at: expires };
+  const delegation = { chain_id: terms.chain_id, channel: delegationChannel, key: approval.key, expires_at: expires };
   return Boolean(await verifyMessage(player, delegationTypedData(game, delegation), approval.delegation));
 }
 

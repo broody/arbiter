@@ -303,6 +303,11 @@ each entry's `max_steps`. Steps to a closed game get 409.
     entry's channel takes (`open_game_delegable`). A game no channel holds
     then registers on a seat's delegated approval (`delegatedApproval`) too,
     checked at the chain's time, and opens through `open_game_delegable`.
+  - `delegation_channel` (unanchored entries only): the channel whose
+    delegations the entry honours instead of its own channel value. Naming a
+    game's real channel lets one sign-in cover its casual games too. An
+    anchored entry can't: its channel checks an opened game's delegations
+    against itself.
 - `store`: the file store directory (`@arbiter/sdk/store/file`, one process
   per directory).
 - `settle: false` stops the keeper from submitting finished games itself.

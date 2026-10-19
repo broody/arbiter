@@ -131,6 +131,38 @@ test('an unanchored game needs each seat\'s wallet to sign its terms', async () 
   } finally { await k.close(); }
 });
 
+test('an unanchored entry may honour delegations for another channel: a sign-in for the game\'s real one', async () => {
+  const chain = fakeChain();
+  const casual = own({ ...terms(), channel: 0n, players: wallets.map(walletAddress) });
+  const session = new Session(counter, casual);
+  session.move(add(3), keys[0]);
+  const bob = walletSign(wallets[1], termsTypedData(counter, casual));
+  // Alice's wallet delegated a key for `channel`, and the key signs the casual game's terms.
+  const DELEGATE = 0xde1en;
+  const alice = (channel, expiresAt = chain.time + 60) => {
+    const delegation = { chain_id: casual.chain_id, channel, key: publicKey(DELEGATE), expires_at: expiresAt };
+    return delegatedApproval(counter, casual, 0,
+      { privateKey: DELEGATE, expiresAt, delegation: walletSign(wallets[0], delegationTypedData(counter, delegation)) });
+  };
+  const CASUAL = { ...GAME, channel: '0x0', anchored: false, delegation_seconds: 3600 };
+  // By default an unanchored entry honours delegations for its own channel value only.
+  const plain = await keeper({ games: [GAME, CASUAL] }, chain);
+  try {
+    await assert.rejects(plain.client.register(session, { authorizations: [alice(CHANNEL), bob] }), /Seat 0's wallet did not sign/);
+    assert.equal((await plain.client.register(session, { authorizations: [alice(0n), bob] })).created, true);
+  } finally { await plain.close(); }
+  // Naming the game's real channel, it honours that channel's instead, and no other.
+  const k = await keeper({ games: [GAME, { ...CASUAL, delegation_channel: hex(CHANNEL) }] }, chain);
+  try {
+    for (const refused of [alice(0n), alice(0x99n), alice(CHANNEL, chain.time)])
+      await assert.rejects(k.client.register(session, { authorizations: [refused, bob] }), /Seat 0's wallet did not sign/);
+    assert.equal((await k.client.register(session, { authorizations: [alice(CHANNEL), bob] })).created, true);
+  } finally { await k.close(); }
+  // An anchored entry can't: its channel checks the delegations of the games it opens against itself.
+  await assert.rejects(loadConfig({ chain_id: 'SN_TEST', games: [{ ...GAME, delegation_channel: '0x1' }] }, { base }),
+    /Only an unanchored entry/);
+});
+
 test('a game no channel has opened yet is held on its wallets\' signatures', async () => {
   const k = await keeper({ max_open_per_player: 1 });
   try {
