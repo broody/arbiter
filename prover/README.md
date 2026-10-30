@@ -54,9 +54,13 @@ v8 adapter, as captured by Surround's `offchain/server/tools/device-bench.mjs`
   StarkWare's transaction prover's, unpatched, at the same sequencer revision.
 - **Warm:** one backend proving four of them in a row took 15–20 s each (OS
   run 5.0–6.3 s, proof 10.0–14.1 s), and peaked at 7.2 GiB.
-- **Refusals:** Sepolia's v8 adapter pins PROOF1's virtual OS program, so the
-  gateway refuses its transactions with `1101` before proving. Settling needs
-  an adapter instance pinned to PROOF2's ([PROOF1 adapters](#proof1-adapters)).
+- **Settled:** Surround's `kgs_2019_04_10_39` (311 steps, B+1.50), proved by
+  this gateway in 23.4 s, opened and settled on Sepolia in one transaction
+  through an adapter instance pinned to PROOF2's program
+  (`0x1b8c548d…8a23`): 99.39M L2 gas, the same as a PROOF1 open-and-settle.
+- **Refusals:** Sepolia's earlier v8 adapter pins PROOF1's virtual OS program,
+  so the gateway refuses its transactions with `1101` before proving
+  ([PROOF1 adapters](#proof1-adapters)).
 
 The PROOF1 backend this one replaced (2026-09-26 to 2026-10-30) proved the
 same games in 15–20 s end to end, peaking at 9.0 GiB in its `bounded` mode and
@@ -67,7 +71,8 @@ same games in 15–20 s end to end, peaking at 9.0 GiB in its `bounded` mode and
 **Submitting proofs.** Estimate and send `settle` through an RPC node whose
 versioned constants match the sequencer's: Pathfinder v0.24.0 rejected a PROOF1
 in simulation ("Proof version PROOF1 is not allowed under this protocol
-version") that the Sepolia sequencer accepted. Not yet checked with PROOF2.
+version") that the Sepolia sequencer accepted. Our Pathfinder node estimated and
+sent the PROOF2 `settle` above.
 
 ## Memory
 
