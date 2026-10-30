@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Build the PROOF1 backend: StarkWare's starknet_transaction_prover (the service
-# behind the hosted Sepolia prover) at the sequencer revision pinned in pins.json,
-# with in-process Stwo proving and arbiter's patches (patches/: the memory modes,
-# allocator trim and PIE dump in the README, each off unless the backend's
-# environment turns it on). Output:
-# $BUILD_DIR/bin/starknet_transaction_prover, $BUILD_DIR/bin/prove_pie (proves a
-# PIE the backend dumped with PROVER_PIE_DUMP, offline; see README), the Sierra
-# compiler under $BUILD_DIR/tools, and $BUILD_DIR/build.json.
+# Build the PROOF2 backend: StarkWare's starknet_transaction_prover (the service
+# behind the hosted prover) at the sequencer revision pinned in pins.json, with
+# in-process Stwo proving, and with the prover crates it takes from
+# starkware-libs/proving swapped for the pinned branch of them
+# (patches/sequencer.patch: a Cargo [patch] and its lock; the README's Memory).
+# Output: $BUILD_DIR/bin/starknet_transaction_prover, the Sierra compiler under
+# $BUILD_DIR/tools, and $BUILD_DIR/build.json.
 #
 #   prover/build.sh
 #
@@ -22,7 +21,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 pin() { node -e "const p=require('$here/pins.json');console.log($1)"; }
 REPO=$(pin 'p.sequencer.repository'); REV=$(pin 'p.sequencer.revision')
 TOOLCHAIN=$(pin 'p.toolchain'); CAIRO_LANG=$(pin 'p.cairo_lang')
-DEPS=$(pin 'Object.keys(p.patches.dependencies).join(" ")')
+PROVING_REPO=$(pin 'p.proving.repository'); PROVING_REV=$(pin 'p.proving.revision')
 BUILD_DIR="${ARBITER_PROVER_BUILD:-$HOME/.cache/arbiter-prover}"
 SRC="$BUILD_DIR/sequencer"
 [ -n "${CAIRO_LANG_BIN:-}" ] && export PATH="$CAIRO_LANG_BIN:$PATH"
@@ -31,30 +30,18 @@ command -v cairo-compile >/dev/null || { echo "cairo-compile not found: install 
 cairo-compile --version 2>&1 | grep -q "$CAIRO_LANG" || { echo "cairo-compile is not cairo-lang $CAIRO_LANG: $(cairo-compile --version 2>&1)" >&2; exit 1; }
 rustup toolchain list | grep -q "^$TOOLCHAIN" || rustup toolchain install "$TOOLCHAIN" --profile minimal
 
-# Put DIR at REPOSITORY@REVISION with no local changes (ignored build output such
-# as target/ survives), then apply PATCH if given.
-checkout() {
-  local dir=$1 repo=$2 rev=$3 patch=${4:-}
-  [ -d "$dir/.git" ] || git init -q "$dir"
-  git -C "$dir" cat-file -e "$rev^{commit}" 2>/dev/null || git -C "$dir" fetch -q --depth 1 "$repo" "$rev"
-  git -C "$dir" -c advice.detachedHead=false checkout -q --force "$rev"
-  git -C "$dir" clean -fdq
-  [ "$(git -C "$dir" rev-parse HEAD)" = "$rev" ] || { echo "$dir is not at $rev" >&2; exit 1; }
-  [ -z "$patch" ] || git -C "$dir" apply "$patch"
-}
-
 mkdir -p "$BUILD_DIR/bin"
+# The sequencer at its pinned revision with no local changes (ignored build output
+# such as target/ survives), then the patch.
 [ -d "$SRC/.git" ] || git clone --no-checkout "${SEQUENCER_SOURCE:-$REPO}" "$SRC"
-checkout "$SRC" "$REPO" "$REV"
-# Each patched dependency must be the revision the sequencer already locks, so the
-# patches change storage, not versions. The [patch] section (sequencer.patch)
-# points Cargo at these copies, which sit next to the sequencer.
-for dep in $DEPS; do
-  repo=$(pin "p.patches.dependencies['$dep'].repository"); rev=$(pin "p.patches.dependencies['$dep'].revision")
-  grep -q "\"git+${repo%.git}?[^\"#]*#$rev\"" "$SRC/Cargo.lock" || { echo "the sequencer does not lock $dep at $rev" >&2; exit 1; }
-  checkout "$BUILD_DIR/$dep" "$repo" "$rev" "$here/patches/$dep.patch"
-done
+git -C "$SRC" cat-file -e "$REV^{commit}" 2>/dev/null || git -C "$SRC" fetch -q --depth 1 "$REPO" "$REV"
+git -C "$SRC" -c advice.detachedHead=false checkout -q --force "$REV"
+git -C "$SRC" clean -fdq
+[ "$(git -C "$SRC" rev-parse HEAD)" = "$REV" ] || { echo "$SRC is not at $REV" >&2; exit 1; }
 git -C "$SRC" apply "$here/patches/sequencer.patch"
+# The patch's lock must take the prover crates from the pinned branch, and only from it.
+grep -q "\"git+${PROVING_REPO%.git}?rev=$PROVING_REV#" "$SRC/Cargo.lock" || { echo "sequencer.patch does not lock $PROVING_REPO at $PROVING_REV" >&2; exit 1; }
+! grep -q '"git+https://github.com/starkware-libs/proving?' "$SRC/Cargo.lock" || { echo "sequencer.patch leaves crates from starkware-libs/proving" >&2; exit 1; }
 
 cd "$SRC"
 # The workspace config wraps rustc in sccache; build without it, as upstream's Dockerfile does.
@@ -67,7 +54,7 @@ if [ -n "${TARGET_CPU:-}" ]; then
 fi
 env "${cpu_flags[@]}" cargo +"$TOOLCHAIN" build --release --locked -p starknet_transaction_prover --features stwo_proving
 install -m 0755 target/release/starknet_transaction_prover "$BUILD_DIR/bin/starknet_transaction_prover"
-install -m 0755 target/release/prove_pie "$BUILD_DIR/bin/prove_pie"
+rm -f "$BUILD_DIR/bin/prove_pie"  # a PROOF1 build's
 
 # The service compiles fetched Sierra classes to CASM with this binary at runtime,
 # found under $CARGO_TOOLS_ROOT.
@@ -79,6 +66,6 @@ const sha=b=>crypto.createHash('sha256').update(b).digest('hex');
 const bin='$BUILD_DIR/bin/starknet_transaction_prover',dir='$here/patches';
 const patches=Object.fromEntries(fs.readdirSync(dir).sort().map(f=>[f,sha(fs.readFileSync(path.join(dir,f)))]));
 fs.writeFileSync('$BUILD_DIR/build.json',JSON.stringify({
-  sequencer:'$REPO@$REV',toolchain:'$TOOLCHAIN',cairo_lang:'$CAIRO_LANG',target_cpu:process.env.TARGET_CPU||null,
+  sequencer:'$REPO@$REV',proving:'$PROVING_REPO@$PROVING_REV',toolchain:'$TOOLCHAIN',cairo_lang:'$CAIRO_LANG',target_cpu:process.env.TARGET_CPU||null,
   patches,binary_sha256:sha(fs.readFileSync(bin)),built_at:new Date().toISOString()},null,2)+'\n');"
 echo "built $BUILD_DIR/bin/starknet_transaction_prover (tools in $BUILD_DIR/tools)"

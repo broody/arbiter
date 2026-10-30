@@ -590,8 +590,9 @@ latest verified transcript.
   transcript binding keep traces small. Surround's 311-action v3 game is
   1.57M trace instructions.
 - **Checkpoint proofs otherwise.** Each proves a segment from the committed
-  anchor, or extends the candidate within a dispute, and commits it onchain. This works with PROOF1 today, and PROOF2 only
-  reduces how many are needed.
+  anchor, or extends the candidate within a dispute, and commits it onchain. With
+  PROOF2, which arbiter's prover makes since 2026-10-30, Surround's longest
+  stress game (529 steps, 2.38M OS steps) is still one proof.
 - **No per-move recursive proving:**
   - STARK proof size barely grows with trace length: Surround's 68-action proof
     is 233 KB and its 311-action proof is about 251 KB.
@@ -1248,8 +1249,9 @@ spike's collusion scenarios become tests that the new rules must reject.
 4. Port Surround onto arbiter, keeping its test suites, and re-measure proofs.
 5. Hashfront rules crate and client integration.
 6. ~~SDK proof builders.~~ Done (`@arbiter/sdk/proving`).
-7. ~~Self-hosted PROOF1 prover.~~ Done (`prover/`: upstream transaction prover
-   plus an allowlisting gateway). PROOF2 large path once the network accepts it.
+7. ~~Self-hosted prover.~~ Done (`prover/`: upstream transaction prover plus an
+   allowlisting gateway). PROOF1 until 2026-10-30, PROOF2 since (Sepolia's
+   gateway takes it since 2026-10-28).
 8. ~~Keeper.~~ Done: `@arbiter/sdk/store` persists sessions and guards
    signing, and `keeper/` archives and forwards steps and answers disputes,
    resolves and settles (tested on Katana). Still to do: the proof path against

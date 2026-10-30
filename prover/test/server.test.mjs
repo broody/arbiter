@@ -5,12 +5,12 @@ import { test } from 'node:test';
 import { hex, tag } from '../../sdk/src/index.mjs';
 import { rpc } from '../../sdk/src/proving.mjs';
 import {
-  BLOCK_NOT_FOUND, EXCEEDS_PROOF1, INVALID_PARAMS, INVALID_TRANSACTION, METHOD_NOT_FOUND, NOT_ALLOWED, RATE_LIMITED,
+  BLOCK_NOT_FOUND, EXCEEDS_CAPACITY, INVALID_PARAMS, INVALID_TRANSACTION, METHOD_NOT_FOUND, NOT_ALLOWED, RATE_LIMITED,
   SERVICE_BUSY, WRONG_OS_PROGRAM, loadConfig, startGateway,
 } from '../server.mjs';
 import { ADAPTER, CLASS, OS, OTHER, code, listen, node, prove, tx } from './helpers.mjs';
 
-const proofResult = { proof: 'b64', proof_facts: [hex(tag('PROOF1')), hex(tag('VIRTUAL_SNOS')), hex(OS)], l2_to_l1_messages: [] };
+const proofResult = { proof: 'b64', proof_facts: [hex(tag('PROOF2')), hex(tag('VIRTUAL_SNOS')), hex(OS)], l2_to_l1_messages: [] };
 function backend({ answer = () => ({ result: proofResult }), delay = 0 } = {}) {
   const calls = [];
   return listen(async q => {
@@ -38,8 +38,7 @@ test('an allowlisted adapter reaches the backend and gets its proof', async () =
     assert.equal(await rpc(s.gateway.url, 'starknet_specVersion', []), '0.10.3-rc.2');
     const info = await rpc(s.gateway.url, 'arbiter_info', []);
     assert.deepEqual(info.adapter_classes, [hex(CLASS)]);
-    assert.deepEqual(info.proof_paths, ['PROOF1']);
-    assert.equal(info.memory, 'bounded');
+    assert.deepEqual(info.proof_paths, ['PROOF2']);
     assert.equal(s.logs.at(-1).outcome, 'proved');
   } finally { await s.close(); }
 });
@@ -74,14 +73,14 @@ test('an adapter pinning another OS program is refused', async () => {
   } finally { await s.close(); }
 });
 
-test('oversized calldata and PROOF1 overflow ask for checkpoints', async () => {
+test('oversized calldata and a trace over the prover\'s capacity ask for checkpoints', async () => {
   const s = await setup({ config: { max_calldata: 2 },
     backend: { answer: () => ({ error: { code: -32603, message: 'Internal error', data: 'proving failed: Not enough twiddles!' } }) } });
   try {
     await assert.rejects(prove(s.gateway.url, { block_id: { block_number: 100 }, transaction: tx({ calldata: ['0x1', '0x2', '0x3'] }) }),
       e => e.rpcError?.code === INVALID_TRANSACTION && /checkpoints/.test(e.rpcError.message));
     await assert.rejects(prove(s.gateway.url, { block_id: { block_number: 100 }, transaction: tx() }),
-      e => e.rpcError?.code === EXCEEDS_PROOF1 && /PROOF1/.test(e.rpcError.message));
+      e => e.rpcError?.code === EXCEEDS_CAPACITY && /capacity/.test(e.rpcError.message));
   } finally { await s.close(); }
 });
 
@@ -113,13 +112,11 @@ test('clients are rate limited', async () => {
   } finally { await s.close(); }
 });
 
-test('the memory mode must be one the backend has', () => {
+test('a PROOF1 config\'s memory mode is refused', () => {
   const base = { rpc_url: 'http://node', backend_url: 'http://backend', chain_id: 'SN_SEPOLIA',
     virtual_os_program: hex(OS), adapter_classes: [hex(CLASS)] };
-  assert.equal(loadConfig(base).memory, 'bounded');
-  assert.equal(loadConfig({ ...base, memory: 'standard' }).memory, 'standard');
-  assert.throws(() => loadConfig({ ...base, memory: 'tiny' }), /memory must be one of standard, bounded/);
-  assert.throws(() => loadConfig({ ...base, memory: 'toString' }), /memory must be one of/);
+  assert.equal(loadConfig(base).memory, undefined);
+  assert.throws(() => loadConfig({ ...base, memory: 'bounded' }), /memory is no longer used/);
 });
 
 test('startup refuses the wrong chain or an undeclared adapter class', async () => {

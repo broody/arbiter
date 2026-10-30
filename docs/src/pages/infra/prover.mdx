@@ -10,7 +10,7 @@ This page is the overview.
 
 | Process | What it is |
 | --- | --- |
-| backend | StarkWare's `starknet_transaction_prover`, the service behind the hosted prover, built from source at the sequencer revision pinned in `pins.json`. It runs the adapter's virtual transaction in the virtual OS and proves it with Stwo in process (`PROOF1`) |
+| backend | StarkWare's `starknet_transaction_prover`, the service behind the hosted prover, built from source at the sequencer revision pinned in `pins.json`, with its prover crates from Outis's striped branch of them. It runs the adapter's virtual transaction in the virtual OS and proves it with Stwo in process (`PROOF2`) |
 | gateway | [`server.mjs`](https://github.com/broody/arbiter/blob/main/prover/server.mjs): the same JSON-RPC API in front of the backend. It admits only arbiter settlements, queues and rate-limits them, and runs each backend worker in its own cgroup |
 
 Clients point at the gateway and change nothing else:
@@ -19,9 +19,9 @@ Clients point at the gateway and change nothing else:
 await proveSession({ rpcUrl, proverUrl: 'http://prover-host:3100', session, epoch, expectedClassHash })
 ```
 
-The proof, its facts and the `settle` call are exactly what the hosted prover
-returns, and the network verifies them the same way. Proofs from this prover
-have been byte-identical to the hosted prover's.
+The proof, its facts and the `settle` call are exactly what StarkWare's
+transaction prover returns, and the network verifies them the same way. Proofs
+from this prover are byte-identical to it, and to Outis's device prover's.
 
 ## Admission
 
@@ -46,26 +46,17 @@ replay (`submit_history`) and disputes remain the fallback.
 
 ## Memory
 
-A proof of a large game needs tens of GiB. The gateway's `memory` setting picks
-how the backend holds a proof's working data. Both modes give byte-identical
-proofs, so only memory and time differ:
-
-| `memory` | Largest game (529 steps): peak | Proof time |
-| --- | ---: | ---: |
-| `standard` | about 40 GiB | about 14 s |
-| `bounded` (default) | about 9 GiB | about 19 s |
-
-`standard` has the lower latency for one job. On a large machine, several
-`bounded` workers match its throughput on half the memory, and `bounded` fits
-hosts that `standard` does not. Each worker proves one job at a time in its
-own cgroup, with a memory limit. A job that runs out of memory fails alone, and
-its worker restarts.
+The backend's striped prover commits each column one stripe of eight at a
+time, so the largest game (529 steps) peaks at about 7 GiB, and a backend gives
+its memory back between proofs. Each worker proves one job at a time in its own
+cgroup, with a memory limit (12 GiB by default). A job that runs out of memory
+fails alone, and its worker restarts.
 
 ## Run it
 
 ```bash
 pip install cairo-lang==0.14.3a3
-TARGET_CPU=native prover/build.sh          # about 15 minutes on 36 cores
+TARGET_CPU=native prover/build.sh          # about 4 minutes on 36 cores
 prover/run.sh my-config.json               # see config.example.json
 ```
 
@@ -80,6 +71,8 @@ one host, change one of them.
 
 ## Results
 
-On a 36-core, 125 GiB machine, games of 68 to 529 steps each proved in one
-`PROOF1`, in 15 to 20 seconds end to end from the client. Surround games proved
-here have settled on Sepolia.
+On a 36-core, 125 GiB machine, Surround games of 68 to 529 steps each proved in
+one `PROOF2`, in 15 to 25 seconds end to end from the client, peaking at 2.7 to
+6.8 GiB. A `PROOF2` settlement needs an adapter instance pinned to its virtual
+OS program; adapters deployed before 2026-10-30 pin `PROOF1`'s. The `PROOF1`
+backend it replaced settled Surround games on Sepolia.

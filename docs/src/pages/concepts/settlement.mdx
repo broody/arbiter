@@ -88,11 +88,11 @@ with segments of at most `proof_max_steps` steps through a prover, or
 - **Whole game in one proof when it fits.** Final-signature authentication and
   transcript binding keep traces small. Surround's 311-action game is 1.57M
   trace instructions, and games of up to 529 steps have been proved in one
-  `PROOF1`.
+  proof (`PROOF1` until 2026-10-30, `PROOF2` since).
 - **Segments otherwise.** Each proof covers a segment. With every seat's
   approval it commits as a checkpoint; without, it extends the dispute
-  candidate. This works with `PROOF1` today. `PROOF2`, the large path, only
-  reduces how many segments are needed.
+  candidate. With `PROOF2`, which arbiter's prover makes, Surround's longest
+  stress game is still one segment.
 - **No per-move recursive proving.** STARK proof size barely grows with trace
   length: Surround's 68-action proof is 233 KB and its 311-action proof is about
   251 KB. Verification is a roughly flat charge per proof, so a recursive chain

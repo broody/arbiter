@@ -7,7 +7,7 @@ yourself:
 
 | Process | What it is |
 | --- | --- |
-| backend | StarkWare's `starknet_transaction_prover` (the service behind the hosted prover), built from source at the sequencer revision in [`pins.json`](pins.json), with arbiter's [memory patches](#memory). It runs the adapter's virtual transaction in the virtual OS and proves it with Stwo in process. **PROOF1.** |
+| backend | StarkWare's `starknet_transaction_prover` (the service behind the hosted prover), built from source at the sequencer revision in [`pins.json`](pins.json), with its prover crates taken from Outis's striped branch of them ([Memory](#memory)). It runs the adapter's virtual transaction in the virtual OS and proves it with Stwo in process. **PROOF2.** |
 | gateway | [`server.mjs`](server.mjs): the same JSON-RPC API in front of the backend. It admits only arbiter settlements (below), queues and rate-limits them, proves each on its own [isolated worker](#isolation), and maps capacity errors. |
 
 Point a client at the gateway: `proveSession({ proverUrl: 'http://host:3100', ... })`.
@@ -31,185 +31,76 @@ Before a request takes a proving slot, the gateway checks:
 The backend repeats its own checks (account validation, zero fees). Per-client
 rate limits and a bounded queue keep one client from holding the prover.
 
-## Results (Sepolia, 2026-09-26)
+## Results (Sepolia, 2026-10-30)
 
-On a 36-core, 125 GiB machine (`TARGET_CPU=native`), with the RPC node on
-another host behind an SSH tunnel:
-- **Settled:** Surround's `cgos_13_277988` (203 steps, W+20.5) was proved by
-  this server and settled on Sepolia by the channel's adapter.
-- **Identical proofs:** re-proving five recorded settlements at their original
-  base blocks gave proofs byte-identical to the hosted prover's, with the same
-  facts (Surround's `offchain/server/tools/prove-bench.mjs`).
-- **Refusals:** a request from a non-allowlisted adapter (Surround's retired
-  v1 class) was refused in 0.7 s, before proving.
+On a 36-core, 125 GiB machine (i9-10980XE, `TARGET_CPU=native`, 36 threads),
+with the RPC node on another host behind an SSH tunnel. Each game is a fresh
+Surround game nobody opened, proved from its terms at epoch 0 against Sepolia's
+v8 adapter, as captured by Surround's `offchain/server/tools/device-bench.mjs`
+(nothing broadcast). A fresh backend per game, under [`measure.sh`](measure.sh):
 
-| Game | Steps | OS run | Proof | Total (client) | Hosted prover |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| cgos_9_1682833 | 68 | 7.8 s (cold class cache) | 7.4 s | 16.7 s | 4.9 s |
-| cgos_13_277988 | 203 | 3.7 s | 10.0 s | 15.2 s | — |
-| kgs_2019_04_26_17 | 319 | 3.8 s | 13.2 s | 18.7 s | 6.9 s |
-| stress_19_3 | 479 | 4.6 s | 14.1 s | 20.2 s | 8.4 s |
-| stress_19_2 | 529 | 4.8 s | 14.1 s | 20.4 s | 8.3 s |
+| Game | Steps | OS steps | OS run | Proof | Total (client) | Peak |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| cgos_9_1682833 | 68 | 653,017 | 5.3 s (cold class cache) | 9.7 s | 15.0 s | 2.7 GiB |
+| cgos_13_277988 | 203 | 1,071,564 | 5.7 s | 12.0 s | 17.7 s | 4.1 GiB |
+| kgs_2019_04_26_17 | 319 | 1,426,325 | 7.2 s | 11.3 s | 18.5 s | 4.3 GiB |
+| kgs_2019_04_10_39 | 311 | 1,437,879 | 6.3 s | 10.7 s | 17.0 s | 4.3 GiB |
+| stress_19_3 | 479 | 2,134,063 | 7.1 s | 17.6 s | 24.8 s | 6.6 GiB |
+| stress_19_2 | 529 | 2,379,871 | 7.9 s | 15.8 s | 23.7 s | 6.8 GiB |
 
-With `prefetch_state` off, the OS run of the 203-step game took 31.4 s: the
-backend then reads state one RPC call at a time, and the node was remote. Keep
-it on, and keep the node close. For memory, see [Memory](#memory).
+- **Identical proofs:** every proof, its facts and its message equal those of
+  Outis's device prover (outis-wallet/prover v0.3.2, wasm or native) for the
+  same transaction at the same block. That prover's own references are
+  StarkWare's transaction prover's, unpatched, at the same sequencer revision.
+- **Warm:** one backend proving four of them in a row took 15–20 s each (OS
+  run 5.0–6.3 s, proof 10.0–14.1 s), and peaked at 7.2 GiB.
+- **Refusals:** Sepolia's v8 adapter pins PROOF1's virtual OS program, so the
+  gateway refuses its transactions with `1101` before proving. Settling needs
+  an adapter instance pinned to PROOF2's ([PROOF1 adapters](#proof1-adapters)).
+
+The PROOF1 backend this one replaced (2026-09-26 to 2026-10-30) proved the
+same games in 15–20 s end to end, peaking at 9.0 GiB in its `bounded` mode and
+40 GiB in `standard`, and settled a Surround game on Sepolia. With
+`prefetch_state` off, a remote node made its OS run of the 203-step game take
+31.4 s: keep it on, and keep the node close.
 
 **Submitting proofs.** Estimate and send `settle` through an RPC node whose
-versioned constants match the sequencer's. Pathfinder v0.24.0 rejected this
-PROOF1 in simulation ("Proof version PROOF1 is not allowed under this protocol
-version") while the Sepolia sequencer accepted it; upstream's 0.14.4 constants
-allow PROOF1 and PROOF2, and a second virtual OS program
-(`0x1c7be3…d324`) that PROOF2 adapters may need to pin.
+versioned constants match the sequencer's: Pathfinder v0.24.0 rejected a PROOF1
+in simulation ("Proof version PROOF1 is not allowed under this protocol
+version") that the Sepolia sequencer accepted. Not yet checked with PROOF2.
 
 ## Memory
 
-The config's `memory` chooses how the backend holds a proof's working data.
-Both modes produce byte-identical proofs and facts, so clients and the chain
-cannot tell them apart; only memory and time differ.
+The backend takes its prover crates from Outis's branch of
+starkware-libs/proving ([`pins.json`](pins.json)): `e0035ffc`, the revision the
+sequencer locks, plus a striped prover, in which each committed column keeps
+one stripe of its eight and the rest is evaluated again when read (the
+branch's `OUTIS.md`). The proofs are byte-identical to upstream's, and the same
+crates prove Outis's privacy-pool transactions on phones and in browsers. There
+is one mode: PROOF1's `memory` modes and their patches are gone, and the
+gateway refuses a config that still sets `memory`.
 
-| `memory` | What the backend keeps | Largest game: peak | Proof |
-| --- | --- | ---: | ---: |
-| `standard` | Upstream: every column expanded to 8x the trace, preprocessed trees and a column pool shared by all proofs | 40 GiB | 14 s |
-| `bounded` (default) | Each proof's own trees; polynomial coefficients instead of expanded columns, committed a stripe at a time; Merkle layers kept, queried rows evaluated from coefficients | 9 GiB | 19 s |
+- **Budget.** The largest game peaks at about 7 GiB (above), and a backend
+  gives its memory back between proofs, to about 1.3 GiB, with no allocator
+  settings (PROOF1's needed a heap trim or an mmap threshold). Each worker's
+  limit, `workers.job_memory`, is 12 GiB by default; a job that reaches it
+  fails alone ([Isolation](#isolation)). So a 16 GiB host can run one worker,
+  and a 32 GiB host two, with the limit lowered to leave the system room (not
+  tried on such hosts).
+- **Threads.** Workers that share the machine prove faster with a share of its
+  cores each than with one thread per core each, so with `max_concurrent`
+  above 1 each worker gets `RAYON_NUM_THREADS` of cores divided by workers
+  (`workers.job_threads`, or `workers.job_cpus` rounded when that is set).
+  Several workers' throughput hasn't been measured on this backend yet.
 
-**Choosing.** `bounded` is the default: on a large machine it has about the
-same throughput as `standard` on half the memory or less, and it fits hosts
-where `standard` does not. `standard` has the lower latency for one job. A
-`bounded` worker needs about 10 GiB for the largest game, so a 16 GiB host can
-run one worker and a 32 GiB host two, with `workers.job_memory` lowered to
-leave the system room (not tried on such hosts). Each worker's memory limit
-(`workers.job_memory`, by default 56 GiB in `standard` and 16 GiB in
-`bounded`) leaves headroom over its peak (a fresh backend's cgroup, cold class
-cache included, peaked at 39.3 and 9.9 GiB on the largest live job, through
-[`measure.sh`](measure.sh)), and a job that reaches it fails alone
-([Isolation](#isolation)). On the 36-core, 125 GiB machine below, with copies
-of the largest game started together (prover time only, three proofs per
-worker):
-
-| `memory` | Workers × threads | Peak per worker | All workers, at most | Seconds per proof |
-| --- | ---: | ---: | ---: | ---: |
-| `standard` | 1 × 36 | 41.1 GiB | 41 GiB | 15.4 |
-| `standard` | 2 × 18 | 40.9 GiB | 82 GiB | 12.9 |
-| `bounded` | 1 × 36 | 9.8 GiB | 10 GiB | 19.2 |
-| `bounded` | 3 × 12 | 9.1 GiB | 27 GiB | 13.4 |
-| `bounded` | 4 × 9 | 8.6 GiB | 34 GiB | 13.2 |
-| `bounded` | 6 × 6 | 8.6 GiB | 52 GiB | 12.6 |
-
-(The earlier default deployment, `standard` with two workers of 36 threads
-each and the mmap threshold: 14.0 s per proof.)
-
-Workers that share the machine prove faster with a share of its cores each
-than with one thread per core each, so with `max_concurrent` above 1 each
-worker gets `RAYON_NUM_THREADS` of cores divided by workers
-(`workers.job_threads`, or `workers.job_cpus` rounded when that is set). On
-this machine: `bounded` with `max_concurrent: 6`, or `standard` with 2 where
-the latency of a single job matters more than memory.
-
-**How `bounded` works.** It keeps each column's coefficients (the trace's
-size) where `standard` keeps its evaluation on a domain 8 times larger. The
-ideas below come from provingly's client-side prover (a striped prover after
-ryun1's public description), which proves Outis privacy-pool transactions in
-about 2.5 GiB on phones and in browsers.
-- **Striped commitment.** In bit-reversed order, the k-th eighth of a
-  column's expanded evaluation (a stripe) is its evaluation on a coset of the
-  trace's size, and the leaves that read the k-th stripe of every column are
-  the leaves of a lifted tree of those stripes. So the backend evaluates one
-  stripe of every column at a time, hashes its leaves, and builds the layers
-  above on all the leaves. A commitment never holds more than one stripe of
-  each column; earlier, `bounded` expanded one whole tree (15 GiB for the
-  largest game's base trace).
-- **Openings from coefficients.** The Merkle layers are kept (0.5 GiB for a
-  tree of 2^23 leaves), and a queried row is evaluated from the coefficients
-  (provingly's `domain_eval`: one pass over each column per group of queries)
-  instead of re-expanding and re-hashing every tree when it is opened, which
-  took 8 s.
-- **Regeneration.** Constraint evaluation and the FRI quotients read the first
-  two eighths and the first eighth of each column; `bounded` evaluates those
-  from the coefficients, all of a component's columns at once.
-
-**Allocator.** A backend built with the current patches gives glibc's freed
-heap back after each proof (`PROVER_MALLOC_TRIM=1`), so a long-running worker
-stays flat between proofs (about 1 GiB in `bounded`). Without it, freed
-proving buffers stay in the heap and a worker grows with every proof (ten
-mixed proofs: `standard` 22 to 50 GiB, `bounded` 5 to 12 GiB, still rising).
-The gateway sets it for builds whose `build.json` records the current patches,
-and otherwise falls back to a fixed 1 MiB mmap threshold
-(`MALLOC_MMAP_THRESHOLD_`), which also keeps workers flat but costs about 6%
-of proof time in `standard` and 23% in `bounded`.
-
-**Measurements** (2026-10-09, same machine, `TARGET_CPU=native`, trim): each
-proof in a fresh `prove_pie` process ([Offline proving](#offline-proving)),
-from the PIEs of five fixtures proved at Sepolia block 16295160 against the
-epoch-0 measurement games on the v2 channel (Surround's `os-job.mjs`). Peak is
-the process's peak resident memory; time is the proof alone (the OS run, 4 to
-9 s, comes before it).
-
-| Game | Steps | OS steps | `standard` | `bounded` | `standard` proof | `bounded` proof |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| cgos_9_1682833 | 68 | 798,153 | 24.7 GiB | 6.8 GiB | 8.0 s | 11.5 s |
-| cgos_13_277988 | 203 | 1,169,043 | 28.1 GiB | 7.4 GiB | 9.8 s | 13.7 s |
-| kgs_2019_04_26_17 | 319 | 1,480,565 | 36.2 GiB | 9.6 GiB | 12.6 s | 17.9 s |
-| stress_19_3 | 479 | 2,130,431 | 39.9 GiB | 9.3 GiB | 13.5 s | 18.5 s |
-| stress_19_2 | 529 | 2,357,997 | 38.6 GiB | 9.0 GiB | 14.2 s | 18.9 s |
-
-- **Identical proofs:** every proof of these fixtures, in both modes, fresh
-  or long-running, alone or with up to six workers, offline or through the
-  gateway, matched the proof and facts the stock code path gave live for the
-  same job.
-- **Where the peak is:** in `standard`, the Cairo base and interaction
-  commitments (15 and 13 GiB of expanded columns). In `bounded`, the Cairo
-  witness (about 7 GiB for the largest game) plus one stripe of the trace
-  during the commitments, or the regenerated columns of the largest components
-  during constraint evaluation.
-- **Earlier `bounded`** (whole-tree commitments, trees rebuilt when opened,
-  mmap threshold): 21.7 GiB and 32.9 s for the largest game.
-
-**Patches.** [`patches/`](patches) carries the work from Templar's
-prover-memory, cairo-memory and bounded-memory experiments and provingly's
-striped prover, one patch per repository against the exact revisions the
-sequencer's `Cargo.lock` pins (proving-utils 3035dd0, stwo 489a0f3, stwo-cairo
-9b6be27, stwo-circuits 5ef951a, in `pins.json`). They change how the prover
-stores data, not what it proves. Without `PROVER_LOW_MEMORY=1` the backend
-runs upstream's code paths. `stwo`'s own tests (270, with and without
-`parallel`) pass with them. The sequencer patch adds the backend's settings,
-which the gateway sets from `memory`:
-
-| Variable | Meaning |
-| --- | --- |
-| `PROVER_LOW_MEMORY=1` | Per-proof trees and buffer pools, nothing shared between proofs. |
-| `PROVER_BOUNDED_CAIRO_COLUMNS`, `PROVER_BOUNDED_CIRCUIT_COLUMNS` | `N > 0`: coefficients instead of expanded columns (above), FRI quotients `N` columns at a time. Require `PROVER_LOW_MEMORY=1`. |
-| `PROVER_RECOMPUTE_CAIRO_COMMITMENTS`, `PROVER_CAIRO_COEFFICIENTS` | Low-memory details, default 1. |
-| `PROVER_MALLOC_TRIM=1` | Trim glibc's heap after each proof. |
-| `PROVER_PIE_DUMP=DIR` | Write each proof's Cairo PIE to `DIR` ([Offline proving](#offline-proving)). |
-
-Moving to a new sequencer revision means regenerating the patches against the
-revisions its lockfile pins; `build.sh` refuses a mismatch. The gateway
-refuses `bounded` on a build whose patches are not the current ones.
-
-The patches modify StarkWare's repositories, which are licensed Apache-2.0,
-and keep that license; the rest of arbiter is MIT ([`LICENSE`](../LICENSE)).
-
-## Offline proving
-
-A live job can only be proved again while the node still serves storage
-proofs for its block (about 10,000 blocks on our node). To measure the prover
-alone, run a backend built by `build.sh` (a stock backend has no dump) with
-`PROVER_PIE_DUMP=DIR`, for example under [`measure.sh`](measure.sh): it writes
-each proof's Cairo PIE to `DIR` before proving it. Then
-
-```bash
-PROVER_LOW_MEMORY=1 PROVER_BOUNDED_CAIRO_COLUMNS=16 PROVER_BOUNDED_CIRCUIT_COLUMNS=16 \
-  ~/.cache/arbiter-prover/bin/prove_pie [--repeat N] PIE.zip...
-```
-
-proves them as the backend does, in the memory mode its environment selects,
-and prints one JSON line per proof: the proof's and facts' SHA-256 (the same
-hashes as a client's), the proof time and the peak resident memory, reset
-before each proof. With `PROVE_PIE_LOG` set to a tracing filter, for example
-`warn,privacy_prove=info,stwo=info,stwo_cairo_prover=info`, every span it
-enters is logged on stderr with the process's resident and peak memory, which
-shows the phase that sets the peak.
+**The patch.** [`patches/sequencer.patch`](patches/sequencer.patch) is a Cargo
+`[patch]` that points every crate the sequencer takes from
+starkware-libs/proving (25 of them) at the pinned branch, and the lockfile it
+gives; `build.sh` checks that the lock takes them all from there. Moving to a
+new sequencer revision means a branch of proving at the revision that one
+locks, and a new patch. The patch and the branch modify StarkWare's
+repositories, which are licensed Apache-2.0, and keep that license; the rest of
+arbiter is MIT ([`LICENSE`](../LICENSE)).
 
 ## Isolation
 
@@ -233,7 +124,7 @@ backends that prove one job at a time, each in its own cgroup v2 group
 - **Network.** Workers keep network access: the in-process backend reads chain
   state from the RPC node while it proves. Transcripts and signatures are
   public, so there is no witness to keep in (Templar's no-network steps
-  protected private ones). PROOF2's offline prove step can run without it.
+  protected private ones).
 - **Delegation.** The groups live under a delegated cgroup subtree,
   `workers.cgroup_root`. With `"self"` (the default) the gateway's own cgroup
   is the subtree: the gateway moves itself into a `gateway` leaf and runs its
@@ -244,7 +135,7 @@ backends that prove one job at a time, each in its own cgroup v2 group
   development only; `backend_url` forwards to a backend you run yourself, with
   no isolation.
 
-Checked with the real backend (2026-09-27): two `bounded` workers proved the
+Checked with the PROOF1 backend (2026-09-27): two `bounded` workers proved the
 529- and 319-step games at once (peaks 21.8 and 20.1 GiB under 28 GiB, then
 back to about 1 GiB); with an 8 GiB limit the 529-step game failed after 15 s
 with reason `memory` and its worker came back; with a 5 s timeout the job
@@ -254,20 +145,22 @@ failed with reason `timeout` and its backend was killed with its group.
 
 Requirements: Rust via rustup (the build installs `nightly-2026-01-15`),
 cairo-lang 0.14.3a3 for `cairo-compile` (the virtual OS compiles at build time),
-clang, cmake and about 5 GB of disk for the build. The first build takes
-about 15 minutes on 36 cores.
+clang, cmake and about 5 GB of disk for the build. A build took about 4
+minutes on 36 cores.
 
 ```bash
 pip install cairo-lang==0.14.3a3            # or point CAIRO_LANG_BIN at its bin/
 TARGET_CPU=native prover/build.sh
 ```
 
-The build clones the pinned sequencer and the four proving dependencies it
-locks into `~/.cache/arbiter-prover` (`ARBITER_PROVER_BUILD`), applies
-[`patches/`](patches), builds the backend with in-process Stwo proving against
-the patched copies, installs the Sierra compiler it uses at runtime, and
-records the build (including the patches' hashes) in `build.json`.
-`TARGET_CPU=native` makes proofs faster but ties the binary to the CPU.
+The build clones the pinned sequencer into `~/.cache/arbiter-prover`
+(`ARBITER_PROVER_BUILD`), applies [`patches/`](patches), builds the backend with
+in-process Stwo proving (Cargo fetches the pinned proving branch), installs the
+Sierra compiler it uses at runtime, and records the build (including the
+patches' hashes) in `build.json`. The gateway starts workers only from a build
+with the current patches, so a PROOF1 build left in the directory is refused
+until `build.sh` runs again. `TARGET_CPU=native` makes proofs faster but ties
+the binary to the CPU.
 
 ## Run
 
@@ -279,8 +172,7 @@ Copy [`config.example.json`](config.example.json) and set:
 | `virtual_os_program` | The program adapters pin and the backend runs (`pins.json`). |
 | `adapter_classes` | Allowlisted adapter class hashes. |
 | `max_concurrent`, `max_queued` | Workers, each proving one job at a time (see [Memory](#memory) for the budget and threads), and waiting requests. |
-| `memory` | `bounded` (default) or `standard`: see [Memory](#memory). |
-| `workers` | `cgroup_root` (`"self"`), `base_port` (3200; worker `i` listens on `base_port + i` on localhost), `job_memory` (by `memory`: 56G or 16G), `job_cpus` (no quota), `job_threads` (proving threads; by default cores divided by `max_concurrent`, see [Memory](#memory)), `pids_max` (1024), `sandbox` (`"cgroup"`, or `"none"` for development): see [Isolation](#isolation). |
+| `workers` | `cgroup_root` (`"self"`), `base_port` (3200; worker `i` listens on `base_port + i` on localhost), `job_memory` (12G), `job_cpus` (no quota), `job_threads` (proving threads; by default cores divided by `max_concurrent`, see [Memory](#memory)), `pids_max` (1024), `sandbox` (`"cgroup"`, or `"none"` for development): see [Isolation](#isolation). |
 | `build_dir` | The build to run (default `$ARBITER_PROVER_BUILD`, else `~/.cache/arbiter-prover`). |
 | `backend_url` | Instead of workers, forward to a backend you run yourself, without isolation. |
 | `prefetch_state` | Fetch the transaction's state up front with one simulation (default true). |
@@ -325,10 +217,11 @@ docker run -d --name arbiter-prover --cgroupns=private --cap-add SYS_ADMIN \
 remount; `--network host` lets the gateway reach a local RPC node and listen
 on its configured port.
 
-Checked 2026-09-27: the image (`x86-64-v3`) ran its gateway as `arbiter` with
-no capabilities and proved the 529-step game on a worker in 26.6 s (24.8 s
-with a `native` build), and the unit's cgroup settings, as a user service,
-proved the 319-step game; both proofs were byte-identical to native builds'.
+Checked with the PROOF1 backend (2026-09-27): the image (`x86-64-v3`) ran its
+gateway as `arbiter` with no capabilities and proved the 529-step game on a
+worker in 26.6 s (24.8 s with a `native` build), and the unit's cgroup
+settings, as a user service, proved the 319-step game; both proofs were
+byte-identical to native builds'. Not yet rebuilt with the PROOF2 backend.
 
 ## API
 
@@ -337,7 +230,7 @@ JSON-RPC 2.0 on `/`:
   `{ proof, proof_facts, l2_to_l1_messages }`, as the hosted prover does;
 - `starknet_specVersion` is the backend's version;
 - `arbiter_info` returns the chain, OS program, allowlisted classes, proof paths,
-  memory mode, workers (ready, busy, restarts) and limits.
+  workers (ready, busy, restarts) and limits.
 
 | Code | Meaning |
 | --- | --- |
@@ -345,7 +238,7 @@ JSON-RPC 2.0 on `/`:
 | `1000` | Not a zero-fee INVOKE_V3, malformed, or calldata too large (settle in checkpoints) |
 | `1100` | Sender is not an allowlisted arbiter adapter |
 | `1101` | The adapter pins another virtual OS program |
-| `1102` | The transaction exceeds PROOF1; settle in checkpoints |
+| `1102` | The transaction exceeds the prover's capacity; settle in checkpoints (PROOF1's "Not enough twiddles"; not yet seen on this backend) |
 | `1103` | The proving job failed: out of memory, timed out, or its backend stopped (`data.reason`); retry later |
 | `-32005` | Queue full; retry later |
 | `-32029` | Rate limited |
@@ -353,16 +246,15 @@ JSON-RPC 2.0 on `/`:
 Backend errors such as `55` (account validation failed, e.g. an illegal
 transcript) pass through unchanged.
 
-## PROOF2
+## PROOF1 adapters
 
-The network does not accept PROOF2 yet (expected about 2026-10-10). Then a
-large-path backend joins this one: Templar's virtual-OS runner and
-bounded-memory prover (`broody/proving`), which fit a full proof in about
-28 GiB. The gateway will route a job that overflows PROOF1 (code `1102` today)
-to it. `arbiter_adapter` already accepts PROOF2 facts. If PROOF2 proofs attest
-the newer virtual OS program rather than the one adapters pin today, each game
-deploys one new adapter instance pinning it and allowlists it; channels and
-games are unaffected.
+Until 2026-10-30 this backend made PROOF1, at sequencer `625929a` with
+arbiter's bounded-memory patches. Adapters deployed before then pin PROOF1's
+virtual OS program (`PROOF1_VIRTUAL_OS_PROGRAM` in `@arbiter/sdk/proving`), and
+this backend's proofs can't settle on them. A game deploys one new instance of
+the same adapter class pinning PROOF2's (`VIRTUAL_OS_PROGRAM`), and names it in
+the terms of games signed after that; the channel's allowlist is by class, so
+channels and older games are unaffected.
 
 ## Tests
 

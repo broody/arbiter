@@ -24,13 +24,16 @@ const NO_ACKS = [ZERO_SIGNATURE, ZERO_SIGNATURE];
 
 /** Native verification accepts proof bases at least this many blocks behind the head. */
 export const NATIVE_CONFIRMATIONS = 10;
-/** PROOF1 is the small (log20) path, PROOF2 the large path; arbiter_adapter accepts both. */
+/** PROOF1 is the small (log20) path, PROOF2 the large path; arbiter_adapter accepts both, and arbiter's prover makes PROOF2. */
 export const PROOF_VERSIONS = ['PROOF1', 'PROOF2'];
 /**
- * Virtual OS program attested in Starknet v0.14.4 proof facts (Sepolia, 2026-09).
+ * The virtual OS program PROOF2 proofs attest (Starknet v0.14.4 with proving
+ * e0035ffc, which Sepolia verifies since 2026-10-28): what arbiter's prover runs.
  * Each adapter instance pins one at deployment; a network OS upgrade needs a new instance.
  */
-export const VIRTUAL_OS_PROGRAM = '0x53f6c9fcfd31d27279ff7d7e422b44623550a732b59fe193354a7316a96daa1';
+export const VIRTUAL_OS_PROGRAM = '0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324';
+/** The one PROOF1 proofs attested (Starknet v0.14.4, Sepolia, 2026-09), which adapters deployed before then pin. */
+export const PROOF1_VIRTUAL_OS_PROGRAM = '0x53f6c9fcfd31d27279ff7d7e422b44623550a732b59fe193354a7316a96daa1';
 
 /** The newest block a proof can use as its base, or null while the anchor is too recent. */
 export function nativeProofBlock(head, anchorBlock) {

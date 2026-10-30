@@ -193,9 +193,9 @@ fn open_dispute(ref self: ContractState, game_id: felt252, epoch: u32) {
 |---|---|
 | Built and tested | Protocol core (v6), referee clocks, randomness from the referee, games opened by their players' signatures, channel state machine, Dojo binding, proof adapter (with mocked proof facts), JS hashing and replay, ratings (Surround's rated games run on them), counter example (pure, as a Dojo world, rated, and with an adapter) |
 | Proven on Sepolia | Surround (Go) settles full games with one native SNIP-36 proof through `arbiter_adapter`; see [Surround's results](https://github.com/broody/surround/blob/main/offchain/RESULTS.md) |
-| Self-hosted proving | [`prover/`](prover/README.md): StarkWare's transaction prover built from source (PROOF1) behind a gateway that proves only allowlisted arbiter adapters. Settled a Surround game on Sepolia; its proofs are byte-identical to the hosted prover's |
+| Self-hosted proving | [`prover/`](prover/README.md): StarkWare's transaction prover built from source (PROOF2, with Outis's striped prover crates) behind a gateway that proves only allowlisted arbiter adapters. Its proofs of Surround games are byte-identical to Outis's device prover's; the PROOF1 build it replaced settled a Surround game on Sepolia |
 | Keeper | [`keeper/`](keeper/README.md): archives and forwards each game's verified steps, records equivocation, answers disputes, resolves and settles, referees timed games and gives them their randomness. Tested end to end on a local Katana |
-| Not yet | PROOF2 large-path proving (network support expected ~2026-10-10), more than 2 seats |
+| Not yet | A settlement with a PROOF2 proof (it needs an adapter instance pinned to PROOF2's virtual OS program), more than 2 seats |
 
 See [DESIGN.md](DESIGN.md) for the protocol details, the proving strategy and
 the roadmap.

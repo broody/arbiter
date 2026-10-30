@@ -1,6 +1,6 @@
 // arbiter prover gateway: a `starknet_proveTransaction` JSON-RPC endpoint (the
 // API `@arbiter/sdk/proving` calls) in front of a proving backend, today
-// StarkWare's starknet_transaction_prover built by build.sh (PROOF1). It runs
+// StarkWare's starknet_transaction_prover built by build.sh (PROOF2). It runs
 // the backend as isolated workers, one job each (workers.mjs), or forwards to an
 // external backend at `backend_url`.
 //
@@ -29,36 +29,22 @@ import { Slots, cgroupSandbox, post, processSandbox, startWorkers } from './work
 export const INVALID_REQUEST = -32600, METHOD_NOT_FOUND = -32601, INVALID_PARAMS = -32602, INTERNAL = -32603;
 export const SERVICE_BUSY = -32005, RATE_LIMITED = -32029;
 export const BLOCK_NOT_FOUND = 24, INVALID_TRANSACTION = 1000;
-export const NOT_ALLOWED = 1100, WRONG_OS_PROGRAM = 1101, EXCEEDS_PROOF1 = 1102, JOB_FAILED = 1103;
+export const NOT_ALLOWED = 1100, WRONG_OS_PROGRAM = 1101, EXCEEDS_CAPACITY = 1102, JOB_FAILED = 1103;
 
 // The adapter's pinned virtual OS program getter (arbiter_adapter `os_program`).
 const OS_PROGRAM_SELECTOR = hash.getSelectorFromName('os_program');
 
 const DEFAULTS = {
   host: '127.0.0.1', port: 3100, max_concurrent: 1, max_queued: 8, max_calldata: 20000,
-  max_body_bytes: 1 << 20, rate_per_minute: 12, backend_timeout_ms: 600000, memory: 'bounded', prefetch_state: true,
-};
-const WORKER_DEFAULTS = { cgroup_root: 'self', base_port: 3200, job_cpus: null, job_threads: null, pids_max: 1024, sandbox: 'cgroup' };
-
-/**
- * The backend's memory modes (config `memory`): the environment workers start
- * with and each worker's default memory limit (`workers.job_memory`). Both
- * produce the same proofs: `bounded` keeps polynomial coefficients instead of
- * expanded columns and needs about a quarter of the memory, for about 1.3x the
- * proof time (README). It needs a backend built with the current patches.
- */
-export const MEMORY_MODES = {
-  standard: { env: {}, job_memory: '56G' },
-  bounded: { env: { PROVER_LOW_MEMORY: '1', PROVER_BOUNDED_CAIRO_COLUMNS: '16', PROVER_BOUNDED_CIRCUIT_COLUMNS: '16' },
-    job_memory: '16G', patched: true },
+  max_body_bytes: 1 << 20, rate_per_minute: 12, backend_timeout_ms: 600000, prefetch_state: true,
 };
 /**
- * How a worker gives a proof's buffers back to the system, so that it does not
- * grow from proof to proof: a backend built with the current patches trims
- * glibc's heap after each proof; any other gets a fixed 1 MiB mmap threshold,
- * which costs about 6% of proof time in `standard`.
+ * Each worker's memory limit (`workers.job_memory`) leaves headroom over the
+ * backend's peak: about 7.3 GiB for the largest game, and about 1.3 GiB
+ * between proofs, which the striped prover gives back (README, Memory).
  */
-const RELEASE_MEMORY = { trim: { PROVER_MALLOC_TRIM: '1' }, mmap: { MALLOC_MMAP_THRESHOLD_: '1048576' } };
+const WORKER_DEFAULTS = { cgroup_root: 'self', base_port: 3200, job_cpus: null, job_threads: null, job_memory: '12G', pids_max: 1024,
+  sandbox: 'cgroup' };
 const SANDBOXES = { cgroup: cgroupSandbox, none: processSandbox };
 
 class RpcError extends Error {
@@ -78,10 +64,10 @@ export function loadConfig(raw) {
     throw Error('Config needs at least one adapter class in adapter_classes');
   config.adapter_classes = new Set(config.adapter_classes.map(c => BigInt(c)));
   config.virtual_os_program = BigInt(config.virtual_os_program);
-  if (!Object.hasOwn(MEMORY_MODES, config.memory))
-    throw Error(`Config memory must be one of ${Object.keys(MEMORY_MODES).join(', ')}`);
+  // PROOF1's backend had memory modes; PROOF2's has one (README, Memory).
+  if (Object.hasOwn(config, 'memory')) throw Error('Config memory is no longer used: the PROOF2 backend has one mode; remove it');
   if (!config.backend_url) {
-    config.workers = { ...WORKER_DEFAULTS, job_memory: MEMORY_MODES[config.memory].job_memory, ...config.workers };
+    config.workers = { ...WORKER_DEFAULTS, ...config.workers };
     // Workers that share the machine prove faster with a share of its cores each
     // than with one thread per core each.
     config.workers.job_threads ??= config.workers.job_cpus ? Math.max(1, Math.round(config.workers.job_cpus))
@@ -141,8 +127,8 @@ export async function startGateway(rawConfig, { log = entry => console.log(JSON.
 
   const info = () => ({
     chain_id: config.chain_id, virtual_os_program: hex(config.virtual_os_program),
-    adapter_classes: [...config.adapter_classes].map(hex), proof_paths: ['PROOF1'], backend_spec_version: backendVersion,
-    memory: config.memory, backend: backend.status(),
+    adapter_classes: [...config.adapter_classes].map(hex), proof_paths: ['PROOF2'], backend_spec_version: backendVersion,
+    backend: backend.status(),
     limits: { max_concurrent: config.max_concurrent, max_queued: config.max_queued, max_calldata: config.max_calldata,
       rate_per_minute: config.rate_per_minute,
       ...(config.workers ? { job_memory: config.workers.job_memory, job_threads: config.workers.job_threads } : {}) },
@@ -168,7 +154,7 @@ export async function startGateway(rawConfig, { log = entry => console.log(JSON.
     catch (e) {
       if (e.rpcError) {
         const detail = `${e.rpcError.message} ${JSON.stringify(e.rpcError.data ?? '')}`;
-        if (detail.includes('Not enough twiddles')) fail(EXCEEDS_PROOF1, 'Transaction exceeds PROOF1 capacity; settle in checkpoints', e.rpcError);
+        if (detail.includes('Not enough twiddles')) fail(EXCEEDS_CAPACITY, 'Transaction exceeds the prover\'s capacity; settle in checkpoints', e.rpcError);
         fail(e.rpcError.code, e.rpcError.message, e.rpcError.data);
       }
       throw e;
@@ -266,7 +252,7 @@ export function patchHashes() {
     .map(f => [f, createHash('sha256').update(readFileSync(join(dir, f))).digest('hex')]));
 }
 
-/** Whether the build at `build` has the current patches, older ones, or none. */
+/** Whether the build at `build` has the current patches, older ones (a PROOF1 build, say), or none. */
 function buildPatches(build) {
   let recorded;
   try { recorded = JSON.parse(readFileSync(join(build, 'build.json'), 'utf8')).patches; } catch { return 'none'; }
@@ -279,13 +265,12 @@ async function workerBackend(config, { log, sandbox }) {
   const { build_dir: build, workers } = config;
   const binary = join(build, 'bin/starknet_transaction_prover');
   if (!existsSync(binary)) throw Error(`No backend at ${binary}: run prover/build.sh (or set build_dir)`);
-  const mode = MEMORY_MODES[config.memory];
-  // An unpatched backend ignores the PROVER_* settings and would prove in standard mode.
+  // Another build proves with other pins: a PROOF1 build's proofs carry another
+  // virtual OS program, and every job would fail the check after proving.
   const patches = buildPatches(build);
-  if (mode.patched && patches !== 'current')
-    throw Error(`memory: ${config.memory} needs a backend built with the ${patches === 'stale' ? 'current ' : ''}prover/patches: rerun prover/build.sh`);
-  const env = { ...mode.env, ...RELEASE_MEMORY[patches === 'current' ? 'trim' : 'mmap'],
-    ...(workers.job_threads ? { RAYON_NUM_THREADS: String(workers.job_threads) } : {}) };
+  if (patches !== 'current')
+    throw Error(`The backend at ${build} was not built with the ${patches === 'stale' ? 'current ' : ''}prover/patches: rerun prover/build.sh`);
+  const env = workers.job_threads ? { RAYON_NUM_THREADS: String(workers.job_threads) } : {};
   return startWorkers({
     size: config.max_concurrent, maxQueued: config.max_queued, command: binary, args: ['--no-cors'],
     basePort: workers.base_port, cgroupRoot: workers.cgroup_root, sandbox: sandbox ?? SANDBOXES[workers.sandbox],

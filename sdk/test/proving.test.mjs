@@ -41,7 +41,7 @@ function response(overrides = {}) {
     context: contextHash(counter, terms), epoch: t.epoch, startHash: t.startHash, endHash: t.endHash });
   return { proof: 'opaque-test-response-not-a-real-proof',
     l2_to_l1_messages: [{ from_address: hex(terms.prover), to_address: '0x0', payload: payload.map(hex) }],
-    proof_facts: [tag('PROOF1'), tag('VIRTUAL_SNOS'), OS, tag('VIRTUAL_SNOS0'), BigInt(t.block.block_number),
+    proof_facts: [tag('PROOF2'), tag('VIRTUAL_SNOS'), OS, tag('VIRTUAL_SNOS0'), BigInt(t.block.block_number),
       BigInt(t.block.block_hash), 9n, 1n, proofMessageHash(terms.prover, payload)].map(hex) };
 }
 
@@ -130,8 +130,8 @@ test('settlement calls the adapter with the end state and approvals', () => {
 
 test('native responses must carry exactly the requested transition', () => {
   assert.equal(validateNativeProof(counter, response(), expected).proof, response().proof);
-  const large = response(); large.proof_facts[0] = hex(tag('PROOF2'));
-  assert.equal(validateNativeProof(counter, large, expected).proofFacts, large.proof_facts);
+  const small = response(); small.proof_facts[0] = hex(tag('PROOF1'));
+  assert.equal(validateNativeProof(counter, small, expected).proofFacts, small.proof_facts);
   assert.throws(() => validateNativeProof(counter, response(), { ...expected, osProgram: undefined }), /OS program/);
   for (const mutate of [r => r.proof = '', r => r.l2_to_l1_messages.push(r.l2_to_l1_messages[0]),
     r => r.l2_to_l1_messages[0].from_address = '0x7', r => r.l2_to_l1_messages[0].to_address = '0x1',

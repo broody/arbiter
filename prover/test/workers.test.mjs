@@ -1,5 +1,5 @@
 // The gateway's proving workers without cgroups (the `none` sandbox): one job
-// per worker, a failed job's worker replaced, the memory mode's environment.
+// per worker, a failed job's worker replaced, the environment they start with.
 // Workers run mock-backend.mjs. cgroup.test.mjs repeats the isolation checks
 // under real cgroups.
 import assert from 'node:assert/strict';
@@ -12,20 +12,19 @@ import { alive, childPid, code, job, until, workerGateway } from './helpers.mjs'
 const setup = (options = {}) => workerGateway({ sandbox: processSandbox, ...options });
 const failed = reason => e => code(JOB_FAILED)(e) && e.rpcError.data.reason === reason;
 
-test('each worker proves one job at a time with the memory mode\'s environment', async () => {
-  const s = await setup({ config: { memory: 'bounded' } });
+test('each worker proves one job at a time, with its share of the cores', async () => {
+  const s = await setup();
   try {
     const started = Date.now();
     const [a, b] = await Promise.all([job(s.gateway.url, '0x6'), job(s.gateway.url, '0x6')]);
     assert.notEqual(a.proof, b.proof, 'two workers served the two jobs');
     assert(Date.now() - started < 550, 'in parallel');
     const threads = String(Math.max(1, Math.floor(availableParallelism() / 2)));
-    assert.deepEqual(a.env, { MAX_CONCURRENT_REQUESTS: '1', PROVER_BOUNDED_CAIRO_COLUMNS: '16', PROVER_BOUNDED_CIRCUIT_COLUMNS: '16',
-      PROVER_IP: '127.0.0.1', PROVER_LOW_MEMORY: '1', PROVER_MALLOC_TRIM: '1', PROVER_PORT: a.env.PROVER_PORT,
+    assert.deepEqual(a.env, { MAX_CONCURRENT_REQUESTS: '1', PROVER_IP: '127.0.0.1', PROVER_PORT: a.env.PROVER_PORT,
       RAYON_NUM_THREADS: threads });
     const info = await s.info();
     assert.deepEqual(info.backend, { sandbox: 'none', workers: 2, restarts: 0, ready: 2, busy: 0 });
-    assert.equal(info.limits.job_memory, '16G');
+    assert.equal(info.limits.job_memory, '12G');
     assert.equal(info.limits.job_threads, Number(threads));
   } finally { await s.close(); }
 });
@@ -74,19 +73,16 @@ test('a full queue answers busy', async () => {
   } finally { await s.close(); }
 });
 
-test('bounded memory, the default, needs a build with the current patches', async () => {
-  await assert.rejects(setup({ patched: false }), /needs a backend built with the prover\/patches/);
-  await assert.rejects(setup({ config: { memory: 'bounded' }, patched: 'stale' }), /built with the current prover\/patches/);
+test('workers start only from a build with the current patches', async () => {
+  // A build without build.json, or a PROOF1 build's (other patches), would prove with other pins.
+  await assert.rejects(setup({ patched: false }), /not built with the prover\/patches: rerun prover\/build.sh/);
+  await assert.rejects(setup({ patched: 'stale' }), /not built with the current prover\/patches: rerun prover\/build.sh/);
 });
 
-test('standard memory trims the heap with the current patches and sets an mmap threshold otherwise', async () => {
-  for (const [patched, release] of [[true, { PROVER_MALLOC_TRIM: '1' }], ['stale', { MALLOC_MMAP_THRESHOLD_: '1048576' }],
-    [false, { MALLOC_MMAP_THRESHOLD_: '1048576' }]]) {
-    const s = await setup({ config: { memory: 'standard', max_concurrent: 1, workers: { job_cpus: 3 } }, patched });
-    try {
-      const { env } = await job(s.gateway.url);
-      assert.deepEqual(env, { MAX_CONCURRENT_REQUESTS: '1', PROVER_IP: '127.0.0.1', PROVER_PORT: env.PROVER_PORT,
-        RAYON_NUM_THREADS: '3', ...release });
-    } finally { await s.close(); }
-  }
+test('job_cpus gives each worker that many threads', async () => {
+  const s = await setup({ config: { max_concurrent: 1, workers: { job_cpus: 3 } } });
+  try {
+    const { env } = await job(s.gateway.url);
+    assert.deepEqual(env, { MAX_CONCURRENT_REQUESTS: '1', PROVER_IP: '127.0.0.1', PROVER_PORT: env.PROVER_PORT, RAYON_NUM_THREADS: '3' });
+  } finally { await s.close(); }
 });

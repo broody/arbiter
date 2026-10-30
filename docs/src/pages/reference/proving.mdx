@@ -26,8 +26,9 @@ A proof starts from the channel's anchor, or from its candidate to extend it. A 
 | Name | Value | What it is |
 | --- | --- | --- |
 | `NATIVE_CONFIRMATIONS` | `10` | Native verification accepts proof bases at least this many blocks behind the head. |
-| `PROOF_VERSIONS` | `['PROOF1', 'PROOF2']` | The proof versions `arbiter_adapter` accepts: `PROOF1` is the small (log20) path, `PROOF2` the large path. |
-| `VIRTUAL_OS_PROGRAM` | `'0x53f6c9fcfd31d27279ff7d7e422b44623550a732b59fe193354a7316a96daa1'` | The virtual OS program attested in Starknet v0.14.4 proof facts (Sepolia, 2026-09). Each adapter instance pins one at deployment, and a network OS upgrade needs a new instance. `proveSession` checks against the adapter's pinned program, not this constant. |
+| `PROOF_VERSIONS` | `['PROOF1', 'PROOF2']` | The proof versions `arbiter_adapter` accepts: `PROOF1` is the small (log20) path, `PROOF2` the large path. Arbiter's prover makes `PROOF2`. |
+| `VIRTUAL_OS_PROGRAM` | `'0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324'` | The virtual OS program `PROOF2` proofs attest (Starknet v0.14.4 with proving `e0035ffc`, which Sepolia verifies since 2026-10-28), and arbiter's prover runs. Each adapter instance pins one at deployment, and a network OS upgrade needs a new instance. `proveSession` checks against the adapter's pinned program, not this constant. |
+| `PROOF1_VIRTUAL_OS_PROGRAM` | `'0x53f6c9fcfd31d27279ff7d7e422b44623550a732b59fe193354a7316a96daa1'` | The one `PROOF1` proofs attested (Sepolia, 2026-09), which adapters deployed before 2026-10-30 pin. Arbiter's prover no longer makes proofs they accept. |
 
 ## proveSession
 

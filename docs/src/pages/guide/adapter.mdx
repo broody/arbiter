@@ -162,9 +162,11 @@ pub mod CounterProver {
 ### Declare and deploy one instance per OS program
 
 The constructor pins the virtual OS program that proofs must attest. The SDK
-exports the current one as `VIRTUAL_OS_PROGRAM` (Starknet v0.14.4). A network OS
-upgrade needs a new adapter instance, and games whose terms are signed after it
-name the new address.
+exports the one arbiter's prover runs as `VIRTUAL_OS_PROGRAM` (`PROOF2`,
+Starknet v0.14.4). A network OS upgrade needs a new adapter instance, and games
+whose terms are signed after it name the new address. An instance that pins
+`PROOF1_VIRTUAL_OS_PROGRAM` (deployed before 2026-10-30) settles only `PROOF1`
+proofs, which arbiter's prover no longer makes.
 
 ### Allowlist the class in your channel
 
@@ -224,8 +226,9 @@ for. The prover can be StarkWare's hosted prover, or your own
 
 :::warning
 Estimate and send `settle` through an RPC node whose versioned constants match
-the sequencer's. A node on older constants may reject a valid `PROOF1` in
-simulation that the sequencer would accept.
+the sequencer's. A node on older constants may reject a valid proof in
+simulation that the sequencer would accept (Pathfinder v0.24.0 did, for a
+`PROOF1`).
 :::
 
 A keeper configured with a `prover` does all of this for you when it answers a
